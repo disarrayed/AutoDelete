@@ -1,0 +1,9 @@
+## Interface: 30300
+## Title: AutoDelete
+## Notes: Automatically delete specified items from your bags
+## Author: YourName
+## Version: 1.2.0
+## SavedVariables: AutoDeleteDB
+
+AutoDelete.lua
+Options.lua
