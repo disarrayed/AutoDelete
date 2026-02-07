@@ -1,72 +1,67 @@
-# AutoDelete
 
-A World of Warcraft addon for Wrath of the Lich King (3.3.5) that automatically deletes specified items from your bags as soon as they're looted.
+3. Restart the game or run `/reload`
 
-Perfect for getting rid of junk items, vendor trash, or anything you don't want cluttering your inventory.
-
-## Features
-
-- **Drag & Drop** — Drag items onto the list or the ElvUI bag button to add them
-- **Visual Item List** — Shows item icons and names with easy remove buttons
-- **Profile System** — Different deletion lists for different characters
-- **Search Filter** — Quickly find items in your deletion list
-- **Raw List View** — Advanced editing with `item:12345 # Item Name` format
-- **Auto-Add Gray Items** — Optionally auto-add all gray (junk) quality items on loot
-- **ElvUI Integration** — Drop target button on ElvUI bags (right-click for settings)
-- **Works in Combat** — Deletes items even during fights
-- **Throttled Scanning** — 0.75s between scans to avoid performance issues
-- **ElvUI-Style UI** — Clean thin borders matching modern UI addons
-
-## Installation
-
-1. Download or clone this repository
-2. Copy the `AutoDelete` folder into your `Interface/AddOns/` directory:
-   ```
-   World of Warcraft/Interface/AddOns/AutoDelete/
-   ├── AutoDelete.toc
-   ├── AutoDelete.lua
-   └── Options.lua
-   ```
-3. Restart WoW or type `/reload` if already in-game
+---
 
 ## Usage
 
 ### Commands
 
-| Command | Description |
-|---------|-------------|
-| `/del` | Opens the AutoDelete settings panel |
+| Command | Action |
+|-------|--------|
+| `/del` | Open AutoDelete settings |
 | `/autodelete` | Same as above |
 
 ### Adding Items
 
-There are several ways to add items to the deletion list:
+You can add items to the delete list by:
 
-1. **Drag & drop onto the item list** in the settings panel
-2. **Drag & drop onto the ElvUI bag button** (if ElvUI is installed)
-3. **Enable "Auto-add gray items"** to automatically catch all junk items
-4. **Use the raw list editor** to manually type item names or `item:ID` entries
+- Dragging items into the settings window
+- Dragging items onto the ElvUI bag button (if enabled)
+- Enabling automatic gray item deletion
+- Manually editing the raw item list
 
-### ElvUI Bag Button
+---
 
-If you use ElvUI, a small button appears on your bag frame:
-- **Drop items on it** to add them to the auto-delete list
-- **Right-click** to open the settings panel
-- Hover for a tooltip with instructions
+## ElvUI Support
+
+If ElvUI is installed, AutoDelete adds a small bag button:
+
+- Drop items on it to add them
+- Right-click to open settings
+- Tooltip explains usage
+
+ElvUI is optional.
+
+---
 
 ## Files
 
-| File | Description |
-|------|-------------|
-| `AutoDelete.toc` | Addon metadata and load order |
-| `AutoDelete.lua` | Core deletion logic, event handlers, ElvUI integration, slash commands |
-| `Options.lua` | Interface options panel with all UI elements |
+| File | Purpose |
+|----|----|
+| `AutoDelete.toc` | Addon metadata |
+| `AutoDelete.lua` | Core logic and event handling |
+| `Options.lua` | Settings UI |
+
+---
 
 ## Compatibility
 
-- **WoW Version:** 3.3.5 (Wrath of the Lich King)
-- **ElvUI:** Optional — bag button appears automatically if ElvUI is detected
-- **Other addons:** No known conflicts
+- **WoW Version:** Wrath of the Lich King 3.3.5a
+- **Server:** Project Ebonhold
+- **ElvUI:** Optional
+- **Greedy Scavenger:** Supported
 
-## Note
-This was created mostly with AI. I dont take any credit for it. I know just enough lua to get myself in trouble.
+---
+
+## Credits & Disclaimer
+
+This addon was built with significant assistance from **Claude (AI)**.
+
+I do **not** claim authorship of the underlying logic or design. My role was primarily:
+- Debugging
+- Testing
+- Iterating behavior
+- Guiding changes in the right direction
+
+My Lua knowledge is limited, and this project exists to solve a practical in-game problem rather than showcase original development work.
