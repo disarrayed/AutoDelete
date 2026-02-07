@@ -151,6 +151,8 @@ end
 -- ============================================================================
 
 local function ScanAndAddGrayItems()
+	if CursorHasItem() then return end
+
 	local db = GetDB()
 	local profile = GetActiveProfile(db)
 
@@ -185,6 +187,9 @@ local function ScanAndAddGrayItems()
 end
 
 local function TryDeleteOneMatchingItem()
+	-- Don't interfere if the player is holding an item (dragging)
+	if CursorHasItem() then return end
+
 	local db = GetDB()
 	local profile = GetActiveProfile(db)
 	

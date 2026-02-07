@@ -2,7 +2,7 @@
 ## Title: AutoDelete
 ## Notes: Automatically delete specified items from your bags
 ## Author: YourName
-## Version: 1.2.0
+## Version: 1.2.1
 ## SavedVariables: AutoDeleteDB
 
 AutoDelete.lua
