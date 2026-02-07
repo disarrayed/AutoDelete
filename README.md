@@ -1,4 +1,38 @@
+# AutoDelete
 
+AutoDelete is a lightweight World of Warcraft addon for **Wrath of the Lich King (3.3.5a)** that automatically deletes specified items from your bags as soon as they are looted.
+
+This addon is intended **specifically for Project Ebonhold**. It is not designed or tested for Retail, Classic Era, or other expansions.
+
+It also works correctly with the **Greedy Scavenger pet**, ensuring unwanted items are cleaned up immediately.
+
+---
+
+## What It Does
+
+- Automatically deletes items you choose when they are looted
+- Helps keep bags clean while leveling, farming, or grinding
+- Eliminates junk, vendor trash, or unwanted drops instantly
+
+---
+
+## Features
+
+- Drag-and-drop items into a delete list
+- Optional auto-delete for all gray (junk) items
+- Character-based profiles
+- Searchable item list
+- Raw item list editor for manual control
+- Optional ElvUI bag button integration
+- Safe throttling to avoid performance issues
+- Works during combat
+
+---
+
+## Installation
+
+1. Download or clone this repository
+2. Copy the `AutoDelete` folder into:
 3. Restart the game or run `/reload`
 
 ---
@@ -65,3 +99,4 @@ I do **not** claim authorship of the underlying logic or design. My role was pri
 - Guiding changes in the right direction
 
 My Lua knowledge is limited, and this project exists to solve a practical in-game problem rather than showcase original development work.
+
