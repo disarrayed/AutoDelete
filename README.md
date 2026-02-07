@@ -68,6 +68,5 @@ If you use ElvUI, a small button appears on your bag frame:
 - **ElvUI:** Optional — bag button appears automatically if ElvUI is detected
 - **Other addons:** No known conflicts
 
-## License
-
-MIT License — see [LICENSE](LICENSE) for details.
+## Note
+This was created mostly with AI. I dont take any credit for it. I know just enough lua to get myself in trouble.
