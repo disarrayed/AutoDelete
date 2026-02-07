@@ -1,7 +1,7 @@
 ## Interface: 30300
 ## Title: AutoDelete
 ## Notes: Automatically delete specified items from your bags
-## Author: YourName
+## Author: StormerJack and modifed by Disarrayed
 ## Version: 1.2.1
 ## SavedVariables: AutoDeleteDB
 
