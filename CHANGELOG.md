@@ -4,6 +4,19 @@ All notable changes to AutoDelete are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.3.0] - 2025-02-08
+
+### Added
+- Configurable scan speed with radio-style options: 0.75s, 10s, 30s, 2m, 5m, 10m
+- Auto-delete pauses while dragging an item, preventing interference with drag-and-drop
+
+### Changed
+- Replaced remove buttons with compact red X icons that no longer overlap the scrollbar
+- Improved vertical spacing between Scan Speed, Search, and item list sections
+
+### Fixed
+- Dragging items no longer gets interrupted by the auto-delete scanner
+
 ## [1.2.1] - 2025-02-06
 
 ### Fixed

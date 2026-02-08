@@ -24,6 +24,7 @@ local function MigrateDB(db)
 		enabled = db.enabled and true or false,
 		listText = db.listText or "",
 		autoGray = false,
+		scanInterval = 0.75,
 	}
 	db.chars[charKey] = charKey
 end
@@ -42,7 +43,7 @@ local function GetDB()
 	local charKey = GetCharKey() or "Default"
 	local profileKey = db.chars[charKey] or charKey
 	if not db.profiles[profileKey] then
-		db.profiles[profileKey] = { enabled = false, listText = "", autoGray = false }
+		db.profiles[profileKey] = { enabled = false, listText = "", autoGray = false, scanInterval = 0.75 }
 	end
 	if not db.chars[charKey] then
 		db.chars[charKey] = profileKey
@@ -55,7 +56,7 @@ local function GetActiveProfile(db)
 	local charKey = GetCharKey() or "Default"
 	local profileKey = (db and db.chars and db.chars[charKey]) or charKey
 	if not db.profiles[profileKey] then
-		db.profiles[profileKey] = { enabled = false, listText = "", autoGray = false }
+		db.profiles[profileKey] = { enabled = false, listText = "", autoGray = false, scanInterval = 0.75 }
 	end
 	return db.profiles[profileKey], profileKey, charKey
 end
@@ -386,7 +387,8 @@ scanner:SetScript("OnUpdate", function(self, elapsed)
 	-- Process scan requests with throttle
 	if scanRequested and now >= nextScanAt then
 		scanRequested = false
-		nextScanAt = now + 0.75
+		local interval = (profile.scanInterval and profile.scanInterval >= 0.75) and profile.scanInterval or 0.75
+		nextScanAt = now + interval
 		TryDeleteOneMatchingItem()
 	end
 end)

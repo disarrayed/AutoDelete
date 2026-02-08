@@ -26,6 +26,7 @@ local function MigrateDB(db)
 		enabled = db.enabled and true or false,
 		listText = db.listText or "",
 		autoGray = false,
+		scanInterval = 0.75,
 	}
 	db.chars[charKey] = charKey
 end
@@ -44,7 +45,7 @@ local function GetDB()
 	local charKey = GetCharKey() or "Default"
 	local profileKey = db.chars[charKey] or charKey
 	if not db.profiles[profileKey] then
-		db.profiles[profileKey] = { enabled = false, listText = "", autoGray = false }
+		db.profiles[profileKey] = { enabled = false, listText = "", autoGray = false, scanInterval = 0.75 }
 	end
 	if not db.chars[charKey] then
 		db.chars[charKey] = profileKey
@@ -57,7 +58,7 @@ local function GetActiveProfile(db)
 	local charKey = GetCharKey() or "Default"
 	local profileKey = (db and db.chars and db.chars[charKey]) or charKey
 	if not db.profiles[profileKey] then
-		db.profiles[profileKey] = { enabled = false, listText = "", autoGray = false }
+		db.profiles[profileKey] = { enabled = false, listText = "", autoGray = false, scanInterval = 0.75 }
 	end
 	return db.profiles[profileKey], profileKey, charKey
 end
@@ -254,9 +255,44 @@ local function BuildPanelUI(self)
 	_G[grayCheck:GetName() .. "Text"]:SetText("Auto-add gray (junk) items on loot")
 	self._grayCheck = grayCheck
 
+	-- Scan Speed Options (radio-style checkboxes)
+	local speedLabel = self:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+	speedLabel:SetPoint("TOPLEFT", grayCheck, "BOTTOMLEFT", 8, -16)
+	speedLabel:SetText("Scan Speed:")
+
+	local speedOptions = {
+		{ value = 0.75, label = "0.75s" },
+		{ value = 10,   label = "10s" },
+		{ value = 30,   label = "30s" },
+		{ value = 120,  label = "2m" },
+		{ value = 300,  label = "5m" },
+		{ value = 600,  label = "10m" },
+	}
+	self._speedChecks = {}
+
+	local prevCheck = nil
+	for idx, opt in ipairs(speedOptions) do
+		local cb = CreateFrame("CheckButton", "AutoDelete_Speed" .. idx, self, "UICheckButtonTemplate")
+		cb:SetSize(22, 22)
+		if idx == 1 then
+			cb:SetPoint("LEFT", speedLabel, "RIGHT", 6, 0)
+		else
+			cb:SetPoint("LEFT", prevCheck._label, "RIGHT", 8, 0)
+		end
+
+		local label = self:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+		label:SetPoint("LEFT", cb, "RIGHT", -2, 0)
+		label:SetText(opt.label)
+		cb._label = label
+		cb._value = opt.value
+
+		self._speedChecks[idx] = cb
+		prevCheck = cb
+	end
+
 	-- Search Label
 	local searchLabel = self:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-	searchLabel:SetPoint("TOPLEFT", grayCheck, "BOTTOMLEFT", 8, -12)
+	searchLabel:SetPoint("TOPLEFT", speedLabel, "BOTTOMLEFT", 0, -16)
 	searchLabel:SetText("Search:")
 
 	-- Search Box (custom styled, no InputBoxTemplate)
@@ -283,7 +319,7 @@ local function BuildPanelUI(self)
 
 	-- List Container (also the drop target)
 	local listBox = CreateFrame("Frame", "AutoDelete_ListBox", self)
-	listBox:SetPoint("TOPLEFT", searchLabel, "BOTTOMLEFT", 0, -8)
+	listBox:SetPoint("TOPLEFT", searchLabel, "BOTTOMLEFT", 0, -12)
 	listBox:SetSize(360, 180)
 	listBox:SetBackdrop({
 		bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -312,22 +348,31 @@ local function BuildPanelUI(self)
 	for i = 1, 9 do
 		local row = CreateFrame("Button", nil, listBox)
 		row:SetHeight(18)
-		row:SetPoint("TOPLEFT", 10, -6 - (i - 1) * 18)
-		row:SetPoint("RIGHT", -32, 0)
+		row:SetPoint("TOPLEFT", 6, -6 - (i - 1) * 18)
+		row:SetPoint("RIGHT", -26, 0)
+
+		row.remove = CreateFrame("Button", nil, row)
+		row.remove:SetSize(16, 16)
+		row.remove:SetPoint("RIGHT", 0, 0)
+		row.remove:SetNormalTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Up")
+		row.remove:SetHighlightTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Highlight")
+		row.remove:GetNormalTexture():SetVertexColor(0.7, 0.2, 0.2)
+		row.remove:SetScript("OnEnter", function(btn)
+			btn:GetNormalTexture():SetVertexColor(1, 0.3, 0.3)
+		end)
+		row.remove:SetScript("OnLeave", function(btn)
+			btn:GetNormalTexture():SetVertexColor(0.7, 0.2, 0.2)
+		end)
 
 		row.icon = row:CreateTexture(nil, "ARTWORK")
 		row.icon:SetSize(16, 16)
-		row.icon:SetPoint("LEFT", 2, 0)
-		row.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93) -- Trim edges for cleaner look
+		row.icon:SetPoint("LEFT", 4, 0)
+		row.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
 
 		row.text = row:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
 		row.text:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
-		row.text:SetPoint("RIGHT", -24, 0)
+		row.text:SetPoint("RIGHT", row.remove, "LEFT", -4, 0)
 		row.text:SetJustifyH("LEFT")
-
-		row.remove = CreateFrame("Button", nil, row, "UIPanelCloseButton")
-		row.remove:SetSize(18, 18)
-		row.remove:SetPoint("RIGHT", 18, 0)
 
 		self._rows[i] = row
 	end
@@ -423,6 +468,21 @@ local function BuildPanelUI(self)
 			print("|cff00ff00AutoDelete|r: Auto-add gray items |cffff0000disabled|r")
 		end
 	end)
+
+	-- Scan speed radio checkboxes
+	local function UpdateSpeedChecks(selectedValue)
+		for _, cb in ipairs(self._speedChecks) do
+			cb:SetChecked(cb._value == selectedValue)
+		end
+	end
+
+	for _, cb in ipairs(self._speedChecks) do
+		cb:SetScript("OnClick", function(btn)
+			local p = GetActiveProfile(db)
+			p.scanInterval = btn._value
+			UpdateSpeedChecks(btn._value)
+		end)
+	end
 
 	-- Add item via drag and drop
 	local function AddDraggedItem()
@@ -597,6 +657,9 @@ local function BuildPanelUI(self)
 
 		check:SetChecked(p.enabled and true or false)
 		grayCheck:SetChecked(p.autoGray and true or false)
+
+		local interval = (p.scanInterval and p.scanInterval >= 0.75) and p.scanInterval or 0.75
+		UpdateSpeedChecks(interval)
 
 		UIDropDownMenu_SetSelectedValue(profileDropdown, pkey)
 		UIDropDownMenu_SetText(profileDropdown, pkey)
