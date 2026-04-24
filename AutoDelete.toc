@@ -1,0 +1,10 @@
+## Interface: 30300
+## Title: |cffff8000AutoDelete|r
+## Notes: Automatically delete and sell specified items from your bags.
+## Author: Baenre
+## Version: 3.0
+## SavedVariables: AutoDeleteDB
+## SavedVariablesPerCharacter: AutoDeleteStatsDB
+
+AutoDelete.lua
+Options.lua
