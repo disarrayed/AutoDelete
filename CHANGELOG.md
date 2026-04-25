@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.11] - 2026-04-25
+
+### Added
+
+- New **Only in Combat** sub-toggle under Summon Scavenger (Goblin tab, card 2). When enabled, the After-sell and After-vendor-close summons only fire if the player is currently in combat at the moment of the trigger event. Useful if you only want the Scavenger out during fights.
+
 ## [3.10] - 2026-04-25
 
 Initial release of the v3.10 line. Major feature set and rework consolidated from prior development.

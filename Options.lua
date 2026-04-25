@@ -1169,7 +1169,7 @@ local function BuildUI(self)
 	tglHideSpam:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglHideSpam = tglHideSpam
 
-	-- CARD 2: Summon Scavenger (main toggle + 2 sub-toggles: after sell / after close)
+	-- CARD 2: Summon Scavenger (master + 3 sub-toggles)
 	local tglScav = MakeToggle(gCard2, "Summon Scavenger", C_ACCENT,
 		"Master toggle for Greedy Scavenger pet management. When enabled, the addon dismisses your Scavenger when you mount and re-summons on dismount, and re-summons it if it gets stuck or despawns. The summon itself is triggered by the After sell or After vendor close sub-toggles below. Gated by the AutoDelete master Enable on the General tab.")
 	tglScav:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
@@ -1185,6 +1185,11 @@ local function BuildUI(self)
 	tglScavAfterClose:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 36))
 	tglScavAfterClose:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglScavAfterClose = tglScavAfterClose
+
+	local tglScavOnlyInCombat = MakeSubToggle(gCard2, "Only in Combat", C_DK_RED)
+	tglScavOnlyInCombat:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 52))
+	tglScavOnlyInCombat:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
+	self._tglScavOnlyInCombat = tglScavOnlyInCombat
 
 	-- CARD 3: Summon Merchant on bags full (main toggle).
 	-- Shares the Summon Scavenger master toggle for mount-aware and
@@ -2458,6 +2463,11 @@ local function BuildUI(self)
 		btn:SetChecked(btn._checked)
 		GetActiveProfile(db).summonAfterClose = btn._checked
 	end)
+	tglScavOnlyInCombat:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		GetActiveProfile(db).summonOnlyInCombat = btn._checked
+	end)
 	tglSummonMerchant:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
@@ -2761,6 +2771,7 @@ local function BuildUI(self)
 		tglRepairGuild:SetChecked(p.autoRepairUseGuildBank)
 		tglScavAfterSell:SetChecked(p.summonAfterSell)
 		tglScavAfterClose:SetChecked(p.summonAfterClose)
+		tglScavOnlyInCombat:SetChecked(p.summonOnlyInCombat)
 		tglSummonMerchant:SetChecked(p.summonMerchantWhenBagsFull)
 		tglHideSpam:SetChecked(p.hideGreedySpam)
 		-- AutoInv tab toggles

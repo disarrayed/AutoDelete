@@ -160,6 +160,7 @@ local DEFAULT_PROFILE = {
 	summonScavenger            = false,
 	summonAfterSell            = true,    -- summon scav after vendor sell completes
 	summonAfterClose           = false,   -- summon scav after vendor window closes
+	summonOnlyInCombat         = false,   -- gate after-sell/after-close on IsInCombat()
 	summonMerchantWhenBagsFull = false,   -- summon Goblin Merchant when bags hit 0 free for 3s+
 
 	-- ============================================================
@@ -1753,11 +1754,15 @@ local function SellItems(silent)
 			sellDryTicks = 0
 			-- After-sell summon: gated by summonScavenger master + summonAfterSell.
 			-- Vendor window is still open here (MERCHANT_CLOSED fires later).
-			-- Only trigger at Goblin Merchant.
+			-- Only trigger at Goblin Merchant. If summonOnlyInCombat is set, the
+			-- player must be in combat at THIS moment for the summon to fire.
 			if cachedProfile and cachedProfile.summonScavenger and cachedProfile.summonAfterSell then
-				local merchant = string.lower(lastMerchantName or "")
-				if string.find(merchant, "goblin merchant") then
-					DelayedSummon(1.5)
+				local combatOk = (not cachedProfile.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+				if combatOk then
+					local merchant = string.lower(lastMerchantName or "")
+					if string.find(merchant, "goblin merchant") then
+						DelayedSummon(1.5)
+					end
 				end
 			end
 		end
@@ -2507,10 +2512,15 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		end
 		-- Summon Greedy Scavenger after closing the Goblin Merchant window.
 		-- Gated by summonScavenger (master) AND summonAfterClose (this-moment subflag).
+		-- If summonOnlyInCombat is set, the player must be in combat at THIS
+		-- moment for the summon to fire.
 		if cachedProfile and cachedProfile.summonScavenger and cachedProfile.summonAfterClose then
-			local merchant = string.lower(lastMerchantName or "")
-			if string.find(merchant, "goblin merchant") then
-				DelayedSummon(1.5)
+			local combatOk = (not cachedProfile.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+			if combatOk then
+				local merchant = string.lower(lastMerchantName or "")
+				if string.find(merchant, "goblin merchant") then
+					DelayedSummon(1.5)
+				end
 			end
 		end
 		lastMerchantName = nil
