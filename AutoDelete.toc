@@ -2,7 +2,7 @@
 ## Title: |cffff8000AutoDelete|r
 ## Notes: Automatically delete and sell specified items from your bags.
 ## Author: Baenre
-## Version: 3.13
+## Version: 3.16
 ## SavedVariables: AutoDeleteDB
 ## SavedVariablesPerCharacter: AutoDeleteStatsDB
 

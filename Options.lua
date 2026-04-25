@@ -175,7 +175,7 @@ local function MakeDropdown(parent, width, options, onChange)
 	btnText:SetPoint("RIGHT", -20, 0)
 	btnText:SetJustifyH("LEFT")
 
-	-- Arrow — uses pre-rotated arrowdown.tga (no SetRotation needed).
+	-- Arrow - uses pre-rotated arrowdown.tga (no SetRotation needed).
 	-- Pre-rotated textures render at exactly the size specified, unlike
 	-- rotated textures which WoW 3.3.5 scales slightly inconsistently.
 	local arrow = btn:CreateTexture(nil, "OVERLAY", nil, 7)
@@ -299,7 +299,7 @@ local function MakeDropdown(parent, width, options, onChange)
 	function dd:GetValue() return dd._value end
 
 	-- Dynamic options rebuild. Used by tabs whose dropdown contents change
-	-- at runtime (e.g. Profiles tab — character names may be added/deleted).
+	-- at runtime (e.g. Profiles tab - character names may be added/deleted).
 	-- Rebuilds the popup row pool, resets selection, preserves size.
 	function dd:SetOptions(newOptions)
 		-- Hide + remove existing rows.
@@ -348,7 +348,7 @@ local function MakeDropdown(parent, width, options, onChange)
 			popupRows[i] = row
 		end
 		popup:SetHeight(2 + #options * 20)
-		-- Don't change the displayed label — caller decides what to show via SetValue.
+		-- Don't change the displayed label - caller decides what to show via SetValue.
 	end
 
 	return dd
@@ -359,7 +359,7 @@ end
 -- ============================================================================
 
 -- AutoSizeSection: set a section's height based on its lowest child element.
--- Uses GetTop/GetBottom which return absolute screen coords — valid as long as
+-- Uses GetTop/GetBottom which return absolute screen coords - valid as long as
 -- both the section and the element have been SetPoint'd and the frame is shown.
 -- Falls back to leaving the section at its current height if coords are nil.
 local function AutoSizeSection(section, lastElement, padding, fallback)
@@ -836,9 +836,9 @@ local function BuildUI(self)
 	-- ========================================================================
 	-- Settings frame layout: four titled bordered sections, top to bottom:
 	--   1. Tabbed Settings (General / Goblin / AutoInv / Tracking / Profiles)
-	--   2. Sell rules — three category cards (BoE Armor / BoP / BoE Weapons)
-	--   3. Scan Options — Delete / Sell / Keep list-mode tabs
-	--   4. Search & Manage — search row + active list view
+	--   2. Sell rules - three category cards (BoE Armor / BoP / BoE Weapons)
+	--   3. Scan Options - Delete / Sell / Keep list-mode tabs
+	--   4. Search & Manage - search row + active list view
 	-- The Auto-Delete Junk / Common and Auto-Sell Greens toggles live INSIDE
 	-- Section 1's General tab (card 2), not as a standalone section.
 	-- ========================================================================
@@ -914,7 +914,7 @@ local function BuildUI(self)
 	-- Active tab state (default: General). Stored on self for profile persistence later.
 	self._activeSettingsTab = "general"
 
-	-- Build tab buttons — styled same as Delete/Sell/Keep (orange fill when active)
+	-- Build tab buttons - styled same as Delete/Sell/Keep (orange fill when active)
 	local TAB_BTN_H = TAB_STRIP_H - 2    -- 24px button height, 1px breathing room top/bottom
 	local tabButtons = {}
 
@@ -946,7 +946,7 @@ local function BuildUI(self)
 		end
 	end
 
-	-- Build tab buttons — equal widths chained horizontally
+	-- Build tab buttons - equal widths chained horizontally
 	local TAB_BTN_GAP = 4
 	for i, key in ipairs(TAB_KEYS) do
 		local btn = CreateFrame("Button", nil, tabStrip)
@@ -1249,7 +1249,8 @@ local function BuildUI(self)
 	kwBox:SetTextColor(unpack(C_TEXT))
 	kwBox:SetAutoFocus(false)
 	kwBox:SetPoint("TOPLEFT", 4, -1)
-	kwBox:SetPoint("BOTTOMRIGHT", -4, 1)
+	-- Pull BOTTOMRIGHT in by 18px to leave room for the clear (x) button.
+	kwBox:SetPoint("BOTTOMRIGHT", -22, 1)
 	kwBox:SetMaxLetters(120)
 	kwBox:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
 	kwBox:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
@@ -1263,6 +1264,28 @@ local function BuildUI(self)
 	end)
 	self._kwBox = kwBox
 
+	-- Clear (x) button at the right edge of the keyword frame. Click resets
+	-- the keywords to the default "inv,invite" (the field is never truly
+	-- empty - empty string falls back to the default in OnEditFocusLost).
+	local kwClear = CreateFrame("Button", nil, kwFrame)
+	kwClear:SetSize(14, 14)
+	kwClear:SetPoint("RIGHT", -4, 0)
+	local kwClearText = kwClear:CreateFontString(nil, "OVERLAY")
+	kwClearText:SetFont(FONT, 11, "OUTLINE")
+	kwClearText:SetPoint("CENTER")
+	kwClearText:SetTextColor(0.6, 0.6, 0.6, 1)
+	kwClearText:SetText("x")
+	kwClear:SetScript("OnEnter", function() kwClearText:SetTextColor(1, 0.4, 0.4, 1) end)
+	kwClear:SetScript("OnLeave", function() kwClearText:SetTextColor(0.6, 0.6, 0.6, 1) end)
+	kwClear:SetScript("OnClick", function()
+		kwBox:SetText("")
+		kwBox:ClearFocus()
+		-- OnEditFocusLost already fired ClearFocus path - explicitly
+		-- normalize again here in case the user clicks while not focused.
+		GetActiveProfile(db).autoInviteKeywords = "inv,invite"
+		kwBox:SetText("inv,invite")
+	end)
+
 	-- CARD 2: Apply loot rule (main toggle) + dropdown
 	local tglLootRule = MakeToggle(aCard2, "Apply loot rule", C_ACCENT,
 		"After auto-inviting, set the party's loot rule to your chosen method.")
@@ -1270,7 +1293,7 @@ local function BuildUI(self)
 	tglLootRule:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglLootRule = tglLootRule
 
-	-- Loot rule options — strings match LOOT_METHOD_MAP keys in AutoDelete.lua
+	-- Loot rule options - strings match LOOT_METHOD_MAP keys in AutoDelete.lua
 	local LOOT_RULE_OPTS = {
 		{ value = "freeforall",      label = "Free For All" },
 		{ value = "roundrobin",      label = "Round Robin" },
@@ -1303,7 +1326,7 @@ local function BuildUI(self)
 	-- TRACKING TAB: per-character stats table (SESSION vs LIFETIME columns)
 	-- 6 stat rows + header + Reset button. Numbers formatted via the
 	-- AutoDelete_Stats.FormatMoney / FormatNumber helpers.
-	-- NOTE: locals kept to minimum here — BuildUI() is already near Lua's
+	-- NOTE: locals kept to minimum here - BuildUI() is already near Lua's
 	-- 200-local limit.
 	-- ========================================================================
 	do
@@ -1324,7 +1347,7 @@ local function BuildUI(self)
 		hdrL:SetJustifyH("RIGHT")
 		hdrL:SetText("LIFETIME")
 
-		-- Row builder — returns { session, lifetime } fontstrings.
+		-- Row builder - returns { session, lifetime } fontstrings.
 		local function MakeTrackingRow(yOff, labelText)
 			local label = MakeText(trackingPage, 9, C_TEXT, "OUTLINE")
 			label:SetPoint("TOPLEFT", 4, yOff)
@@ -1403,7 +1426,7 @@ local function BuildUI(self)
 		rows.repairSpend.session:SetText(FM(S.repairSpend or 0))
 		rows.repairSpend.lifetime:SetText(FM(L.repairSpend or 0))
 
-		-- Inventory Avg: session "—" (multi-sample avg doesn't map to session);
+		-- Inventory Avg: session "-" (multi-sample avg doesn't map to session);
 		-- lifetime = total / count.
 		rows.invAvg.session:SetText("-")
 		local invCount = L.inventoryWorthCount or 0
@@ -1782,7 +1805,7 @@ local function BuildUI(self)
 	end
 
 	-- ========================================================================
-	-- SECTION 2: Sell rules — category cards
+	-- SECTION 2: Sell rules - category cards
 	--
 	-- Three independent category cards (BoE Armor, BoP, BoE Weapons), each
 	-- with: enable toggle + Rare/Epic toggles on the header row, iLvl
@@ -1790,7 +1813,7 @@ local function BuildUI(self)
 	--
 	-- The Auto-Delete Junk / Auto-Delete Common / Auto-Sell Greens toggles
 	-- live on the General tab (card 2 of the General page), NOT here. They
-	-- aren't categories — they're global, quality-based actions that run
+	-- aren't categories - they're global, quality-based actions that run
 	-- independently of the category sections.
 	--
 	-- Sell decision priority is implemented in AutoDelete.lua's SellItems.
@@ -1888,7 +1911,7 @@ local function BuildUI(self)
 	yOff = yOff - 16 - CARD_H - SECTION_GAP
 
 	-- ========================================================================
-	-- SECTION 3: Scan Options — Delete/Sell/Keep list mode tabs
+	-- SECTION 3: Scan Options - Delete/Sell/Keep list mode tabs
 	-- Scan Speed lives on the General settings tab; this section is just
 	-- the three list-mode tab buttons that drive the list view below.
 	-- ========================================================================
@@ -1980,7 +2003,7 @@ local function BuildUI(self)
 	local emptyText
 	local function SetTabActive(tab, text, active)
 		if active then
-			-- Strong orange fill with white text — matches mockup's highlighted Delete tab
+			-- Strong orange fill with white text - matches mockup's highlighted Delete tab
 			ApplyBackdrop(tab, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.9 }, C_ACCENT)
 			text:SetTextColor(1, 1, 1, 1)
 		else
@@ -2030,13 +2053,37 @@ local function BuildUI(self)
 	searchBox:SetFont(FONT, 10, "OUTLINE"); searchBox:SetTextColor(unpack(C_TEXT))
 	searchBox:SetAutoFocus(false)
 	searchBox:SetPoint("TOPLEFT", searchIcon, "TOPRIGHT", 6, 2)
-	searchBox:SetPoint("BOTTOMRIGHT", -6, 2)
+	-- BOTTOMRIGHT pulled in by 22px to make room for the clear (x) button.
+	searchBox:SetPoint("BOTTOMRIGHT", -28, 2)
 	searchBox:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
+	-- Enter clears focus too, matching kwBox + numeric editbox behavior.
+	searchBox:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
 	searchBox:SetScript("OnEditFocusGained", function() searchPlaceholder:Hide() end)
 	searchBox:SetScript("OnEditFocusLost", function(s)
 		if (s:GetText() or "") == "" then searchPlaceholder:Show() end
 	end)
 	self._searchBox = searchBox
+
+	-- Clear (x) button at the right edge of the search frame. Visible only
+	-- when the search box has text. Click clears the box and refocuses it.
+	local searchClear = CreateFrame("Button", nil, searchFrame)
+	searchClear:SetSize(16, 16)
+	searchClear:SetPoint("RIGHT", -6, 0)
+	local searchClearText = searchClear:CreateFontString(nil, "OVERLAY")
+	searchClearText:SetFont(FONT, 12, "OUTLINE")
+	searchClearText:SetPoint("CENTER")
+	searchClearText:SetTextColor(0.6, 0.6, 0.6, 1)
+	searchClearText:SetText("x")
+	searchClear:SetScript("OnEnter", function() searchClearText:SetTextColor(1, 0.4, 0.4, 1) end)
+	searchClear:SetScript("OnLeave", function() searchClearText:SetTextColor(0.6, 0.6, 0.6, 1) end)
+	searchClear:SetScript("OnClick", function()
+		searchBox:SetText("")
+		searchBox:ClearFocus()
+	end)
+	searchClear:Hide()
+	-- Show/hide the clear button as the search box text changes. Hooked
+	-- below in OnTextChanged where _filterText is already updated.
+	self._searchClear = searchClear
 
 	-- Raw toggle
 	local tglRaw = MakeToggle(manageBox, "Raw", C_ACCENT)
@@ -2100,7 +2147,7 @@ local function BuildUI(self)
 	scroll:SetPoint("BOTTOMRIGHT", -1, 1)
 	self._scroll = scroll
 
-	-- Hide the FauxScrollFrame's scrollbar completely — we use pagination only.
+	-- Hide the FauxScrollFrame's scrollbar completely - we use pagination only.
 	local scrollBar = _G["AutoDelete_ListScrollScrollBar"]
 	local scrollUp = _G["AutoDelete_ListScrollScrollBarScrollUpButton"]
 	local scrollDown = _G["AutoDelete_ListScrollScrollBarScrollDownButton"]
@@ -2518,7 +2565,7 @@ local function BuildUI(self)
 	end
 
 	-- Check if adding `line` to `targetKey` would conflict with either other list.
-	-- Returns (conflictFound, conflictingListKey) — or (false, nil) if safe.
+	-- Returns (conflictFound, conflictingListKey) - or (false, nil) if safe.
 	local function FindListConflict(profile, targetKey, line)
 		local otherKeys
 		if targetKey == "listText" then
@@ -2618,6 +2665,16 @@ local function BuildUI(self)
 
 	-- Tab handlers
 	local function SwitchTab(mode)
+		-- If raw view is open with an active filter, restore the unfiltered
+		-- text BEFORE saving. Otherwise SaveRawText would persist the
+		-- filtered view and silently delete the hidden non-matching lines.
+		if self._rawUnfilteredText then
+			rawEditBox:SetText(self._rawUnfilteredText)
+			self._rawUnfilteredText = nil
+		end
+		rawEditBox:EnableKeyboard(true)
+		rawEditBox:EnableMouse(true)
+		rawEditBox:SetTextColor(unpack(C_TEXT))
 		SaveRawText()
 		self._listMode = mode
 		tglRaw:SetChecked(false)
@@ -2649,7 +2706,12 @@ local function BuildUI(self)
 
 	-- Search
 	searchBox:SetScript("OnTextChanged", function(eb)
-		self._filterText = eb:GetText() or ""
+		local text = eb:GetText() or ""
+		self._filterText = text
+		-- Show/hide the clear (x) button based on whether there's text.
+		if self._searchClear then
+			if text ~= "" then self._searchClear:Show() else self._searchClear:Hide() end
+		end
 		self:Refresh()
 	end)
 
@@ -2658,10 +2720,28 @@ local function BuildUI(self)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
 		if btn._checked then
+			-- Entering raw mode: drop any stale stash, unlock editing, load
+			-- text from the profile.
+			self._rawUnfilteredText = nil
+			rawEditBox:EnableKeyboard(true)
+			rawEditBox:EnableMouse(true)
+			rawEditBox:SetTextColor(unpack(C_TEXT))
 			listBox:Hide(); rawBoxHolder:Show()
 			rawEditBox:SetText(GenerateRawViewText(GetActiveProfile(db)[GetActiveListKey()]))
 			rawEditBox:SetCursorPosition(0)
+			-- If the search box already has text, apply the filter immediately.
+			if (self._filterText or "") ~= "" then self:Refresh() end
 		else
+			-- Leaving raw mode: if a filter stash exists, restore the
+			-- unfiltered text BEFORE saving so we don't write the filtered
+			-- view (which would silently delete hidden non-matching lines).
+			if self._rawUnfilteredText then
+				rawEditBox:SetText(self._rawUnfilteredText)
+				self._rawUnfilteredText = nil
+			end
+			rawEditBox:EnableKeyboard(true)
+			rawEditBox:EnableMouse(true)
+			rawEditBox:SetTextColor(unpack(C_TEXT))
 			SaveRawText(); rawBoxHolder:Hide(); listBox:Show()
 			self:Refresh()
 		end
@@ -2814,6 +2894,62 @@ local function BuildUI(self)
 			local pageItemCount = math.min(self._pageSize, #self._filtered)
 			FauxScrollFrame_Update(scroll, pageItemCount, NUM_ROWS, ROW_HEIGHT)
 			self:UpdateListRows()
+		else
+			-- Raw view filter handling.
+			--
+			-- When the user types in the search box while raw view is open we
+			-- show only matching lines and lock the editor to read-only so
+			-- typing in a filtered view (which would silently discard the
+			-- hidden non-matching lines) is impossible. When the filter is
+			-- cleared, we restore the original full text and unlock editing.
+			--
+			-- self._rawUnfilteredText is a stash of the editor's text from
+			-- BEFORE filtering started, so user edits made while editing the
+			-- raw text are preserved even if they hit search and clear it.
+			local f = Normalize(self._filterText or "")
+			if f == "" then
+				if self._rawUnfilteredText then
+					-- Restore from stash, drop the stash, unlock editing.
+					rawEditBox:SetText(self._rawUnfilteredText)
+					rawEditBox:SetCursorPosition(0)
+					self._rawUnfilteredText = nil
+					rawEditBox:EnableKeyboard(true)
+					rawEditBox:EnableMouse(true)
+					rawEditBox:SetTextColor(unpack(C_TEXT))
+				end
+			else
+				-- Stash unfiltered text on the FIRST filtered keystroke so we
+				-- can restore later. Subsequent filter changes don't re-stash.
+				if not self._rawUnfilteredText then
+					self._rawUnfilteredText = rawEditBox:GetText() or ""
+				end
+				-- Build filtered text: walk the stashed unfiltered content,
+				-- keep lines whose item-id-resolved-name (or raw line if no
+				-- id) matches the filter.
+				local filteredLines = {}
+				for line in string.gmatch(self._rawUnfilteredText, "[^\r\n]+") do
+					local trimmed = Trim(string.gsub(Trim(line), "%s*#.*$", ""))
+					local match = false
+					if trimmed ~= "" then
+						local itemId = tonumber(string.match(trimmed, "^item:(%d+)"))
+						local displayName = trimmed
+						if itemId then
+							local n = GetItemInfo(itemId)
+							if n and n ~= "" then displayName = n end
+						end
+						if string.find(Normalize(displayName), f, 1, true) then
+							match = true
+						end
+					end
+					if match then table.insert(filteredLines, line) end
+				end
+				rawEditBox:SetText(table.concat(filteredLines, "\n"))
+				rawEditBox:SetCursorPosition(0)
+				-- Read-only while filtered: disable keyboard input + dim text
+				-- so the user can see at a glance that they can't type here.
+				rawEditBox:EnableKeyboard(false)
+				rawEditBox:SetTextColor(0.55, 0.55, 0.55, 1)
+			end
 		end
 	end
 

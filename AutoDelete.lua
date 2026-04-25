@@ -9,7 +9,7 @@ local cachedProfile = nil
 
 -- Declared here (before any function that calls it) as a forward-assignable
 -- local. The real body is assigned later once GetDB / GetActiveProfile are
--- defined. Do NOT redeclare with `local function` below — that shadows this.
+-- defined. Do NOT redeclare with `local function` below - that shadows this.
 local RefreshCachedProfile
 
 -- ============================================================================
@@ -84,7 +84,7 @@ local DEFAULT_PROFILE = {
 	-- vendor auto-sell, and the companion watcher (mount-aware
 	-- dismiss/re-summon, stuck-detection, bag-full merchant summon).
 	-- Auto-Invite and Hide Greedy Spam are deliberately INDEPENDENT
-	-- of this switch — they run regardless.
+	-- of this switch - they run regardless.
 	enabled = false,
 
 	-- ============================================================
@@ -468,7 +468,7 @@ local function BuildWantedSets(listText)
 		-- Strip comments
 		raw = string.gsub(raw, "%s*#.*$", "")
 		raw = Trim(raw)
-		-- Match item:ID (lenient — don't require end anchor)
+		-- Match item:ID (lenient - don't require end anchor)
 		local itemId = tonumber(string.match(raw, "^item:(%d+)"))
 		if itemId then
 			idSet[itemId] = true
@@ -539,7 +539,7 @@ local function AddItemToList(listKey, itemId)
 	if hasConflict then
 		print("|cffff4444[AutoDelete]|r: Cannot add " .. itemName
 			.. " to " .. ListLabelForKey(listKey)
-			.. " — already on the " .. ListLabelForKey(conflictKey)
+			.. " - already on the " .. ListLabelForKey(conflictKey)
 			.. " list. Remove it from there first.")
 		return false
 	end
@@ -568,7 +568,7 @@ local function HandleItemDrop(listKey)
 	end
 end
 
--- Global functions for ElvUI buttons — always target the correct list
+-- Global functions for ElvUI buttons - always target the correct list
 _G.AutoDelete_AddToDeleteList = function() HandleItemDrop("listText") end
 _G.AutoDelete_AddToSellList = function() HandleItemDrop("sellListText") end
 _G.AutoDelete_AddToKeepList = function() HandleItemDrop("whitelistText") end
@@ -586,66 +586,83 @@ _G.AutoDelete_OpenPanelToList = function(mode)
 end
 
 -- ============================================================================
--- Manual Sell Tracking (hook UseContainerItem)
+-- Manual Sell Tracking (hooksecurefunc UseContainerItem + bag snapshot)
 -- ============================================================================
 -- Blizzard's merchant UI sells an item by calling UseContainerItem(bag, slot)
--- when you right-click a bag item while the merchant window is open. We can't
--- intercept that call, but we can hook it AFTER it fires via hooksecurefunc.
--- When our hook runs and MerchantFrame is shown, we know the player is at a
--- vendor, and the item that was in (bag, slot) was just sold.
+-- when you right-click a bag item while the merchant window is open. We track
+-- those manual sells so the gold/items session counters work.
 --
--- Implementation nuance: by the time our hook runs, the item has already been
--- removed from the bag (UseContainerItem is synchronous at the client level).
--- So we read the item info BEFORE calling — but hooksecurefunc runs AFTER.
--- Solution: read the info via a short delay OR cache bag contents at
--- MERCHANT_SHOW and look up by (bag, slot). Simpler: use GetItemInfo on the
--- link we can still get via GetContainerItemLink BEFORE it clears (turns out
--- the inventory updates at the end of the frame, not mid-function).
+-- IMPORTANT: We use hooksecurefunc, NOT a global override. Replacing
+-- UseContainerItem globally (UseContainerItem = TrackedUseContainerItem)
+-- breaks the secure-action call path on 3.3.5 because UseContainerItem is
+-- protected for items that trigger spells/casts (Hearthstone, potions,
+-- mounts, scrolls, food, anything castable). Blizzard's secure dispatch
+-- silently rejects calls to a non-Blizzard function, so right-click on those
+-- items stops working entirely. hooksecurefunc preserves the original.
 --
--- Sanity: only track when:
---   - MerchantFrame is visible (so it's actually a sale, not a consume)
---   - vendorPrice > 0 (otherwise it wasn't sellable, call failed silently)
---   - AutoDelete is NOT the one calling UseContainerItem (our SellItems path
---     already calls BumpStat directly; double-count protection needed)
+-- Implementation: hooksecurefunc fires AFTER Blizzard's handler, by which
+-- time the bag slot has already been emptied or shifted. So we can't read
+-- the item from the slot post-call. Instead we keep a snapshot of bag
+-- contents (link + count per slot) that we refresh on:
+--   * MERCHANT_SHOW (initial full snapshot when vendor opens)
+--   * After every hooked UseContainerItem call (refresh just that slot)
+-- When the hook fires, we look up (bag, slot) in the snapshot to know what
+-- was just sold.
 --
--- We use a flag set around our own UseContainerItem calls so the hook skips.
-local autoDeleteSelling = false
-local origUseContainerItem = UseContainerItem
-
--- We override UseContainerItem globally rather than using hooksecurefunc.
--- The reason: hooksecurefunc runs AFTER Blizzard's handler, by which time
--- the bag slot has already been emptied or shifted. We need to read the
--- item link BEFORE the call so we know what was sold and at what price.
--- A global override lets us do that capture pre-call, then delegate to the
--- original via origUseContainerItem.
---
--- This is safe on 3.3.5: UseContainerItem is unprotected for bag-slot calls.
 -- The autoDeleteSelling flag keeps our own SellItems() calls from being
--- double-counted (those record the stat directly, not via this hook).
-local function TrackedUseContainerItem(bag, slot, ...)
-	-- Capture BEFORE the call, while the item is still in the slot.
-	if not autoDeleteSelling
-	   and MerchantFrame and MerchantFrame:IsShown()
-	   and bag and slot
-	then
-		local link = GetContainerItemLink(bag, slot)
-		if link then
-			local _, itemCount = GetContainerItemInfo(bag, slot)
-			local _, _, _, _, _, _, _, _, _, _, sellPrice = GetItemInfo(link)
-			if sellPrice and sellPrice > 0 then
-				-- Record now. If the sell call fails, the item stays in the
-				-- bag and no BAG_UPDATE fires, so a subsequent scan won't
-				-- double-count. Recording before the delegated call keeps
-				-- the path simple — no scheduling needed.
-				local copper = sellPrice * (itemCount or 1)
-				BumpStat("itemsSold", 1)
-				BumpStat("goldEarned", copper)
+-- double-counted - those record the stat directly, not via this hook.
+
+local autoDeleteSelling = false
+local merchantBagSnapshot = {}
+
+local function SnapshotAllBags()
+	merchantBagSnapshot = {}
+	for bag = 0, 4 do
+		local n = GetContainerNumSlots(bag) or 0
+		for slot = 1, n do
+			local link = GetContainerItemLink(bag, slot)
+			if link then
+				local _, count = GetContainerItemInfo(bag, slot)
+				merchantBagSnapshot[bag .. ":" .. slot] = {
+					link = link, count = count or 1,
+				}
 			end
 		end
 	end
-	return origUseContainerItem(bag, slot, ...)
 end
-UseContainerItem = TrackedUseContainerItem
+
+local function RefreshSnapshotSlot(bag, slot)
+	local key = bag .. ":" .. slot
+	local link = GetContainerItemLink(bag, slot)
+	if link then
+		local _, count = GetContainerItemInfo(bag, slot)
+		merchantBagSnapshot[key] = { link = link, count = count or 1 }
+	else
+		merchantBagSnapshot[key] = nil
+	end
+end
+
+hooksecurefunc("UseContainerItem", function(bag, slot)
+	-- Skip our own SellItems() path - it records BumpStat directly.
+	if autoDeleteSelling then return end
+	if not bag or not slot then return end
+	if not (MerchantFrame and MerchantFrame:IsShown()) then return end
+
+	local key = bag .. ":" .. slot
+	local snap = merchantBagSnapshot[key]
+	if snap and snap.link then
+		local _, _, _, _, _, _, _, _, _, _, sellPrice = GetItemInfo(snap.link)
+		if sellPrice and sellPrice > 0 then
+			local copper = sellPrice * (snap.count or 1)
+			BumpStat("itemsSold", 1)
+			BumpStat("goldEarned", copper)
+		end
+	end
+
+	-- Refresh the snapshot for this slot after the sell completes. Use a
+	-- short delay so the bag has time to update.
+	AfterDelay(0.1, function() RefreshSnapshotSlot(bag, slot) end)
+end)
 
 -- ============================================================================
 -- Profile Management (copy settings from another character)
@@ -655,12 +672,12 @@ UseContainerItem = TrackedUseContainerItem
 -- character, confirm, and their full profile (lists + toggles + everything)
 -- gets deep-copied onto the current character's profile key.
 --
--- This is intentionally NOT a named-profile system — just a one-way copy
+-- This is intentionally NOT a named-profile system - just a one-way copy
 -- across alts. Tracking stats are NOT copied (those are per-character data,
 -- not settings).
 
 -- Deep copy a table (handles nested tables). Values that aren't tables are
--- copied by value — functions, userdata, etc. get reference-copied but we
+-- copied by value - functions, userdata, etc. get reference-copied but we
 -- don't store those in profiles anyway.
 local function DeepCopyTable(src)
 	if type(src) ~= "table" then return src end
@@ -942,8 +959,8 @@ _G.AutoDelete_Profiles = {
 -- Deletion Scanner
 -- ============================================================================
 -- Periodic + event-driven scanner that walks the player's bags and either
--- deletes (Delete list, Auto-Delete Junk, Auto-Delete Common) or — when at
--- a vendor — sells (handled by SellItems below). Quest items are hard-
+-- deletes (Delete list, Auto-Delete Junk, Auto-Delete Common) or - when at
+-- a vendor - sells (handled by SellItems below). Quest items are hard-
 -- exempt: they short-circuit before any rule evaluation.
 
 local nextScanAt = 0
@@ -973,14 +990,31 @@ local function DeleteItems()
 	if CursorHasItem() then return end
 	local db = GetDB()
 	local profile = GetActiveProfile(db)
-	if not profile.enabled then return end
+	if not profile.enabled then
+		if _G.AutoDelete_DebugSell then
+			-- Print at most once per scan attempt to avoid spam.
+			if not _G._AutoDelete_DebugDelGateLogged then
+				print("|cffff8000[AutoDelete DEBUG]|r delete scan SKIPPED: master Enable is OFF (profile.enabled=false). Turn it on in the General tab.")
+				_G._AutoDelete_DebugDelGateLogged = true
+			end
+		end
+		return
+	end
+	_G._AutoDelete_DebugDelGateLogged = false
 
 	local wantedNames, wantedIDs = BuildWantedSets(profile.listText)
 	local hasWanted = next(wantedNames) or next(wantedIDs)
 	local doGray = profile.autoGray
 	local doCommon = profile.autoDeleteCommon
 
-	if not hasWanted and not doGray and not doCommon then return end
+	if not hasWanted and not doGray and not doCommon then
+		if _G.AutoDelete_DebugSell and not _G._AutoDelete_DebugDelEmptyLogged then
+			print("|cffff8000[AutoDelete DEBUG]|r delete scan: no work - Delete list empty AND Auto-Delete Junk/Common both off.")
+			_G._AutoDelete_DebugDelEmptyLogged = true
+		end
+		return
+	end
+	_G._AutoDelete_DebugDelEmptyLogged = false
 
 	local deleted = 0
 
@@ -990,26 +1024,33 @@ local function DeleteItems()
 			local _, _, locked, _, _, _, itemLink = GetContainerItemInfo(bag, slot)
 			if itemLink and not locked then
 				-- 6th return = itemType. Quest items (itemType "Quest") are
-				-- never auto-deleted regardless of any other rule, including
-				-- the explicit Delete list.
+				-- normally protected from auto-rules - but the Delete list is
+				-- explicit user intent and overrides quest protection. Auto
+				-- rules (autoGray, autoDeleteCommon) still respect it.
 				local itemName, _, itemQuality, _, _, itemClass = GetItemInfo(itemLink)
-				if itemClass == "Quest" then
-					-- skip this slot
-				else
-					local itemId = GetItemIDFromLink(itemLink)
-					local shouldDelete = false
+				local isQuestItem = (itemClass == "Quest")
+				local itemId = GetItemIDFromLink(itemLink)
+				local shouldDelete = false
+				local onDeleteList = false
 
-					-- Check delete list
-					if hasWanted then
-						if itemId and wantedIDs[itemId] then shouldDelete = true end
-						if not shouldDelete and itemName and wantedNames[Normalize(itemName)] then shouldDelete = true end
-					end
+				-- Check delete list FIRST. If listed, user wants it gone
+				-- regardless of quest type.
+				if hasWanted then
+					if itemId and wantedIDs[itemId] then onDeleteList = true end
+					if not onDeleteList and itemName and wantedNames[Normalize(itemName)] then onDeleteList = true end
+				end
+
+				if onDeleteList then
+					shouldDelete = true
+				elseif not isQuestItem then
+					-- Auto rules: only run when item is NOT on Delete list AND
+					-- NOT a quest item. Quest protection still applies here.
 
 					-- Check gray auto-delete (quality 0 = Poor/gray).
 					-- Shirts and tabards are always protected from auto-gray even
 					-- if they somehow came through as gray quality. Put them on
 					-- the Delete list explicitly if you want them gone.
-					if not shouldDelete and doGray and itemQuality and itemQuality == 0
+					if doGray and itemQuality and itemQuality == 0
 						and not IsCosmeticSlot(itemLink) then
 						shouldDelete = true
 					end
@@ -1025,14 +1066,31 @@ local function DeleteItems()
 							shouldDelete = true
 						end
 					end
+				end
 
-					if shouldDelete and not IsWhitelisted(profile, itemId, itemName) then
-						ClearCursor()
-						PickupContainerItem(bag, slot)
-						if CursorHasItem() then DeleteCursorItem(); ClearCursor() end
-						deleted = deleted + 1
-						BumpStat("itemsDeleted", 1)
+				-- Execute the delete. Keep list always overrides - even Delete
+				-- list entries can't bypass it (Keep is the safety net of
+				-- last resort).
+				if shouldDelete and not IsWhitelisted(profile, itemId, itemName) then
+					if _G.AutoDelete_DebugSell then
+						local reason = onDeleteList and "DeleteList" or "auto"
+						local questNote = (onDeleteList and isQuestItem) and " [QUEST ITEM, overridden by Delete list]" or ""
+						print(string.format(
+							"|cffff8000[AutoDelete DEBUG]|r DELETING: %s (id=%s) | quality=%s | reason=%s%s",
+							tostring(itemName), tostring(itemId), tostring(itemQuality), reason, questNote
+						))
 					end
+					ClearCursor()
+					PickupContainerItem(bag, slot)
+					if CursorHasItem() then DeleteCursorItem(); ClearCursor() end
+					deleted = deleted + 1
+					BumpStat("itemsDeleted", 1)
+				elseif shouldDelete and _G.AutoDelete_DebugSell then
+					-- Matched a delete rule but the Keep list overrode it.
+					print(string.format(
+						"|cffff8000[AutoDelete DEBUG]|r delete BLOCKED by Keep list: %s (id=%s)",
+						tostring(itemName), tostring(itemId)
+					))
 				end
 			end
 		end
@@ -1063,7 +1121,7 @@ local GEAR_SLOTS = {
 	INVTYPE_CLOAK = true, INVTYPE_SHIELD = true,
 	-- Accessories: rings, necks, trinkets, held off-hands, relics.
 	-- INVTYPE_BODY (shirts), INVTYPE_TABARD, INVTYPE_BAG, INVTYPE_AMMO,
-	-- and INVTYPE_QUIVER are DELIBERATELY excluded — they're either
+	-- and INVTYPE_QUIVER are DELIBERATELY excluded - they're either
 	-- cosmetic or non-gear and should never be auto-sold by category
 	-- rules. The Delete and Sell lists can still touch them via explicit
 	-- entries (which bypass these filters).
@@ -1377,7 +1435,7 @@ end
 
 -- Does `msg` contain any of the `keywords` as the start of a word?
 -- "Word start" means the keyword is preceded by start-of-string or a
--- non-alphanumeric character. What comes AFTER the keyword doesn't matter —
+-- non-alphanumeric character. What comes AFTER the keyword doesn't matter,
 -- the keyword acts as a prefix. Examples for keyword "inv":
 --   "inv"                → yes
 --   "invite"             → yes
@@ -1652,15 +1710,12 @@ local function SellItems(silent)
 				-- never be caught by the quality-based auto-sell rules.
 				local name, _, itemQuality, ilvl, _, itemClass, _, _, equipSlot, _, vendorPrice = GetItemInfo(itemLink)
 
-				-- ===== HARD EXEMPTION: Quest items are NEVER auto-sold =====
-				-- Items with itemType "Quest" are quest objectives, drops for
-				-- ongoing quests, or quest starters. They must never be touched
-				-- by any auto-sell rule, regardless of quality, BoE/BoP status,
-				-- or category settings. This check happens BEFORE any rule
-				-- evaluation so quest items short-circuit immediately.
-				if itemClass == "Quest" then
-					-- skip this slot entirely — fall through to next iteration
-				elseif vendorPrice and vendorPrice > 0 then
+				-- Quest items are normally protected from auto-rules, but
+				-- the explicit Sell list overrides quest protection (user
+				-- intent wins). Auto rules still respect quest items.
+				local isQuestItem = (itemClass == "Quest")
+
+				if vendorPrice and vendorPrice > 0 then
 					-- "Gear" = equippable slot.
 					-- For weapon-slot items (weapons, shields, holdables, ranged,
 					-- thrown, relics) we accept ANY itemClass because on PE these
@@ -1682,12 +1737,12 @@ local function SellItems(silent)
 					-- Auto-Delete Junk/Common live in the delete scanner).
 					--
 					-- Priority order (highest first):
-					--   1. Keep list — always wins, skips everything below
-					--   2. Sell list — explicit user intent
-					--   3. Auto-Sell Greens — global toggle on green gear
-					--   4. BoE Weapons section — Rare/Epic only, iLvl gated
-					--   5. BoP section          — Rare/Epic only, iLvl gated
-					--   6. BoE Armor section    — Rare/Epic only, iLvl gated
+					--   1. Keep list  - always wins, skips everything below
+					--   2. Sell list  - explicit user intent (overrides quest protection)
+					--   3. Greens     - auto-sell, gear only, skips quest items
+					--   4. BoE Weapons - Rare/Epic, iLvl gated, skips quest items
+					--   5. BoP         - Rare/Epic, iLvl gated, skips quest items
+					--   6. BoE Armor   - Rare/Epic, iLvl gated, skips quest items
 					-- An item can only match one rule per scan.
 					-- ============================================================
 
@@ -1707,52 +1762,57 @@ local function SellItems(silent)
 							shouldSell = true; sellReason = "list"
 						end
 
-						-- Step 3: Auto-Sell Greens (global). Junk and Common
-						-- are DELETED by the delete scanner, not sold here.
-						if not shouldSell and itemQuality == 2 and profile.autoSellGreens and isGearItem then
-							shouldSell = true; sellReason = "greens"
-						end
+						-- Steps 3-6 only run for non-quest items. A quest
+						-- item only sells if Step 2 matched it explicitly.
+						if not shouldSell and not isQuestItem then
 
-						-- Steps 4-6: Sell-tab category sections. Each is
-						-- independent. An item is matched to exactly one
-						-- category (the first that fits in priority order).
-						if not shouldSell and isGearItem
-							and (itemQuality == 3 or itemQuality == 4) then
-
-							local isBoE = IsBindOnEquip(bag, slot)
-							local rarityIsRare = (itemQuality == 3)
-							local rarityIsEpic = (itemQuality == 4)
-
-							-- Helper: is the item's iLvl inside [min, max]?
-							local function inRange(min, max)
-								return ilvl and ilvl >= (min or 1) and ilvl <= (max or 199)
+							-- Step 3: Auto-Sell Greens (global). Junk and Common
+							-- are DELETED by the delete scanner, not sold here.
+							if not shouldSell and itemQuality == 2 and profile.autoSellGreens and isGearItem then
+								shouldSell = true; sellReason = "greens"
 							end
 
-							-- Step 4: BoE Weapons (BoE + WEAPON_SLOTS).
-							if isBoE and isWeaponSlot and profile.boeWeaponsEnabled then
-								local rarityOn = (rarityIsRare and profile.boeWeaponsRare)
-									or (rarityIsEpic and profile.boeWeaponsEpic)
-								if rarityOn and inRange(profile.boeWeaponsIlvlMin, profile.boeWeaponsIlvlMax) then
-									shouldSell = true; sellReason = "boeWeapons"
+							-- Steps 4-6: Sell-tab category sections. Each is
+							-- independent. An item is matched to exactly one
+							-- category (the first that fits in priority order).
+							if not shouldSell and isGearItem
+								and (itemQuality == 3 or itemQuality == 4) then
+
+								local isBoE = IsBindOnEquip(bag, slot)
+								local rarityIsRare = (itemQuality == 3)
+								local rarityIsEpic = (itemQuality == 4)
+
+								-- Helper: is the item's iLvl inside [min, max]?
+								local function inRange(min, max)
+									return ilvl and ilvl >= (min or 1) and ilvl <= (max or 199)
 								end
 
-							-- Step 5: BoP (any non-BoE gear).
-							elseif (not isBoE) and profile.bopEnabled then
-								local rarityOn = (rarityIsRare and profile.bopRare)
-									or (rarityIsEpic and profile.bopEpic)
-								if rarityOn and inRange(profile.bopIlvlMin, profile.bopIlvlMax) then
-									shouldSell = true; sellReason = "bop"
-								end
+								-- Step 4: BoE Weapons (BoE + WEAPON_SLOTS).
+								if isBoE and isWeaponSlot and profile.boeWeaponsEnabled then
+									local rarityOn = (rarityIsRare and profile.boeWeaponsRare)
+										or (rarityIsEpic and profile.boeWeaponsEpic)
+									if rarityOn and inRange(profile.boeWeaponsIlvlMin, profile.boeWeaponsIlvlMax) then
+										shouldSell = true; sellReason = "boeWeapons"
+									end
 
-							-- Step 6: BoE Armor (BoE, NOT weapon-slot).
-							elseif isBoE and (not isWeaponSlot) and profile.boeArmorEnabled then
-								local rarityOn = (rarityIsRare and profile.boeArmorRare)
-									or (rarityIsEpic and profile.boeArmorEpic)
-								if rarityOn and inRange(profile.boeArmorIlvlMin, profile.boeArmorIlvlMax) then
-									shouldSell = true; sellReason = "boeArmor"
+								-- Step 5: BoP (any non-BoE gear).
+								elseif (not isBoE) and profile.bopEnabled then
+									local rarityOn = (rarityIsRare and profile.bopRare)
+										or (rarityIsEpic and profile.bopEpic)
+									if rarityOn and inRange(profile.bopIlvlMin, profile.bopIlvlMax) then
+										shouldSell = true; sellReason = "bop"
+									end
+
+								-- Step 6: BoE Armor (BoE, NOT weapon-slot).
+								elseif isBoE and (not isWeaponSlot) and profile.boeArmorEnabled then
+									local rarityOn = (rarityIsRare and profile.boeArmorRare)
+										or (rarityIsEpic and profile.boeArmorEpic)
+									if rarityOn and inRange(profile.boeArmorIlvlMin, profile.boeArmorIlvlMax) then
+										shouldSell = true; sellReason = "boeArmor"
+									end
 								end
 							end
-						end
+						end  -- close: if not shouldSell and not isQuestItem
 					end
 
 					if shouldSell then
@@ -1846,7 +1906,7 @@ local function CreateElvUIBagButton()
 	if not bagFrame then return end
 
 	-- =====================================================
-	-- Delete button (red X) — leftmost in the Delete | Sell | Keep row
+	-- Delete button (red X) - leftmost in the Delete | Sell | Keep row
 	-- =====================================================
 	local btn = CreateFrame("Button", "AutoDelete_ElvUIBagBtn", bagFrame)
 	btn:SetSize(20, 20)
@@ -1894,7 +1954,7 @@ local function CreateElvUIBagButton()
 	end)
 
 	-- =====================================================
-	-- Sell button (gold coin) — middle of the row
+	-- Sell button (gold coin) - middle of the row
 	-- =====================================================
 	local sellBtn = CreateFrame("Button", "AutoDelete_ElvUISellBtn", bagFrame)
 	sellBtn:SetSize(20, 20)
@@ -1948,11 +2008,11 @@ local function CreateElvUIBagButton()
 	end)
 
 	-- =====================================================
-	-- Keep button (chocolate box) — rightmost in the row
+	-- Keep button (chocolate box) - rightmost in the row
 	-- =====================================================
 	-- Drop item to add to Keep list; right-click opens the panel and jumps
 	-- to the Keep tab. No left-click action (Keep has no vendor/destroy
-	-- equivalent — it's a passive protection list).
+	-- equivalent - it's a passive protection list).
 	local keepBtn = CreateFrame("Button", "AutoDelete_ElvUIKeepBtn", bagFrame)
 	keepBtn:SetSize(20, 20)
 	keepBtn:SetPoint("LEFT", sellBtn, "RIGHT", 4, 0)
@@ -2004,7 +2064,7 @@ end
 -- Cached Profile + Event Frame
 -- ============================================================================
 -- RefreshCachedProfile updates the upvalue declared at the top of the file
--- (do NOT use `local function` here — that would shadow the forward-declared
+-- (do NOT use `local function` here - that would shadow the forward-declared
 -- local that all the closures captured).
 --
 -- The `scanner` Frame is the single event hub for the addon. Its OnEvent
@@ -2393,7 +2453,7 @@ local function ShowWelcomePopup()
 	footerDivider:SetVertexColor(0.18, 0.18, 0.18, 1)
 
 	-- Don't-show-again checkbox (left side of footer bar). Parented to
-	-- footerBar so it draws on top of the footer's backdrop — children of
+	-- footerBar so it draws on top of the footer's backdrop - children of
 	-- a child frame stack above the parent's overlay regions.
 	local dontShow = false
 	local dsCheck = CreateFrame("Button", nil, footerBar)
@@ -2555,6 +2615,33 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 			if not (_G.AutoDeleteDB and _G.AutoDeleteDB.welcomeDismissed) then
 				ShowWelcomePopup()
 			end
+			-- One-shot scan: detect items present on more than one list
+			-- (Delete + Sell, Delete + Keep, Sell + Keep). The add-time
+			-- conflict check prevents new ones, but imports, manual text
+			-- edits, or older saves can leave overlaps. We warn the user
+			-- in chat and direct them to /del clean.
+			local p = cachedProfile
+			if p then
+				local function buildKeySet(text)
+					local set = {}
+					for line in string.gmatch(text or "", "[^\r\n]+") do
+						local raw = Trim(line)
+						if raw ~= "" then set[raw] = true end
+					end
+					return set
+				end
+				local delSet  = buildKeySet(p.listText)
+				local sellSet = buildKeySet(p.sellListText)
+				local keepSet = buildKeySet(p.whitelistText)
+				local conflicts = 0
+				for k in pairs(delSet)  do if sellSet[k] then conflicts = conflicts + 1 end end
+				for k in pairs(delSet)  do if keepSet[k] then conflicts = conflicts + 1 end end
+				for k in pairs(sellSet) do if keepSet[k] then conflicts = conflicts + 1 end end
+				if conflicts > 0 then
+					print("|cffff4444[AutoDelete]|r Warning: " .. conflicts ..
+						" item(s) appear on more than one list. Run |cff00ff00/del clean|r to resolve.")
+				end
+			end
 		end)
 		return
 	end
@@ -2564,6 +2651,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		sellSessionCount = 0
 		sellSessionCopper = 0
 		sellDryTicks = 0
+		-- Snapshot bags so the UseContainerItem hook can identify what the
+		-- player just sold (the slot is empty by the time the hook fires).
+		SnapshotAllBags()
 		-- Sample inventory worth BEFORE selling (otherwise we'd always sample
 		-- post-sell bags, underselling the average).
 		SampleInventoryWorth()
@@ -2715,7 +2805,7 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 		lastMountState = nowMounted
 		if nowMounted then
 			-- Mounting. Dismiss whichever pet we were tracking, and remember
-			-- so dismount can restore it (scav only — merchant gets summoned
+			-- so dismount can restore it (scav only - merchant gets summoned
 			-- via bag-full trigger, not mount flow).
 			local scavIdx, scavUp = FindCompanionByName("greedy scavenger")
 			local merchIdx, merchUp = FindCompanionByName("goblin merchant")
@@ -2742,7 +2832,7 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 	-- (2) Stuck detection (summoned-flag based).
 	-- If we were tracking a pet and it's no longer summoned, decide whether
 	-- to re-summon. We DON'T re-summon if a DIFFERENT companion is currently
-	-- up — that means the user (or our own merchant-summon) deliberately
+	-- up - that means the user (or our own merchant-summon) deliberately
 	-- swapped pets, and forcing the old one back would fight that intent.
 	local function IsAnyOtherCompanionUp(currentName)
 		local n = GetNumCompanions("CRITTER")
@@ -2829,7 +2919,7 @@ end
 -- /autodelete        -> alias for /del
 
 -- ----------------------------------------------------------------------------
--- /del clean — remove duplicate entries from Delete + Sell lists
+-- /del clean - remove duplicate entries from Delete + Sell lists
 -- ============================================================================
 -- Rules:
 --   * Within a single list: keep first occurrence, remove subsequent duplicates
@@ -2875,8 +2965,9 @@ local function CleanLists()
 		return entries
 	end
 
-	local delEntries = Parse(profile.listText)
+	local delEntries  = Parse(profile.listText)
 	local sellEntries = Parse(profile.sellListText)
+	local keepEntries = Parse(profile.whitelistText)
 
 	-- 1. Dedupe within each list (first occurrence wins)
 	local function DedupeWithin(entries)
@@ -2892,16 +2983,40 @@ local function CleanLists()
 		return kept, dupes
 	end
 
-	local keptDel, internalDelDupes = DedupeWithin(delEntries)
+	local keptDel,  internalDelDupes  = DedupeWithin(delEntries)
 	local keptSell, internalSellDupes = DedupeWithin(sellEntries)
+	local keptKeep, internalKeepDupes = DedupeWithin(keepEntries)
 
-	-- 2. Find cross-list overlap and remove from BOTH
+	-- 2a. Keep overrides Delete/Sell. Items on Keep AND Delete/Sell get
+	-- removed from Delete/Sell (matches runtime semantics: Keep always wins).
+	local keepKeys = {}
+	for _, e in ipairs(keptKeep) do keepKeys[e.key] = true end
+
+	local keepBlockedFromDel, keepBlockedFromSell = {}, {}
+	local afterKeepDel, afterKeepSell = {}, {}
+	for _, e in ipairs(keptDel) do
+		if keepKeys[e.key] then
+			table.insert(keepBlockedFromDel, e.display)
+		else
+			table.insert(afterKeepDel, e)
+		end
+	end
+	for _, e in ipairs(keptSell) do
+		if keepKeys[e.key] then
+			table.insert(keepBlockedFromSell, e.display)
+		else
+			table.insert(afterKeepSell, e)
+		end
+	end
+
+	-- 2b. Find Delete + Sell overlap. Both get removed (no winner; user
+	-- re-adds to their preferred list manually).
 	local sellKeys = {}
-	for _, e in ipairs(keptSell) do sellKeys[e.key] = true end
+	for _, e in ipairs(afterKeepSell) do sellKeys[e.key] = true end
 
 	local crossDupes, finalDel, finalSell = {}, {}, {}
 	local crossKeys = {}
-	for _, e in ipairs(keptDel) do
+	for _, e in ipairs(afterKeepDel) do
 		if sellKeys[e.key] then
 			crossKeys[e.key] = true
 			table.insert(crossDupes, e.display)
@@ -2909,17 +3024,22 @@ local function CleanLists()
 			table.insert(finalDel, e.raw)
 		end
 	end
-	for _, e in ipairs(keptSell) do
+	for _, e in ipairs(afterKeepSell) do
 		if not crossKeys[e.key] then
 			table.insert(finalSell, e.raw)
 		end
 	end
+
+	local finalKeep = {}
+	for _, e in ipairs(keptKeep) do table.insert(finalKeep, e.raw) end
 
 	-- Rewrite list text (preserve trailing newline if there were entries)
 	profile.listText = table.concat(finalDel, "\n")
 	if #finalDel > 0 then profile.listText = profile.listText .. "\n" end
 	profile.sellListText = table.concat(finalSell, "\n")
 	if #finalSell > 0 then profile.sellListText = profile.sellListText .. "\n" end
+	profile.whitelistText = table.concat(finalKeep, "\n")
+	if #finalKeep > 0 then profile.whitelistText = profile.whitelistText .. "\n" end
 
 	RefreshCachedProfile()
 
@@ -2931,11 +3051,21 @@ local function CleanLists()
 	if #internalSellDupes > 0 then
 		print("  |cff999999Removed " .. #internalSellDupes .. " internal duplicate(s) in Sell list:|r " .. table.concat(internalSellDupes, ", "))
 	end
+	if #internalKeepDupes > 0 then
+		print("  |cff999999Removed " .. #internalKeepDupes .. " internal duplicate(s) in Keep list:|r " .. table.concat(internalKeepDupes, ", "))
+	end
+	if #keepBlockedFromDel > 0 then
+		print("|cff80c0ff  Removed from Delete (already on Keep, Keep wins):|r " .. table.concat(keepBlockedFromDel, ", "))
+	end
+	if #keepBlockedFromSell > 0 then
+		print("|cff80c0ff  Removed from Sell (already on Keep, Keep wins):|r " .. table.concat(keepBlockedFromSell, ", "))
+	end
 	if #crossDupes > 0 then
-		print("|cffff4444  Removed from BOTH lists (appeared in each):|r " .. table.concat(crossDupes, ", "))
+		print("|cffff4444  Removed from BOTH Delete and Sell (appeared in each):|r " .. table.concat(crossDupes, ", "))
 		print("  |cffaaaaaaRe-add these manually to your preferred list.|r")
 	end
-	if #internalDelDupes == 0 and #internalSellDupes == 0 and #crossDupes == 0 then
+	if #internalDelDupes == 0 and #internalSellDupes == 0 and #internalKeepDupes == 0
+		and #keepBlockedFromDel == 0 and #keepBlockedFromSell == 0 and #crossDupes == 0 then
 		print("  |cff999999No duplicates found.|r")
 	end
 
@@ -2947,7 +3077,7 @@ local function CleanLists()
 end
 
 -- ============================================================================
--- Profile Import — merge the 3 lists from another character's profile
+-- Profile Import - merge the 3 lists from another character's profile
 -- ============================================================================
 -- The three list keys in a profile, with their display labels. Order matters
 -- for the popup radio buttons (D / S / K).
@@ -3143,30 +3273,120 @@ _G.AutoDelete_Profiles.PreviewImport = PreviewImport
 _G.AutoDelete_Profiles.ApplyImport = ApplyImport
 
 -- ============================================================================
--- Shift-click bag item → fill the Search & Manage filter box
+-- Shift-click item link (handler)
 -- ============================================================================
--- Hooks HandleModifiedItemClick (the global that fires on shift-click of any
--- item link or bag item). If our settings panel is open, we pull the item's
--- name out of the link and push it into the panel's search box. The existing
--- filter path then reduces the visible list to matching entries.
-hooksecurefunc("HandleModifiedItemClick", function(link)
-	if not link then return end
-	if not IsShiftKeyDown() then return end
+-- Behaviors:
+--   1. If our settings panel is visible, we push the item's name into the
+--      search box and refresh the list view (regardless of focus).
+--   2. If NO editbox has keyboard focus, add the item to the Keep list.
+--      AddItemToList enforces cross-list conflict refusal (an item already on
+--      Delete/Sell will be refused with a chat message). If an editbox IS
+--      focused, the chat-link path falls through to the original
+--      ChatEdit_InsertLink so the link inserts into that editbox normally.
+--
+-- Both behaviors can fire together: panel open + nothing focused = search
+-- fills AND item gets added to Keep.
+
+-- Shared handler. Returns true if it handled the click (caller should NOT
+-- call the original ChatEdit_InsertLink), false to fall through to default.
+-- Caller is responsible for ensuring shift is held before invoking us; we
+-- assume shift-click semantics throughout.
+local lastHandledItemId = nil
+local lastHandledAt = 0
+local function HandleShiftClickLink(link, source)
+	if not link then return false end
+	if _G.AutoDelete_DebugSell then
+		print("|cffff8000[AutoDelete DEBUG]|r shift-click via " .. source .. ". link=" .. tostring(link))
+	end
+
+	local itemId = GetItemIDFromLink(link)
+	if _G.AutoDelete_DebugSell then
+		print("|cffff8000[AutoDelete DEBUG]|r extracted itemId=" .. tostring(itemId))
+	end
+	if not itemId then return false end
+
+	-- Dedupe: a single shift-click in chat fires both ChatEdit_InsertLink AND
+	-- HandleModifiedItemClick, which would double-print "added/already in
+	-- list". Suppress the second invocation within a 0.5s window.
+	local now = GetTime()
+	if lastHandledItemId == itemId and (now - lastHandledAt) < 0.5 then
+		if _G.AutoDelete_DebugSell then
+			print("|cffff8000[AutoDelete DEBUG]|r duplicate within window, skipping")
+		end
+		-- Still return true on the chat-link path so we don't double-insert
+		-- into the chat editbox. The first call already handled the action.
+		return source == "ChatEdit_InsertLink"
+	end
+	lastHandledItemId = itemId
+	lastHandledAt = now
+
+	-- Behavior 1: Panel-open search box fill.
 	local panel = _G.AutoDeleteOptionsPanel
-	if not panel or not panel._built or not panel:IsVisible() then return end
+	local panelHandled = false
+	if panel and panel._built and panel:IsVisible() then
+		local name = GetItemInfo(link) or GetItemInfo(itemId)
+		if name and name ~= "" and panel._searchBox and panel._searchBox.SetText then
+			panel._searchBox:SetText(name)
+			panel._searchBox:SetCursorPosition(#name)
+			if panel._searchPlaceholder then panel._searchPlaceholder:Hide() end
+			panel._filterText = name
+			if panel.Refresh then panel:Refresh() end
+			panelHandled = true
+		end
+	end
 
-	local name = GetItemInfo(link)
-	if not name or name == "" then return end
+	-- Behavior 2: Add to Keep when no editbox has focus.
+	local focus = GetCurrentKeyBoardFocus and GetCurrentKeyBoardFocus()
+	if _G.AutoDelete_DebugSell then
+		print("|cffff8000[AutoDelete DEBUG]|r focus=" .. tostring(focus) .. " panelHandled=" .. tostring(panelHandled))
+	end
+	if focus then
+		-- An editbox is focused. Don't add to Keep; let the default chat-edit
+		-- path put the link there. Return panelHandled so we eat the call
+		-- if the panel's search box was the focused field (preventing the
+		-- link from being inserted as raw text into our own search field).
+		return panelHandled
+	end
 
-	if panel._searchBox and panel._searchBox.SetText then
-		panel._searchBox:SetText(name)
-		panel._searchBox:SetCursorPosition(#name)
-		if panel._searchPlaceholder then panel._searchPlaceholder:Hide() end
-		-- OnTextChanged will update _filterText and call Refresh, but we also
-		-- set _filterText directly in case the SetText call is silent in some
-		-- edge case (frame not yet visible, etc.).
-		panel._filterText = name
-		if panel.Refresh then panel:Refresh() end
+	AddItemToList("whitelistText", itemId)
+	-- Eat the call so the link doesn't ALSO get inserted into the chat edit
+	-- box (which auto-opens for chat links if no focus).
+	return true
+end
+
+-- ============================================================================
+-- Hook points
+-- ============================================================================
+-- WoW 3.3.5 routes shift-clicks on item links through different functions:
+--
+--   * Chat hyperlinks                  -> ChatEdit_InsertLink(text)
+--                                         (replace this so we can suppress
+--                                          the default insert-into-chat
+--                                          behavior when consuming the click)
+--   * Bag items, char pane, action bar -> HandleModifiedItemClick(link)
+--                                         (hooksecurefunc is fine - no
+--                                          default behavior to suppress)
+--
+-- IMPORTANT: ChatEdit_InsertLink is ALSO called internally by Blizzard for
+-- non-shift paths. We MUST gate the wrapper on IsShiftKeyDown() so right-click
+-- and plain-click on items fall through unchanged. Without the gate, returning
+-- true on a non-shift call would swallow the original.
+--
+-- Pattern lifted from EbonholdStuff which handles this same problem.
+
+local AutoDelete_Original_ChatEdit_InsertLink = ChatEdit_InsertLink
+ChatEdit_InsertLink = function(link)
+	-- Only intercept actual shift-clicks. All other paths fall straight
+	-- through to the original.
+	if IsShiftKeyDown() and HandleShiftClickLink(link, "ChatEdit_InsertLink") then
+		return true
+	end
+	return AutoDelete_Original_ChatEdit_InsertLink(link)
+end
+
+hooksecurefunc("HandleModifiedItemClick", function(link)
+	if IsShiftKeyDown() then
+		HandleShiftClickLink(link, "HandleModifiedItemClick")
 	end
 end)
 
@@ -3197,7 +3417,7 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		-- equipSlot, itemClass, isWeaponSlot, bind status, sellReason).
 		_G.AutoDelete_DebugSell = not _G.AutoDelete_DebugSell
 		if _G.AutoDelete_DebugSell then
-			print("|cffff8000[AutoDelete]|r sell debug |cff00ff00ON|r — every auto-sell will now print its decision inputs.")
+			print("|cffff8000[AutoDelete]|r sell debug |cff00ff00ON|r - every auto-sell will now print its decision inputs.")
 		else
 			print("|cffff8000[AutoDelete]|r sell debug |cffff5555OFF|r.")
 		end
