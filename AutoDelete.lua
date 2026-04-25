@@ -1998,7 +1998,7 @@ local function ShowWelcomePopup()
 
 	-- Outer frame
 	local f = CreateFrame("Frame", "AutoDelete_WelcomePopup", UIParent)
-	f:SetSize(440, 500)
+	f:SetSize(440, 600)
 	f:SetPoint("CENTER")
 	f:SetFrameStrata("DIALOG")
 	f:SetFrameLevel(100)
@@ -2297,6 +2297,30 @@ local function ShowWelcomePopup()
 		"The Sell tab also has filters by quality and item level for BoE Armor, BoP, and BoE Weapons."
 	)
 	hiwBody:SetHeight(82)
+
+	-- Warning callout: bright red box reminding users to put valuable items
+	-- on the Keep list before enabling auto-delete/auto-sell rules. Sits
+	-- between 'How it works' and the footer. Backdrop with red border for
+	-- visual punch so it can't be missed.
+	local warnFrame = CreateFrame("Frame", nil, f)
+	warnFrame:SetPoint("TOPLEFT", 16, -454)
+	warnFrame:SetPoint("TOPRIGHT", -16, -454)
+	warnFrame:SetHeight(84)
+	warnFrame:SetBackdrop({
+		bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 2,
+	})
+	warnFrame:SetBackdropColor(0.18, 0.04, 0.04, 1)
+	warnFrame:SetBackdropBorderColor(0.85, 0.15, 0.15, 1)
+
+	local warnText = warnFrame:CreateFontString(nil, "OVERLAY")
+	warnText:SetFont(FONT, 12, "OUTLINE")
+	warnText:SetPoint("TOPLEFT", 10, -8)
+	warnText:SetPoint("BOTTOMRIGHT", -10, 8)
+	warnText:SetJustifyH("CENTER")
+	warnText:SetJustifyV("MIDDLE")
+	warnText:SetWordWrap(true)
+	warnText:SetTextColor(1, 0.30, 0.30, 1)
+	warnText:SetText("FAIR WARNING\nTo prevent valuable items from being sold or deleted, ADD THEM TO YOUR KEEP LIST BEFORE YOU TURN AUTODELETE ON.")
 
 	-- Footer bar: darker strip with a divider line on top, separating the
 	-- "Don't show again" checkbox + Open Settings button from the body.

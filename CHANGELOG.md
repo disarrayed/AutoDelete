@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12] - 2026-04-25
+
+### Added
+
+- Welcome popup now includes a bright red warning callout near the bottom reminding users to add valuable items to the Keep list before enabling auto-delete or auto-sell rules. Reopen the popup anytime with `/del setup`.
+
 ## [3.11] - 2026-04-25
 
 ### Added
