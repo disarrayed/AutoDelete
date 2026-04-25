@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.13] - 2026-04-25
+
+### Fixed
+
+- **BoE detection failed on PE-ElvUI environments**, causing every BoE item to be misclassified as BoP and incorrectly sold by the BoP rule. The hidden tooltip used to scan for "Binds when equipped" was returning zero lines on certain setups. Fix: tooltip now uses a real off-screen owner frame and forces a Show/Hide cycle around the line read so the engine populates lines synchronously.
+
+### Added
+
+- New `/del debug` slash command. Toggles a sell-decision trace that prints the inputs (item id, quality, ilvl, slot, bind status, and which rule matched) for every auto-sell. Useful for diagnosing unexpected behavior.
+
 ## [3.12] - 2026-04-25
 
 ### Added

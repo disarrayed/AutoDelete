@@ -1084,23 +1084,56 @@ local WEAPON_SLOTS = {
 
 -- Hidden tooltip used to read "Binds when equipped" text from bag items.
 -- 3.3.5 has no API to query bind type directly, so we scan the actual
--- tooltip lines. Created once and reused; SetBagItem clears prior lines.
+-- tooltip lines.
+--
+-- Important quirk: setting the owner to UIParent with ANCHOR_NONE works on
+-- a vanilla client but on some setups (notably PE-ElvUI) SetBagItem leaves
+-- the tooltip with 0 lines until the tooltip is actually shown. The fix is
+-- to give it a real off-screen owner frame and force a Show/Hide cycle
+-- around the read so the engine populates lines synchronously.
+local boeTipOwner = CreateFrame("Frame", nil, UIParent)
+boeTipOwner:SetSize(1, 1)
+boeTipOwner:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+boeTipOwner:Hide()  -- never visible; just an owner anchor
+
 local boeTip = CreateFrame("GameTooltip", "AutoDelete_BoETip", UIParent, "GameTooltipTemplate")
-boeTip:SetOwner(UIParent, "ANCHOR_NONE")
+boeTip:SetClampedToScreen(false)
 
 local function IsBindOnEquip(bag, slot)
+	boeTip:Hide()
+	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
 	boeTip:ClearLines()
 	boeTip:SetBagItem(bag, slot)
-	for i = 2, boeTip:NumLines() do
+	-- Force population on environments where SetBagItem alone leaves
+	-- NumLines == 0 until the tooltip is shown.
+	boeTip:Show()
+	local n = boeTip:NumLines()
+
+	local foundBoE = false
+	local debug = _G.AutoDelete_DebugSell
+	local lines = debug and {} or nil
+	for i = 2, n do
 		local text = _G["AutoDelete_BoETipTextLeft" .. i]
 		if text then
 			local line = text:GetText()
+			if debug and line then
+				table.insert(lines, "  ["..i.."] "..line)
+			end
 			if line and string.find(line, "Binds when equipped") then
-				return true
+				foundBoE = true
+				if not debug then
+					boeTip:Hide()
+					return true
+				end
 			end
 		end
 	end
-	return false
+	if debug then
+		print("|cffff8000[AutoDelete DEBUG]|r tooltip scan ("..n.." lines, foundBoE="..tostring(foundBoE).."):")
+		for _, l in ipairs(lines) do print(l) end
+	end
+	boeTip:Hide()
+	return foundBoE
 end
 
 -- Merchant name tracking for Greedy Scavenger summon
@@ -1723,6 +1756,24 @@ local function SellItems(silent)
 					end
 
 					if shouldSell then
+						-- DEBUG TRACE: print why the item is selling. Toggle with /del debug.
+						-- Shows every input that fed the decision chain so the user can
+						-- pinpoint which rule is matching when something unexpected sells.
+						if _G.AutoDelete_DebugSell then
+							local idStr = itemId and tostring(itemId) or "nil"
+							local boeStr = "?"
+							if sellReason ~= "list" and sellReason ~= "greens" then
+								-- isBoE was already computed in the rule chain above
+								boeStr = (sellReason == "bop") and "BoP" or "BoE"
+							end
+							print(string.format(
+								"|cffff8000[AutoDelete DEBUG]|r SOLD: %s (id=%s) | reason=%s | quality=%s | ilvl=%s | equipSlot=%s | itemClass=%s | isGear=%s | isWeaponSlot=%s | bind=%s",
+								tostring(name), idStr, tostring(sellReason),
+								tostring(itemQuality), tostring(ilvl),
+								tostring(equipSlot), tostring(itemClass),
+								tostring(isGearItem), tostring(isWeaponSlot), boeStr
+							))
+						end
 						-- Flag this call so the UseContainerItem hook skips
 						-- (we record the BumpStat directly below).
 						autoDeleteSelling = true
@@ -3138,6 +3189,18 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		_G.AutoDeleteDB = _G.AutoDeleteDB or {}
 		_G.AutoDeleteDB.welcomeDismissed = false
 		ShowWelcomePopup()
+		return
+	end
+	if arg == "debug" then
+		-- Toggle the sell-decision debug trace. When on, every item that
+		-- sells via the auto-rules prints its inputs (id, quality, ilvl,
+		-- equipSlot, itemClass, isWeaponSlot, bind status, sellReason).
+		_G.AutoDelete_DebugSell = not _G.AutoDelete_DebugSell
+		if _G.AutoDelete_DebugSell then
+			print("|cffff8000[AutoDelete]|r sell debug |cff00ff00ON|r — every auto-sell will now print its decision inputs.")
+		else
+			print("|cffff8000[AutoDelete]|r sell debug |cffff5555OFF|r.")
+		end
 		return
 	end
 	local panel = _G.AutoDeleteOptionsPanel
