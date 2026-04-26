@@ -160,7 +160,7 @@ local DEFAULT_PROFILE = {
 	summonScavenger            = false,
 	summonAfterSell            = true,    -- summon scav after vendor sell completes
 	summonAfterClose           = false,   -- summon scav after vendor window closes
-	summonOnlyInCombat         = false,   -- gate after-sell/after-close on IsInCombat()
+	summonOnlyInCombat         = true,    -- gate ALL auto-summon paths on UnitAffectingCombat("player")
 	summonMerchantWhenBagsFull = false,   -- summon Goblin Merchant when bags hit 0 free for 3s+
 
 	-- ============================================================
@@ -188,7 +188,6 @@ local DEFAULT_PROFILE = {
 	autoInviteApplyLootRule   = false,
 	autoInviteLootRule        = "freeforall",
 	autoInviteConvertToRaid   = false,    -- convert party→raid when 6th player joins
-	autoInviteInviteRequester = false,    -- when YOU whisper a keyword TO someone, invite them
 }
 
 local function NewProfile(overrides)
@@ -1209,52 +1208,94 @@ local function FormatMoney(totalCopper)
 	return money
 end
 
-local function SummonGreedyScavenger()
-	local numCritters = GetNumCompanions("CRITTER")
+-- Creature IDs for the PE companions we care about. These are the canonical
+-- identifiers Blizzard's GetCompanionInfo returns. Caching them lets us
+-- look up by ID instead of a fragile name-string-match. We discover the IDs
+-- on first use (the user must own the companion for it to appear in the
+-- companion list, so we can't hardcode the ID here without risk of staleness
+-- on future server changes).
+local SCAVENGER_CREATURE_ID = nil  -- discovered on first lookup
+local MERCHANT_CREATURE_ID  = nil  -- discovered on first lookup
+
+-- Find a companion by name and cache its creature ID for future lookups.
+-- Returns: (index, isSummoned, creatureID) or (nil, false, nil)
+local function FindCompanionByName(name)
+	if not name or name == "" then return nil, false, nil end
+	local numCritters = GetNumCompanions("CRITTER") or 0
+	local needle = string.lower(name)
 	for i = 1, numCritters do
-		local _, name = GetCompanionInfo("CRITTER", i)
-		if name and string.find(string.lower(name), "greedy scavenger") then
-			CallCompanion("CRITTER", i)
-			print("|cffff8000[AutoDelete]|r: Summoned Greedy Scavenger")
-			if _G.AutoDelete_SetActiveTrackedPet then
-				_G.AutoDelete_SetActiveTrackedPet("scavenger")
-			end
-			return
+		local cId, cName, _, _, summoned = GetCompanionInfo("CRITTER", i)
+		if cName and string.find(string.lower(cName), needle) then
+			return i, (summoned == 1 or summoned == true), cId
 		end
+	end
+	return nil, false, nil
+end
+
+-- ID-first companion lookup. If the cached ID isn't found (rare: server
+-- reshuffled companion list), falls back to name search and re-caches.
+local function FindCompanionById(creatureId, fallbackName)
+	if not creatureId then
+		return FindCompanionByName(fallbackName)
+	end
+	local numCritters = GetNumCompanions("CRITTER") or 0
+	for i = 1, numCritters do
+		local cId, _, _, _, summoned = GetCompanionInfo("CRITTER", i)
+		if cId == creatureId then
+			return i, (summoned == 1 or summoned == true), cId
+		end
+	end
+	-- ID not found - re-resolve from name. This also re-caches the ID.
+	return FindCompanionByName(fallbackName)
+end
+
+local function SummonGreedyScavenger(force)
+	local idx, isUp, cId = FindCompanionById(SCAVENGER_CREATURE_ID, "greedy scavenger")
+	if cId then SCAVENGER_CREATURE_ID = cId end  -- cache for next time
+	if not idx then return end  -- player doesn't own it
+	-- Idempotent: already summoned, don't toggle off and re-call.
+	-- Skipped when force=true (used by distance-based stuck detection where
+	-- we just dismissed the pet and need to re-summon at the new position
+	-- regardless of what the API still claims).
+	if isUp and not force then
+		if _G.AutoDelete_SetActiveTrackedPet then
+			_G.AutoDelete_SetActiveTrackedPet("scavenger")
+		end
+		return
+	end
+	CallCompanion("CRITTER", idx)
+	print("|cffff8000[AutoDelete]|r: Summoned Greedy Scavenger")
+	if _G.AutoDelete_SetActiveTrackedPet then
+		_G.AutoDelete_SetActiveTrackedPet("scavenger")
+	end
+	-- Mark when we summoned so the user-dismiss-vs-leash classification can
+	-- distinguish a fast manual dismiss (within USER_DISMISS_WINDOW) from a
+	-- slow range-leash. See companion watcher state for full rationale.
+	if _G.AutoDelete_RecordSummonAt then
+		_G.AutoDelete_RecordSummonAt(GetTime())
 	end
 end
 
 -- Summon the Goblin Merchant companion (PE vendor pet).
--- Same pattern as SummonGreedyScavenger but matched by name.
-local function SummonGoblinMerchant()
-	local numCritters = GetNumCompanions("CRITTER")
-	for i = 1, numCritters do
-		local _, name = GetCompanionInfo("CRITTER", i)
-		if name and string.find(string.lower(name), "goblin merchant") then
-			CallCompanion("CRITTER", i)
-			print("|cffff8000[AutoDelete]|r: Summoned Goblin Merchant. Target it and press your Interact With Target keybind to open the vendor.")
-			if _G.AutoDelete_SetActiveTrackedPet then
-				_G.AutoDelete_SetActiveTrackedPet("merchant")
-			end
-			return
+local function SummonGoblinMerchant(force)
+	local idx, isUp, cId = FindCompanionById(MERCHANT_CREATURE_ID, "goblin merchant")
+	if cId then MERCHANT_CREATURE_ID = cId end  -- cache for next time
+	if not idx then return end  -- player doesn't own it
+	-- Idempotent unless force=true. See SummonGreedyScavenger for rationale.
+	if isUp and not force then
+		if _G.AutoDelete_SetActiveTrackedPet then
+			_G.AutoDelete_SetActiveTrackedPet("merchant")
 		end
+		return
 	end
-end
-
--- Case-insensitive lookup: returns (index, isSummoned) or (nil, false).
--- Used by stuck-detection and mount-aware logic to check companion state
--- without triggering a new summon.
-local function FindCompanionByName(name)
-	if not name or name == "" then return nil, false end
-	local numCritters = GetNumCompanions("CRITTER")
-	local needle = string.lower(name)
-	for i = 1, numCritters do
-		local _, cName, _, _, summoned = GetCompanionInfo("CRITTER", i)
-		if cName and string.find(string.lower(cName), needle) then
-			return i, (summoned == 1 or summoned == true)
-		end
+	CallCompanion("CRITTER", idx)
+	print("|cffff8000[AutoDelete]|r: Summoned Goblin Merchant. Target it and press your Interact With Target keybind to open the vendor.")
+	if _G.AutoDelete_SetActiveTrackedPet then
+		_G.AutoDelete_SetActiveTrackedPet("merchant")
 	end
-	return nil, false
+	if _G.AutoDelete_RecordSummonAt then
+		_G.AutoDelete_RecordSummonAt(GetTime())
+	end
 end
 
 -- Fire SummonGreedyScavenger after a delay. Guarded so concurrent callers
@@ -1313,6 +1354,11 @@ end
 local function GreedyChatFilter(_, _, msg, author)
 	if IsGreedyAuthor(author) then
 		RememberGreedyMessage(msg)
+		-- Mark the scav as "alive and looting" for stuck detection. Every
+		-- monster-chat line from the scav corresponds to a successful pickup.
+		if _G.AutoDelete_RecordScavLootChat then
+			_G.AutoDelete_RecordScavLootChat(GetTime())
+		end
 		if cachedProfile and cachedProfile.hideGreedySpam then
 			return true   -- swallow the message
 		end
@@ -1402,7 +1448,6 @@ InstallGreedyChatFilters()
 -- Extras (all off by default):
 --   autoInviteApplyLootRule + autoInviteLootRule: apply a loot rule after inviting
 --   autoInviteConvertToRaid: convert to raid when party is full (5 members)
---   autoInviteInviteRequester: when YOU whisper the keyword TO someone, invite THEM
 -- ============================================================================
 
 -- Loot rule values for SetLootMethod (3.3.5 API).
@@ -1582,40 +1627,15 @@ local function HandleIncomingWhisper(msg, author)
 	end)
 end
 
--- Outgoing whisper handler. Called for CHAT_MSG_WHISPER_INFORM events.
--- If YOU whisper the keyword to someone AND autoInviteInviteRequester is on
--- → invite THEM (the recipient).
-local function HandleOutgoingWhisper(msg, target)
-	RefreshCachedProfile()
-	if not cachedProfile or not cachedProfile.autoInviteEnabled then return end
-	if not cachedProfile.autoInviteInviteRequester then return end
-	if not PlayerCanInvite() then return end
 
-	local keywords = ParseInviteKeywords(cachedProfile.autoInviteKeywords)
-	if not MessageMatchesKeyword(msg, keywords) then return end
-
-	local invitee = NormalizePlayerName(target)
-	if invitee == "" then return end
-
-	SafeInvitePlayer(invitee)
-
-	ScheduleInviteFollowup(3, function()
-		ApplyConfiguredLootRule()
-		MaybeConvertToRaid()
-	end)
-end
 
 -- Dedicated event frame for whisper events (kept separate from the main
 -- scanner to avoid clutter).
 local inviteFrame = CreateFrame("Frame")
 inviteFrame:RegisterEvent("CHAT_MSG_WHISPER")
-inviteFrame:RegisterEvent("CHAT_MSG_WHISPER_INFORM")
 inviteFrame:SetScript("OnEvent", function(_, event, msg, author)
 	if event == "CHAT_MSG_WHISPER" then
 		HandleIncomingWhisper(msg, author)
-	elseif event == "CHAT_MSG_WHISPER_INFORM" then
-		-- For whisper-inform, `author` is actually the recipient.
-		HandleOutgoingWhisper(msg, author)
 	end
 end)
 
@@ -2109,7 +2129,7 @@ local function ShowWelcomePopup()
 
 	-- Outer frame
 	local f = CreateFrame("Frame", "AutoDelete_WelcomePopup", UIParent)
-	f:SetSize(440, 600)
+	f:SetSize(440, 628)
 	f:SetPoint("CENTER")
 	f:SetFrameStrata("DIALOG")
 	f:SetFrameLevel(100)
@@ -2404,18 +2424,19 @@ local function ShowWelcomePopup()
 		"AutoDelete uses three lists. Drop an item onto the icons next to your bag, or open the panel and use the tabs.\n" ..
 		"|cffff5050Delete|r: items are destroyed on next scan.\n" ..
 		"|cffffd700Sell|r: items are sold the next time you open a vendor.\n" ..
-		"|cff80c0ffKeep|r: items are protected and never auto-sold or auto-deleted.\n" ..
-		"The Sell tab also has filters by quality and item level for BoE Armor, BoP, and BoE Weapons."
+		"|cff80c0ffKeep|r: items are protected and never auto-sold or auto-deleted.\n\n" ..
+		"|cff66ddffSell filters|r (on the Sell tab, BoE Armor / BoP / BoE Weapons): vendor-only auto-sell rules. " ..
+		"Match by quality and item level, no per-item entry needed."
 	)
-	hiwBody:SetHeight(82)
+	hiwBody:SetHeight(110)
 
 	-- Warning callout: bright red box reminding users to put valuable items
 	-- on the Keep list before enabling auto-delete/auto-sell rules. Sits
 	-- between 'How it works' and the footer. Backdrop with red border for
 	-- visual punch so it can't be missed.
 	local warnFrame = CreateFrame("Frame", nil, f)
-	warnFrame:SetPoint("TOPLEFT", 16, -454)
-	warnFrame:SetPoint("TOPRIGHT", -16, -454)
+	warnFrame:SetPoint("TOPLEFT", 16, -482)
+	warnFrame:SetPoint("TOPRIGHT", -16, -482)
 	warnFrame:SetHeight(84)
 	warnFrame:SetBackdrop({
 		bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 2,
@@ -2495,7 +2516,27 @@ local function ShowWelcomePopup()
 		end
 		f:Hide()
 		local panel = _G.AutoDeleteOptionsPanel
-		if panel then panel:Show() end
+		-- Diagnostics: print why the panel didn't open if anything goes wrong.
+		-- Helps users tell us what's happening when "Open Settings" appears
+		-- to do nothing.
+		if not panel then
+			print("|cffff8000[AutoDelete]|r Open Settings: panel not found (Options.lua may not have loaded yet). Try /del to open settings instead.")
+			return
+		end
+		if not panel.IsShown then
+			print("|cffff8000[AutoDelete]|r Open Settings: panel object missing IsShown method. Type: " .. type(panel))
+			return
+		end
+		if panel:IsShown() then
+			print("|cffff8000[AutoDelete]|r Open Settings: panel already visible (it may be hidden behind another window).")
+			return
+		end
+		panel:Show()
+		-- Verify it actually became visible. If something else is blocking
+		-- (strata, parent hidden, addon conflict) tell the user.
+		if not panel:IsShown() then
+			print("|cffff8000[AutoDelete]|r Open Settings: called Show() but panel did not become visible. Try /del - if that also fails, an addon conflict is likely.")
+		end
 	end)
 
 	-- Hook close (X or Esc) to also persist the dismissal if checked
@@ -2750,7 +2791,67 @@ local bagsFullSince       = nil    -- GetTime() when bags first became full; res
 -- for this many seconds continuously before the Goblin Merchant is summoned.
 -- Prevents transient fills (loot a stack that auto-merges with an existing
 -- stack a moment later) from triggering a stray summon.
-local BAGS_FULL_DELAY = 3.0
+local BAGS_FULL_DELAY = 1.5
+
+-- ============================================================================
+-- User-dismiss vs leash classification (timing-based)
+-- ============================================================================
+-- Problem: when our pet's `summoned` flag flips to false, we can't tell from
+-- the API whether the user right-clicked the portrait to dismiss it, or
+-- whether it fell behind / despawned / died. Naively re-summoning every time
+-- ignores user intent (they dismissed for a reason).
+--
+-- Approach: timing. When WE summon the pet, record GetTime() in
+-- lastSummonAt. If the pet flips to "not summoned" within USER_DISMISS_WINDOW
+-- of that summon, classify as "user dismissed" - they clicked it off
+-- intentionally, fast and deliberate. Suppress restore for USER_DISMISS_GRACE.
+-- A real range-leash takes seconds to minutes of travel before the server
+-- despawns the pet, so the timing distinguishes cleanly.
+--
+-- This is more reliable than EbonClearance's GetUnitSpeed-at-transition
+-- check, which misclassifies stationary casts as user-dismisses.
+local lastSummonAt        = 0
+local userDismissUntil    = 0
+local USER_DISMISS_WINDOW = 5.0    -- seconds after our summon during which "gone" = user dismissed
+local USER_DISMISS_GRACE  = 30.0   -- seconds to suppress restore after a user dismiss
+
+-- COMPANION_UPDATE event debounce. The event can fire multiple times in quick
+-- succession during a state transition; we only want to process the latest.
+local lastCompanionUpdate = 0
+local COMPANION_DEBOUNCE  = 0.5
+
+-- ============================================================================
+-- Loot-event-based stuck detection
+-- ============================================================================
+-- The CRITTER `summoned` flag is unreliable on PE for "pet fell behind" -
+-- the API claims summoned even when the pet is geographically lost. And
+-- 3.3.5 has no UnitPosition API to measure player distance from a summon
+-- point. So we detect the actual symptom rather than any proxy for it:
+--
+--   "The scavenger has stopped doing its job."
+--
+-- The scavenger's job is to pick up gray items and money near the player
+-- after kills. Every successful pickup, the scav says one of its monster
+-- chat lines (the spam suppressed by hideGreedySpam). We track the latest
+-- timestamp of any scav monster chat line. We also track when the player
+-- last looted a corpse via LOOT_CLOSED.
+--
+-- Stuck-detection rule: if the player has looted at least
+-- LOOT_STUCK_PLAYER_MIN corpses within LOOT_STUCK_WINDOW seconds AND the
+-- scavenger hasn't said anything in the same window, the scav is
+-- geographically lost. Re-summon.
+--
+-- This detects the actual symptom rather than guessing via position or
+-- speed. Bonus: it costs almost nothing - we already filter every scav
+-- chat line, so the timestamp update is one assignment per existing event.
+local lastScavLootChatAt    = 0
+-- Ring buffer of player loot timestamps (GetTime() values). Automatically
+-- pruned in OnUpdate to entries within LOOT_STUCK_WINDOW (60s). Cleared on
+-- scavenger re-summon. Maximum realistic size: ~10-15 entries (looting every
+-- 4-6s for a full minute). No manual bounding needed.
+local LOOT_STUCK_WINDOW     = 60   -- seconds: window over which we evaluate
+local LOOT_STUCK_PLAYER_MIN = 2    -- min player loots in the window before we judge
+local recentPlayerLootTimes = {}
 
 -- Simple periodic ticker: checks mount state changes and companion summoned
 -- flag every ~1s. Not tied to scanInterval because the scanner is gated on
@@ -2798,6 +2899,44 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 		return
 	end
 
+	-- Combat gate. When summonOnlyInCombat is enabled, ALL automatic summon
+	-- paths (mount/dismount restore, stuck-detection re-summon, bag-full
+	-- merchant trigger) only fire while the player is in combat. Manual
+	-- /del commands and after-sell/after-close summons (handled in their
+	-- own code paths) check this flag separately.
+	local combatOk = (not p.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+
+	-- (0) Loot-based stuck detection (only for scavenger; merchant doesn't loot).
+	-- We don't run this every tick - only when there's something to evaluate.
+	-- The check is cheap: walk the ring buffer to count recent loots, compare
+	-- to the scav's last chat timestamp.
+	if activeTracked == "scavenger" and combatOk and not IsPlayerMountedOrFlying() then
+		local nowLoot = GetTime()
+
+		-- Prune the player-loot ring buffer to entries inside the window.
+		local pruned = {}
+		for _, t in ipairs(recentPlayerLootTimes) do
+			if (nowLoot - t) <= LOOT_STUCK_WINDOW then
+				table.insert(pruned, t)
+			end
+		end
+		recentPlayerLootTimes = pruned
+
+		-- If we've had enough player loots in the window AND the scav
+		-- hasn't said anything since the OLDEST of those loots, the scav is
+		-- almost certainly geographically lost.
+		if #recentPlayerLootTimes >= LOOT_STUCK_PLAYER_MIN then
+			local oldestLoot = recentPlayerLootTimes[1]
+			if lastScavLootChatAt < oldestLoot then
+				-- Re-summon. The summon helper handles state updates.
+				if DismissCompanion then DismissCompanion("CRITTER") end
+				AfterDelay(0.4, function() SummonGreedyScavenger(true) end)
+				-- Clear the ring so we don't immediately re-fire.
+				recentPlayerLootTimes = {}
+			end
+		end
+	end
+
 	-- (1) Mount-aware dismiss / re-summon.
 	local nowMounted = IsPlayerMountedOrFlying()
 	if lastMountState == nil then lastMountState = nowMounted end
@@ -2816,8 +2955,9 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 			end
 		else
 			-- Dismounting. Re-summon scavenger if we dismissed it AND the user
-			-- still has the master toggle on AND a sub-toggle that would use it.
-			if dismissedDueToMount == "scavenger" and AnyScavSubToggleOn(p) then
+			-- still has the master toggle on AND a sub-toggle that would use
+			-- it AND the combat gate (if enabled) is satisfied.
+			if dismissedDueToMount == "scavenger" and AnyScavSubToggleOn(p) and combatOk then
 				DelayedSummon(1.5)
 				activeTracked = "scavenger"
 			end
@@ -2849,30 +2989,54 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 		return false
 	end
 
-	if activeTracked == "scavenger" then
-		local _, isUp = FindCompanionByName("greedy scavenger")
+	-- Respect user-dismiss grace window. If the reactive event handler (or
+	-- the previous polling tick) classified a recent transition as a user
+	-- dismiss, skip the stuck-detection block so we don't re-summon over
+	-- their intent.
+	local pollNow = GetTime()
+	local inUserDismissGrace = pollNow < userDismissUntil
+
+	if activeTracked == "scavenger" and not inUserDismissGrace then
+		local _, isUp = FindCompanionById(SCAVENGER_CREATURE_ID, "greedy scavenger")
 		if not isUp then
 			-- Did the user swap to a different pet? If so, stop tracking
 			-- the scavenger and don't re-summon over their choice.
 			if IsAnyOtherCompanionUp("greedy scavenger") then
 				activeTracked = nil
-			elseif AnyScavSubToggleOn(p) then
-				-- Pet truly gone (despawned, died, zoned). Re-summon.
-				DelayedSummon(1.0)
+			elseif (pollNow - lastSummonAt) < USER_DISMISS_WINDOW then
+				-- Fast despawn after our summon = user dismissed it.
+				userDismissUntil = pollNow + USER_DISMISS_GRACE
+				activeTracked = nil
+			elseif AnyScavSubToggleOn(p) and combatOk then
+				-- Slow despawn = leash/death/zone. Re-summon fast.
+				DelayedSummon(0.3)
 			else
 				activeTracked = nil
 			end
 		end
-	elseif activeTracked == "merchant" then
-		local _, isUp = FindCompanionByName("goblin merchant")
+	elseif activeTracked == "merchant" and not inUserDismissGrace then
+		local _, isUp = FindCompanionById(MERCHANT_CREATURE_ID, "goblin merchant")
 		if not isUp then
 			-- Same logic: if a different pet is up, user swapped, stop tracking.
 			if IsAnyOtherCompanionUp("goblin merchant") then
 				activeTracked = nil
-			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() == 0 then
+			elseif (pollNow - lastSummonAt) < USER_DISMISS_WINDOW then
+				userDismissUntil = pollNow + USER_DISMISS_GRACE
+				activeTracked = nil
+			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() == 0 and combatOk then
 				SummonGoblinMerchant()
+				-- Re-arm the bag-full timer state since we just resummoned.
+				bagsFullArmed = false
+				bagsFullSince = nil
 			else
 				activeTracked = nil
+				-- Merchant despawned while bags are still full (zoned, died,
+				-- etc.). Re-arm so the periodic bag-full check can fire a
+				-- fresh summon on the next BAGS_FULL_DELAY tick.
+				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() == 0 then
+					bagsFullArmed = true
+					bagsFullSince = nil
+				end
 			end
 		end
 	end
@@ -2881,7 +3045,7 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 	if p.summonMerchantWhenBagsFull then
 		local free = ComputeTotalFreeSlots()
 		if free == 0 then
-			if bagsFullArmed then
+			if bagsFullArmed and combatOk then
 				-- Start the timer if it isn't already running.
 				if not bagsFullSince then
 					bagsFullSince = GetTime()
@@ -2906,6 +3070,126 @@ end)
 _G.AutoDelete_SetActiveTrackedPet = function(which)
 	activeTracked = which
 end
+
+-- Read-only accessor used by /del pos debug command.
+_G.AutoDelete_GetActiveTrackedPet = function() return activeTracked end
+
+-- Exposed so the Summon helpers can record the moment of summon. Used by
+-- the user-dismiss-vs-leash classifier: if the pet goes "not summoned"
+-- within USER_DISMISS_WINDOW of this timestamp, treat as user dismiss.
+_G.AutoDelete_RecordSummonAt = function(t)
+	lastSummonAt = t or GetTime()
+end
+
+-- Exposed so the GreedyChatFilter can record the scavenger's "alive and
+-- looting" timestamp without forward-referencing the local variable.
+_G.AutoDelete_RecordScavLootChat = function(t)
+	lastScavLootChatAt = t or GetTime()
+end
+
+_G.AutoDelete_GetScavLootChatAt = function() return lastScavLootChatAt end
+
+-- ============================================================================
+-- Reactive companion event handler
+-- ============================================================================
+-- COMPANION_UPDATE fires when companion state changes (summon, dismiss, list
+-- update). It's faster than the 1s polling tick - typically reacts within a
+-- single frame. The polling tick is kept as a safety net in case
+-- COMPANION_UPDATE doesn't fire reliably for range-based despawns on this
+-- server build.
+--
+-- Logic:
+--   1. Debounce against event storms (multiple fires within COMPANION_DEBOUNCE)
+--   2. If we have an active tracked pet AND it's now "not summoned":
+--      a. Within USER_DISMISS_WINDOW of our last summon -> user dismissed,
+--         set userDismissUntil to suppress restore for USER_DISMISS_GRACE
+--      b. Outside that window -> leash/despawn/death, re-summon (subject to
+--         combat gate, master toggle, and the same checks as the polling tick)
+local companionEventFrame = CreateFrame("Frame")
+companionEventFrame:RegisterEvent("COMPANION_UPDATE")
+companionEventFrame:RegisterEvent("LOOT_CLOSED")
+companionEventFrame:SetScript("OnEvent", function(_, event)
+	-- LOOT_CLOSED: player finished looting a corpse. Push the timestamp so
+	-- the loot-based stuck detector can correlate against scav chat lines.
+	if event == "LOOT_CLOSED" then
+		table.insert(recentPlayerLootTimes, GetTime())
+		return
+	end
+
+	if event ~= "COMPANION_UPDATE" then return end
+
+	-- Debounce: COMPANION_UPDATE can fire several times for a single state
+	-- change. Process at most once per COMPANION_DEBOUNCE seconds.
+	local now = GetTime()
+	if (now - lastCompanionUpdate) < COMPANION_DEBOUNCE then return end
+	lastCompanionUpdate = now
+
+	local p = cachedProfile
+	if not p or not p.enabled or not p.summonScavenger then return end
+
+	-- AUTO-ATTACH: if the user just summoned a scav or merchant via the
+	-- portrait/macro and we have no active tracked pet, attach. Without this
+	-- the entire stuck-detection pipeline silently does nothing for
+	-- user-initiated summons.
+	if not activeTracked then
+		local _, scavUp = FindCompanionById(SCAVENGER_CREATURE_ID, "greedy scavenger")
+		local _, merchUp = FindCompanionById(MERCHANT_CREATURE_ID, "goblin merchant")
+		if scavUp then
+			activeTracked = "scavenger"
+			lastSummonAt = now   -- treat as if we just summoned
+		elseif merchUp then
+			activeTracked = "merchant"
+			lastSummonAt = now
+		end
+	end
+
+	if not activeTracked then return end
+
+	-- Combat gate (when summonOnlyInCombat is on, all auto-summons require
+	-- the player to be in combat).
+	local combatOk = (not p.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+
+	-- Suppress while mounted - WoW handles companion despawn natively.
+	if IsPlayerMountedOrFlying() then return end
+
+	-- Suppress if we recently classified a user dismiss.
+	if now < userDismissUntil then return end
+
+	if activeTracked == "scavenger" then
+		local _, isUp = FindCompanionById(SCAVENGER_CREATURE_ID, "greedy scavenger")
+		if not isUp then
+			-- Classify: fast (within window) = user dismiss, slow = leash.
+			if (now - lastSummonAt) < USER_DISMISS_WINDOW then
+				userDismissUntil = now + USER_DISMISS_GRACE
+				activeTracked = nil
+			elseif AnyScavSubToggleOn(p) and combatOk then
+				DelayedSummon(0.3)  -- fast re-summon, pet is verifiably gone
+			else
+				activeTracked = nil
+			end
+		end
+	elseif activeTracked == "merchant" then
+		local _, isUp = FindCompanionById(MERCHANT_CREATURE_ID, "goblin merchant")
+		if not isUp then
+			if (now - lastSummonAt) < USER_DISMISS_WINDOW then
+				userDismissUntil = now + USER_DISMISS_GRACE
+				activeTracked = nil
+			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() == 0 and combatOk then
+				SummonGoblinMerchant()
+				bagsFullArmed = false
+				bagsFullSince = nil
+			else
+				activeTracked = nil
+				-- Keep bag-full re-arm semantics consistent with the polling tick:
+				-- merchant despawned while bags still full -> re-arm.
+				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() == 0 then
+					bagsFullArmed = true
+					bagsFullSince = nil
+				end
+			end
+		end
+	end
+end)
 
 -- ============================================================================
 -- Slash Commands
@@ -3273,30 +3557,85 @@ _G.AutoDelete_Profiles.PreviewImport = PreviewImport
 _G.AutoDelete_Profiles.ApplyImport = ApplyImport
 
 -- ============================================================================
--- Shift-click item link (handler)
+-- Modifier-click handlers (shift = search fill, alt = add to Keep)
 -- ============================================================================
--- Behaviors:
---   1. If our settings panel is visible, we push the item's name into the
---      search box and refresh the list view (regardless of focus).
---   2. If NO editbox has keyboard focus, add the item to the Keep list.
---      AddItemToList enforces cross-list conflict refusal (an item already on
---      Delete/Sell will be refused with a chat message). If an editbox IS
---      focused, the chat-link path falls through to the original
---      ChatEdit_InsertLink so the link inserts into that editbox normally.
+-- Shift-click and alt-click do different things:
 --
--- Both behaviors can fire together: panel open + nothing focused = search
--- fills AND item gets added to Keep.
+--   SHIFT-CLICK is the search-box-fill shortcut. When our settings panel is
+--   visible, shift-clicking an item link (chat, bag, anywhere) fills the
+--   panel's search box with the item name. We do NOT intercept any default
+--   shift-click behavior (stack split, AH search, link-insert-into-chat,
+--   bank/guild bank moves). Just observe the click via hooksecurefunc and
+--   update the search box. Returns nothing, eats nothing.
+--
+--   ALT-CLICK is the Keep-list shortcut. Holding alt and clicking an item
+--   link adds it to the Keep list. Alt-click has no default WoW behavior
+--   for items in 3.3.5, so we can intercept it cleanly without competing
+--   with anything. We do skip on AH/bank/guild-bank/vendor/tradeskill/craft
+--   windows out of caution (other addons may bind alt-click for compare
+--   tooltip, drop, etc.) and on stackable items.
+--
+-- Why this split: shift-click is heavily overloaded by Blizzard. Every new
+-- context we discover (stack split, AH, bank, ...) is another whack-a-mole
+-- to suppress. Alt-click has no such conflicts, so the destructive feature
+-- (adding to a managed list) lives there.
 
--- Shared handler. Returns true if it handled the click (caller should NOT
--- call the original ChatEdit_InsertLink), false to fall through to default.
--- Caller is responsible for ensuring shift is held before invoking us; we
--- assume shift-click semantics throughout.
+-- Shared skip-frame check used by both shift and alt paths. Returns true if
+-- we should bail (some context is open that uses modifier-click for its own
+-- purposes). Shift's search-fill is non-destructive, so technically it's
+-- safe to run anywhere - we still skip in these contexts to keep the
+-- behavior of both modifiers consistent and predictable.
+local function ShouldSkipContext()
+	local skipFrames = {
+		{ frame = AuctionFrame,    name = "Auction House" },
+		{ frame = BankFrame,       name = "Bank" },
+		{ frame = GuildBankFrame,  name = "Guild Bank" },
+		{ frame = MerchantFrame,   name = "Vendor" },
+		{ frame = TradeSkillFrame, name = "Tradeskill" },
+		{ frame = CraftFrame,      name = "Craft" },
+	}
+	for _, f in ipairs(skipFrames) do
+		if f.frame and f.frame:IsShown() then
+			if _G.AutoDelete_DebugSell then
+				print("|cffff8000[AutoDelete DEBUG]|r " .. f.name .. " open, skipping")
+			end
+			return true
+		end
+	end
+	return false
+end
+
+-- ----------------------------------------------------------------------------
+-- SHIFT-CLICK: search-box fill only. Non-destructive, runs alongside default.
+-- ----------------------------------------------------------------------------
+local function HandleShiftClickFill(link)
+	if not link then return end
+	local panel = _G.AutoDeleteOptionsPanel
+	if not panel or not panel._built or not panel:IsVisible() then return end
+	if ShouldSkipContext() then return end
+	local name = GetItemInfo(link)
+	if not name or name == "" then return end
+	if panel._searchBox and panel._searchBox.SetText then
+		panel._searchBox:SetText(name)
+		panel._searchBox:SetCursorPosition(#name)
+		if panel._searchPlaceholder then panel._searchPlaceholder:Hide() end
+		panel._filterText = name
+		if panel.Refresh then panel:Refresh() end
+	end
+end
+
+-- ----------------------------------------------------------------------------
+-- ALT-CLICK: add to Keep list.
+-- ----------------------------------------------------------------------------
 local lastHandledItemId = nil
 local lastHandledAt = 0
-local function HandleShiftClickLink(link, source)
+
+-- Returns true if the click was consumed (for ChatEdit_InsertLink to know
+-- whether to suppress its default chat-insert behavior).
+local function HandleAltClickKeep(link, source)
 	if not link then return false end
 	if _G.AutoDelete_DebugSell then
-		print("|cffff8000[AutoDelete DEBUG]|r shift-click via " .. source .. ". link=" .. tostring(link))
+		print("|cffff8000[AutoDelete DEBUG]|r alt-click via " .. source .. ". link=" .. tostring(link))
 	end
 
 	local itemId = GetItemIDFromLink(link)
@@ -3305,7 +3644,20 @@ local function HandleShiftClickLink(link, source)
 	end
 	if not itemId then return false end
 
-	-- Dedupe: a single shift-click in chat fires both ChatEdit_InsertLink AND
+	if ShouldSkipContext() then return false end
+
+	-- Skip stackable items. Even though alt-click has no default stack-split
+	-- behavior, stackables (mats, consumables, currency) don't need Keep-list
+	-- protection - the auto-rules only target gear quality.
+	local _, _, _, _, _, _, _, maxStack = GetItemInfo(link)
+	if maxStack and maxStack > 1 then
+		if _G.AutoDelete_DebugSell then
+			print("|cffff8000[AutoDelete DEBUG]|r stackable item (maxStack=" .. tostring(maxStack) .. "), skipping")
+		end
+		return false
+	end
+
+	-- Dedupe: a single alt-click in chat fires both ChatEdit_InsertLink AND
 	-- HandleModifiedItemClick, which would double-print "added/already in
 	-- list". Suppress the second invocation within a 0.5s window.
 	local now = GetTime()
@@ -3314,81 +3666,54 @@ local function HandleShiftClickLink(link, source)
 			print("|cffff8000[AutoDelete DEBUG]|r duplicate within window, skipping")
 		end
 		-- Still return true on the chat-link path so we don't double-insert
-		-- into the chat editbox. The first call already handled the action.
+		-- into the chat editbox.
 		return source == "ChatEdit_InsertLink"
 	end
 	lastHandledItemId = itemId
 	lastHandledAt = now
 
-	-- Behavior 1: Panel-open search box fill.
-	local panel = _G.AutoDeleteOptionsPanel
-	local panelHandled = false
-	if panel and panel._built and panel:IsVisible() then
-		local name = GetItemInfo(link) or GetItemInfo(itemId)
-		if name and name ~= "" and panel._searchBox and panel._searchBox.SetText then
-			panel._searchBox:SetText(name)
-			panel._searchBox:SetCursorPosition(#name)
-			if panel._searchPlaceholder then panel._searchPlaceholder:Hide() end
-			panel._filterText = name
-			if panel.Refresh then panel:Refresh() end
-			panelHandled = true
-		end
-	end
-
-	-- Behavior 2: Add to Keep when no editbox has focus.
+	-- If an editbox is focused, don't insert text or add to Keep - let the
+	-- default behavior take precedence. (Alt-click has no default behavior
+	-- but a focused editbox usually means the user is mid-type, so we bail
+	-- to be safe.)
 	local focus = GetCurrentKeyBoardFocus and GetCurrentKeyBoardFocus()
-	if _G.AutoDelete_DebugSell then
-		print("|cffff8000[AutoDelete DEBUG]|r focus=" .. tostring(focus) .. " panelHandled=" .. tostring(panelHandled))
-	end
-	if focus then
-		-- An editbox is focused. Don't add to Keep; let the default chat-edit
-		-- path put the link there. Return panelHandled so we eat the call
-		-- if the panel's search box was the focused field (preventing the
-		-- link from being inserted as raw text into our own search field).
-		return panelHandled
-	end
+	if focus then return false end
 
 	AddItemToList("whitelistText", itemId)
-	-- Eat the call so the link doesn't ALSO get inserted into the chat edit
-	-- box (which auto-opens for chat links if no focus).
-	return true
+	return true   -- eat the chat-link insert if that's how we got here
 end
 
--- ============================================================================
--- Hook points
--- ============================================================================
--- WoW 3.3.5 routes shift-clicks on item links through different functions:
---
---   * Chat hyperlinks                  -> ChatEdit_InsertLink(text)
---                                         (replace this so we can suppress
---                                          the default insert-into-chat
---                                          behavior when consuming the click)
---   * Bag items, char pane, action bar -> HandleModifiedItemClick(link)
---                                         (hooksecurefunc is fine - no
---                                          default behavior to suppress)
---
--- IMPORTANT: ChatEdit_InsertLink is ALSO called internally by Blizzard for
--- non-shift paths. We MUST gate the wrapper on IsShiftKeyDown() so right-click
--- and plain-click on items fall through unchanged. Without the gate, returning
--- true on a non-shift call would swallow the original.
---
--- Pattern lifted from EbonholdStuff which handles this same problem.
+-- ----------------------------------------------------------------------------
+-- Hook installation
+-- ----------------------------------------------------------------------------
+-- Shift-click (search fill) is hooked via hooksecurefunc on
+-- HandleModifiedItemClick. We also hook ChatEdit_InsertLink to catch the
+-- chat-link path. Both are read-only observations - they never return true,
+-- so default WoW behavior continues uninterrupted.
+hooksecurefunc("HandleModifiedItemClick", function(link)
+	if IsShiftKeyDown() then HandleShiftClickFill(link) end
+	if IsAltKeyDown() then HandleAltClickKeep(link, "HandleModifiedItemClick") end
+end)
 
+-- Alt-click on a chat hyperlink: ChatEdit_InsertLink is the function called
+-- when the user holds a modifier and clicks a chat link. We intercept on
+-- alt to suppress the default behavior (insert link text into chat editbox)
+-- when we're consuming the click for Keep-add. Shift-click on chat links
+-- still goes through to the default (insert into chat) - we DO call the
+-- search-fill path on shift but never consume the click.
 local AutoDelete_Original_ChatEdit_InsertLink = ChatEdit_InsertLink
 ChatEdit_InsertLink = function(link)
-	-- Only intercept actual shift-clicks. All other paths fall straight
-	-- through to the original.
-	if IsShiftKeyDown() and HandleShiftClickLink(link, "ChatEdit_InsertLink") then
+	-- Shift-click: just observe, never consume.
+	if IsShiftKeyDown() then
+		HandleShiftClickFill(link)
+		return AutoDelete_Original_ChatEdit_InsertLink(link)
+	end
+	-- Alt-click: try to consume.
+	if IsAltKeyDown() and HandleAltClickKeep(link, "ChatEdit_InsertLink") then
 		return true
 	end
 	return AutoDelete_Original_ChatEdit_InsertLink(link)
 end
-
-hooksecurefunc("HandleModifiedItemClick", function(link)
-	if IsShiftKeyDown() then
-		HandleShiftClickLink(link, "HandleModifiedItemClick")
-	end
-end)
 
 SLASH_AUTODELETE1 = "/del"
 SLASH_AUTODELETE2 = "/autodelete"
@@ -3420,6 +3745,52 @@ SlashCmdList["AUTODELETE"] = function(msg)
 			print("|cffff8000[AutoDelete]|r sell debug |cff00ff00ON|r - every auto-sell will now print its decision inputs.")
 		else
 			print("|cffff8000[AutoDelete]|r sell debug |cffff5555OFF|r.")
+		end
+		return
+	end
+	if arg == "pet" or arg == "pos" then
+		-- Diagnostic: dump pet stuck-detection state. Used to verify the
+		-- loot-event-based stuck detector is firing correctly.
+		local p = cachedProfile
+		print("|cffff8000[AutoDelete]|r pet stuck-detection debug:")
+
+		if _G.AutoDelete_GetActiveTrackedPet then
+			print("  activeTracked: " .. tostring(_G.AutoDelete_GetActiveTrackedPet()))
+		end
+
+		local now = GetTime()
+		if _G.AutoDelete_GetScavLootChatAt then
+			local lastChat = _G.AutoDelete_GetScavLootChatAt() or 0
+			if lastChat > 0 then
+				print(string.format("  scav last 'looted' chat: %.1fs ago", now - lastChat))
+			else
+				print("  scav last 'looted' chat: never seen")
+			end
+		end
+
+		-- Count recent player loots inside the window.
+		local windowCount = 0
+		local oldestInWindow = nil
+		if recentPlayerLootTimes then
+			for _, t in ipairs(recentPlayerLootTimes) do
+				if (now - t) <= LOOT_STUCK_WINDOW then
+					windowCount = windowCount + 1
+					if not oldestInWindow then oldestInWindow = t end
+				end
+			end
+		end
+		print(string.format("  player loots in last %ds: %d (need %d to evaluate)",
+			LOOT_STUCK_WINDOW, windowCount, LOOT_STUCK_PLAYER_MIN))
+		if oldestInWindow then
+			print(string.format("  oldest player loot in window: %.1fs ago", now - oldestInWindow))
+		end
+
+		if p then
+			print("  summonScavenger=" .. tostring(p.summonScavenger) ..
+				"  summonOnlyInCombat=" .. tostring(p.summonOnlyInCombat) ..
+				"  enabled=" .. tostring(p.enabled))
+			print("  in combat=" .. tostring(UnitAffectingCombat and UnitAffectingCombat("player")) ..
+				"  mounted=" .. tostring(IsMounted and IsMounted()))
 		end
 		return
 	end

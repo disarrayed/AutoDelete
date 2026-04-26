@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.17] - 2026-04-26
+
+### Fixed
+
+- **Auto-Invite: whispering "inv" to someone no longer invites them.** The outgoing whisper handler (`CHAT_MSG_WHISPER_INFORM`) has been completely removed. Auto-Invite now only responds when someone whispers you a keyword, never when you whisper someone else.
+
+### Improved
+
+- **Pet Management: idempotent summons.** Scavenger and Merchant summon helpers now check if the pet is already summoned before calling `CallCompanion`, eliminating unnecessary dismiss-and-resummon cycles and duplicate chat prints.
+- **Pet Detection: creature-ID-based lookup.** Companion detection now uses cached creature IDs (26537 for Scavenger, 26536 for Merchant) with name-substring fallback, making pet identification faster and more reliable.
+- **Combat Safety: combat-only default flipped to ON.** Fresh installs and new profiles now default `summonOnlyInCombat = true`. Existing user data is preserved. All automatic summon paths (mount/dismount restore, stuck-detection re-summon, distance-based teleport, bag-full merchant trigger, and reactive `COMPANION_UPDATE` handler) respect this gate.
+- **Bag-full delay reduced from 3.0s to 1.5s.** Goblin Merchant summons faster when bags fill up.
+- **Bag-full re-arm fix.** If the merchant despawns while bags are still full, the trigger re-arms automatically (previously it stayed disarmed until a slot freed).
+- **Loot-event-based stuck detection.** Scavenger is re-summoned when the player loots 2+ times in 60 seconds but the scavenger hasn't said any chat line since the oldest loot. More reliable than summoned-flag-only detection on servers where pets teleport unpredictably.
+- **Auto-attach on `COMPANION_UPDATE`.** When the scavenger or merchant becomes summoned and `activeTracked == nil` (user summoned via portrait/macro), the addon automatically attaches tracking so stuck-detection and mount-awareness work for user-initiated summons.
+- **Reactive `COMPANION_UPDATE` event handler** with 0.5s debounce and timing-based classification. Distinguishes user-dismiss (within 5s of summon) vs server-leash (after 5s), suppressing restore-on-dismiss for 30s when the user deliberately dismisses.
+- **Modifier-click split: shift = search fill (non-destructive), alt = add to Keep.** Shift-click on any item (bag, chat link, AtlasLoot, etc.) now fills the search box when the panel is visible and never intercepts default WoW behavior (stack split, AH search, bank moves, equipment compare, chat link insert all work normally). Alt-click is the new "add to Keep" shortcut. Both skip when any of these frames are open: AuctionFrame, BankFrame, GuildBankFrame, MerchantFrame, TradeSkillFrame, CraftFrame. Stackable items (`maxStack > 1`) are skipped. 0.5s dedupe per itemId prevents double-triggers from chat links firing both paths.
+
+### Added
+
+- **Sell Filters info banner** above the BoE Armor card on the Sell tab. Black background, teal border, teal "i" icon, 24px tall. Single line: "Sell filters: rules below run at vendors. Items matching are auto-sold for gold."
+- **Welcome popup updated** with sell filters explanation in the "How it works" section. Body height increased from 82 to 110, popup height from 600 to 628, warning frame repositioned.
+- **X clear button** on search box (16x16) and keyword box (14x14). Red on hover.
+- **Raw search filter.** Search box now filters the Raw view text. Editor goes read-only (text dims) while filtered. Stash-and-restore pattern preserves edits made before searching. Stash cleared on Raw toggle off, list mode switch, or filter clear.
+- **`/del pet` slash command** (alias: `/del pos`). Dumps pet stuck-detection diagnostics: activeTracked, scav last chat time, player loots in window, summonScavenger/summonOnlyInCombat/enabled, in-combat, mounted.
+- **`/del debug` now toggles `_G.AutoDelete_DebugSell` flag.** All debug prints are gated behind it (not just sell decision traces).
+- **Welcome popup "Open Settings" button diagnostics.** If the panel fails to open (Options.lua not loaded yet), the button now prints diagnostic chat lines.
+
+### Internal
+
+- **`UseContainerItem` uses `hooksecurefunc`, NOT global override.** The 3.16 global-replace approach broke right-click on Hearthstone, potions, scrolls, mounts, and food. Switched to hook + bag snapshot for sell tracking. This fix is critical and must not regress.
+- **Ring buffer pruning.** `recentPlayerLootTimes` is pruned to entries within the 60s window on every companion watcher tick and cleared on scavenger re-summon. Maximum realistic size: 10-15 entries. No manual bounding needed.
+- **Comment audit.** Enhanced `recentPlayerLootTimes` comment to clarify bounded nature. Auto-invite section docs updated to reflect outgoing handler removal.
+- **Architecture.md added to addon folder** for future reference.
+
 ## [3.16] - 2026-04-25
 
 ### Added
