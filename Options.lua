@@ -26,7 +26,7 @@ local C_BORDER    = { 0.16, 0.16, 0.16, 1 }   -- #2a2a2a outer frame border per 
 local C_TITLE     = { 1.00, 0.50, 0.00, 1 }  -- #ff8000 WoW legendary orange
 local C_TEXT      = { 0.85, 0.85, 0.85, 1 }   -- #D9D9D9
 local C_DIM       = { 0.45, 0.45, 0.45, 1 }   -- #737373
-local C_HOVER     = { 0.16, 0.42, 0.48, 1 }   -- teal
+local C_HOVER     = { 0.122, 0.435, 0.659, 1 }   -- mage blue #1F6FA8
 local C_RED       = { 0.75, 0.22, 0.22, 1 }
 local C_GREEN     = { 0.20, 0.75, 0.20, 1 }
 local C_ACCENT    = { 1.00, 0.50, 0.00, 1 }   -- #ff8000 WoW legendary orange
@@ -39,7 +39,7 @@ local C_Q_RARE     = { 0.00, 0.44, 0.87, 1 }   -- #0070dd
 local C_Q_EPIC     = { 0.64, 0.21, 0.93, 1 }   -- #a335ee
 local C_ROW_ODD   = { RGB(11, 11, 11, 1) }    -- #0b0b0b per CSS
 local C_ROW_EVEN  = { RGB(14, 14, 14, 1) }    -- #0e0e0e per CSS
-local C_ROW_HOVER = { RGB(30, 55, 60, 1) }    -- subtle teal hover
+local C_ROW_HOVER = { RGB(20, 45, 70, 1) }    -- mage blue row hover #142D46
 local C_DROP_BG   = { RGB(14, 14, 14, 1) }
 local C_DROP_BORDER = { 0.25, 0.25, 0.25, 1 }
 local C_TITLEBAR  = { RGB(16, 16, 16, 1) }
@@ -1317,11 +1317,6 @@ local function BuildUI(self)
 	tglConvertRaid:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglConvertRaid = tglConvertRaid
 
-	local tglInviteRequester = MakeSubToggle(aCard3, "Invite on my whisper out", C_DK_RED)
-	tglInviteRequester:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 40))
-	tglInviteRequester:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
-	self._tglInviteRequester = tglInviteRequester
-
 	-- ========================================================================
 	-- TRACKING TAB: per-character stats table (SESSION vs LIFETIME columns)
 	-- 6 stat rows + header + Reset button. Numbers formatted via the
@@ -1885,6 +1880,32 @@ local function BuildUI(self)
 
 	-- Card height: row1 (20) + 8 gap + row2 (22) + 14 padding = ~64
 	local CARD_H = 64
+
+	-- Info banner above the three category cards. Single row of explanatory
+	-- text so users understand at a glance that these are sell filters that
+	-- run at vendors (not delete rules, not auto-actions on loot).
+	local BANNER_H = 24
+	local banner = CreateFrame("Frame", nil, self)
+	banner:SetPoint("TOPLEFT", self, "TOPLEFT", 15, yOff)
+	banner:SetPoint("TOPRIGHT", self, "TOPRIGHT", -15, yOff)
+	banner:SetHeight(BANNER_H)
+	banner:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
+	banner:SetBackdropColor(unpack(C_BG))                     -- black to match the panel
+	banner:SetBackdropBorderColor(unpack(C_HOVER))            -- mage blue accent
+	local bannerIcon = banner:CreateFontString(nil, "OVERLAY")
+	bannerIcon:SetFont(FONT, 12, "OUTLINE")
+	bannerIcon:SetPoint("LEFT", banner, "LEFT", 8, 0)
+	bannerIcon:SetTextColor(unpack(C_HOVER))
+	bannerIcon:SetText("i")
+	local bannerText = banner:CreateFontString(nil, "OVERLAY")
+	bannerText:SetFont(FONT, 10, "OUTLINE")
+	bannerText:SetPoint("LEFT", bannerIcon, "RIGHT", 8, 0)
+	bannerText:SetPoint("RIGHT", banner, "RIGHT", -8, 0)
+	bannerText:SetJustifyH("LEFT")
+	bannerText:SetWordWrap(false)
+	bannerText:SetTextColor(unpack(C_TEXT))
+	bannerText:SetText("Sell filters: rules below run at vendors. Items matching are auto-sold for gold.")
+	yOff = yOff - BANNER_H - SECTION_GAP
 
 	-- Card 1: BoE Armor
 	local boeArmor = MakeSellCategoryCard(self, "BoE Armor", yOff, CARD_H, {
@@ -2549,13 +2570,6 @@ local function BuildUI(self)
 		GetActiveProfile(db).autoInviteConvertToRaid = btn._checked
 	end)
 
-	-- AutoInv tab: invite on outgoing whisper
-	tglInviteRequester:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).autoInviteInviteRequester = btn._checked
-	end)
-
 	-- Returns the display-friendly name of a list key for chat output.
 	local function ListLabelForKey(key)
 		if key == "listText" then return "Delete" end
@@ -2860,7 +2874,6 @@ local function BuildUI(self)
 		tglLootRule:SetChecked(p.autoInviteApplyLootRule)
 		lootDD:SetValue(p.autoInviteLootRule or "freeforall")
 		tglConvertRaid:SetChecked(p.autoInviteConvertToRaid)
-		tglInviteRequester:SetChecked(p.autoInviteInviteRequester)
 		speedDD:SetValue((p.scanInterval and p.scanInterval >= 0.5) and p.scanInterval or 0.5)
 		UpdateTabColors()
 
