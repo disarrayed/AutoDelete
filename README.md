@@ -28,7 +28,7 @@ Three lists drive everything:
 
 Drop items onto the **Delete / Sell / Keep** buttons next to your bags, or open the settings panel and use the matching tabs.
 
-> 📜 **Quest items are always protected** from every automatic rule, no matter what list or filter is active.
+> 📜 **Quest items are always protected** from every automatic rule.
 
 ---
 
