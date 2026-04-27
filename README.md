@@ -36,7 +36,6 @@ Drop items onto the **Delete / Sell / Keep** buttons next to your bags, or open 
 
 ### 📋 List Management
 - Drag-and-drop **Delete**, **Sell**, and **Keep** lists with built-in search
-- **Shift-click** any item to instantly filter the active list
 - **Per-character lists** with profile tools (copy from alts, import, clear)
 
 ### 🎒 ElvUI Bag Frame Integration
