@@ -1,7 +1,7 @@
 # AutoDelete
 
 <div align="center">
-<img src="https://img.shields.io/badge/version-v3.17-a335ee?style=for-the-badge" /><br>
+<img src="https://img.shields.io/badge/version-v3.17.1-a335ee?style=for-the-badge" /><br>
 <img src="https://img.shields.io/github/downloads/disarrayed/AutoDelete/total?style=for-the-badge&color=ff8000" /><br>
 <img src="https://img.shields.io/badge/PLATFORM-PROJECT%20EBONHOLD-e6cc80?style=for-the-badge" />
 <br><br>

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.17.1] - 2026-04-27
+
+### Fixed
+
+- **Settings panel: fixed "Options.lua not loaded" error.** The font fallback check used `pcall` to detect missing fonts, but `SetFont` returns `false` (not an error) when a font file is missing, so the fallback never triggered for users without ElvUI installed. The settings panel would fail to build, leaving `/del` unable to open it. Now uses `SetFont`'s return value directly.
+
 ## [3.17] - 2026-04-26
 
 ### Fixed

@@ -7,16 +7,8 @@ local ADDON_NAME = ...
 -- ============================================================================
 
 local WHITE8x8 = "Interface\\Buttons\\WHITE8x8"
-local FONT = "Interface\\AddOns\\ElvUI\\media\\fonts\\Expressway.ttf"
-local FONT_FALLBACK = "Fonts\\FRIZQT__.TTF"
-
--- Test if Expressway exists, fallback to FRIZQT
-do
-	local test = CreateFrame("Frame"):CreateFontString()
-	if not pcall(function() test:SetFont(FONT, 10, "OUTLINE") end) then
-		FONT = FONT_FALLBACK
-	end
-end
+-- FRIZQT is always present in WoW 3.3.5a, no external dependency needed.
+local FONT = "Fonts\\FRIZQT__.TTF"
 
 local function RGB(r, g, b, a) return r / 255, g / 255, b / 255, a or 1 end
 
