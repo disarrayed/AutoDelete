@@ -114,6 +114,18 @@ local DEFAULT_PROFILE = {
 	autoSellGreens   = false,  -- Auto-Sell Greens   (green quality, equippable gear only)
 
 	-- ============================================================
+	-- Auto-Add Equipped (General tab)
+	-- ============================================================
+	-- When ON, two behaviours run together:
+	--   1) On enable (toggle flip false->true): one-time sync of every
+	--      currently equipped slot into the Keep list.
+	--   2) Reactive: PLAYER_EQUIPMENT_CHANGED fires any time you swap
+	--      gear; the new item is added to Keep automatically.
+	-- Existing Keep entries are deduped by item id, so this is safe to
+	-- re-trigger.
+	autoAddEquipped  = false,
+
+	-- ============================================================
 	-- Sell categories (Sell tab, three cards)
 	-- ============================================================
 	-- Each section is independent. An item only ever matches one
@@ -390,17 +402,13 @@ _G.AutoDelete_Stats = {
 	GetSession = function() return sessionStats end,
 	Reset = ResetAllStats,
 	-- Format helpers so the UI doesn't have to reimplement these.
+	-- FormatMoney rounds to gold only; silver/copper are noise for tracking
+	-- displays. Sub-1g values floor to 0g.
 	FormatMoney = function(copper)
 		copper = tonumber(copper) or 0
-		if copper <= 0 then return "0c" end
+		if copper <= 0 then return "0g" end
 		local gold = math.floor(copper / 10000)
-		local silver = math.floor((copper % 10000) / 100)
-		local cop = copper % 100
-		local parts = {}
-		if gold > 0 then table.insert(parts, gold .. "g") end
-		if silver > 0 then table.insert(parts, silver .. "s") end
-		if cop > 0 or #parts == 0 then table.insert(parts, cop .. "c") end
-		return table.concat(parts, " ")
+		return gold .. "g"
 	end,
 	-- Insert thousand separators: 14532 → "14,532"
 	FormatNumber = function(n)
@@ -2100,6 +2108,104 @@ RefreshCachedProfile = function()
 end
 _G.AutoDelete_RefreshCachedProfile = RefreshCachedProfile
 
+-- ============================================================================
+-- Auto-Add Equipped (settings.autoAddEquipped)
+-- ============================================================================
+-- Two behaviours, both gated on the same toggle:
+--   1) Sync (one-time per toggle-flip from false to true): walk all 19
+--      inventory slots and add each equipped item to the Keep list.
+--   2) Reactive: PLAYER_EQUIPMENT_CHANGED fires whenever the player swaps
+--      gear; the new item in that slot is added to Keep.
+-- Both paths funnel through AddItemToKeepQuiet, which is identical to
+-- AddItemToList("whitelistText", id) except it suppresses the "added/already
+-- in list" chat prints that would spam during a 19-slot sync. Per-list
+-- conflict checks still run; conflicts are reported with a single chat line.
+
+-- Inventory slot range to sync. 19 is the upper bound for the equipped
+-- inventory in 3.3.5a (1=head ... 19=tabard, with 0=ammo skipped). We skip
+-- shirts/tabards since they aren't gear and don't benefit from Keep
+-- protection (the auto-rules already exclude them).
+local EQUIPPED_SLOT_FIRST = 1
+local EQUIPPED_SLOT_LAST  = 19
+local SKIPPED_EQUIP_SLOTS = {
+	[4]  = true,   -- shirt
+	[19] = true,   -- tabard
+}
+
+-- Quiet variant of AddItemToList for the keep list. Honors cross-list
+-- conflicts (won't add an item that's already on Delete or Sell) but does
+-- not print success messages. Returns true on add, false on skip/conflict.
+local function AddItemToKeepQuiet(itemId)
+	if not itemId then return false end
+	local db = GetDB()
+	local profile = GetActiveProfile(db)
+	local line = "item:" .. tostring(itemId)
+	if HasExactLine(profile.whitelistText, line) then return false end
+
+	local hasConflict, conflictKey = FindCrossListConflict(profile, "whitelistText", line)
+	if hasConflict then
+		local itemName = GetItemInfo(itemId) or ("Item " .. itemId)
+		print("|cffff4444[AutoDelete]|r: Cannot auto-add " .. itemName
+			.. " to Keep, already on the " .. ListLabelForKey(conflictKey)
+			.. " list. Remove it from there first.")
+		return false
+	end
+
+	profile.whitelistText = AddLineIfMissing(profile.whitelistText or "", line)
+	GetItemInfo("item:" .. itemId)   -- prime client cache for the next refresh
+	return true
+end
+
+-- Walk the equipped inventory and add each item to Keep. Used on toggle
+-- flip-to-on and (optionally) PLAYER_LOGIN if we ever wire it that way.
+local function SyncEquippedToKeep()
+	local added = 0
+	for slot = EQUIPPED_SLOT_FIRST, EQUIPPED_SLOT_LAST do
+		if not SKIPPED_EQUIP_SLOTS[slot] then
+			local link = GetInventoryItemLink("player", slot)
+			if link then
+				local id = GetItemIDFromLink(link)
+				if id and AddItemToKeepQuiet(id) then
+					added = added + 1
+				end
+			end
+		end
+	end
+	if added > 0 then
+		print("|cffff8000[AutoDelete]|r: Auto-added " .. added
+			.. " currently equipped item" .. (added == 1 and "" or "s") .. " to Keep.")
+		local panel = _G.AutoDeleteOptionsPanel
+		if panel and panel._built and panel:IsVisible()
+			and not (panel._rawBoxHolder and panel._rawBoxHolder:IsShown()) then
+			panel:Refresh()
+		end
+	end
+	return added
+end
+_G.AutoDelete_SyncEquippedToKeep = SyncEquippedToKeep
+
+-- Reactive handler for PLAYER_EQUIPMENT_CHANGED. arg1 is the slot id (1-19)
+-- of the slot that just changed. We re-read it (instead of trusting an item
+-- id from the event) since the event fires on un-equip too, where the slot
+-- is now empty.
+local function HandleEquipmentChanged(slot)
+	if not cachedProfile or not cachedProfile.autoAddEquipped then return end
+	if not slot or SKIPPED_EQUIP_SLOTS[slot] then return end
+	local link = GetInventoryItemLink("player", slot)
+	if not link then return end
+	local id = GetItemIDFromLink(link)
+	if not id then return end
+	if AddItemToKeepQuiet(id) then
+		local itemName = GetItemInfo(id) or ("Item " .. id)
+		print("|cffff8000[AutoDelete]|r: Auto-added " .. itemName .. " to Keep.")
+		local panel = _G.AutoDeleteOptionsPanel
+		if panel and panel._built and panel:IsVisible()
+			and not (panel._rawBoxHolder and panel._rawBoxHolder:IsShown()) then
+			panel:Refresh()
+		end
+	end
+end
+
 local scanner = CreateFrame("Frame")
 scanner:RegisterEvent("ADDON_LOADED")
 scanner:RegisterEvent("PLAYER_LOGIN")
@@ -2107,6 +2213,7 @@ scanner:RegisterEvent("BAG_UPDATE")
 scanner:RegisterEvent("BAG_UPDATE_DELAYED")
 scanner:RegisterEvent("MERCHANT_SHOW")
 scanner:RegisterEvent("MERCHANT_CLOSED")
+scanner:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 
 -- ============================================================================
 -- Welcome Popup
@@ -2129,7 +2236,7 @@ local function ShowWelcomePopup()
 
 	-- Outer frame
 	local f = CreateFrame("Frame", "AutoDelete_WelcomePopup", UIParent)
-	f:SetSize(440, 628)
+	f:SetSize(440, 658)
 	f:SetPoint("CENTER")
 	f:SetFrameStrata("DIALOG")
 	f:SetFrameLevel(100)
@@ -2276,9 +2383,6 @@ local function ShowWelcomePopup()
 	local macroYes, macroYesTxt = MakeButton(f, "Create Macro", 110)
 	macroYes:SetPoint("TOPLEFT", 16, -180)
 
-	local macroNo, _ = MakeButton(f, "Skip", 60)
-	macroNo:SetPoint("TOPLEFT", macroYes, "TOPRIGHT", 8, 0)
-
 	-- Macro feedback label (shown after click). Anchored BELOW the buttons
 	-- so the text never overlaps them even when it wraps to two lines.
 	local macroResult = f:CreateFontString(nil, "OVERLAY")
@@ -2329,11 +2433,6 @@ local function ShowWelcomePopup()
 			local err = (not ok) and tostring(idx) or "unknown"
 			macroResult:SetText("Could not create the macro. Error: " .. err)
 		end
-	end)
-
-	macroNo:SetScript("OnClick", function()
-		macroResult:SetTextColor(0.6, 0.6, 0.6, 1)
-		macroResult:SetText("Skipped macro creation.")
 	end)
 
 	-- Section: Keybind walkthrough
@@ -2393,10 +2492,6 @@ local function ShowWelcomePopup()
 		end
 	end)
 
-	local kbNo, _ = MakeButton(f, "Skip", 60)
-	kbNo:SetPoint("TOPLEFT", kbYes, "TOPRIGHT", 8, 0)
-	kbNo:SetScript("OnClick", function() end)  -- no-op, just visual choice
-
 	-- Divider above the 'How it works' section so the eye separates it from
 	-- the macro/keybind walkthrough above.
 	local divider = f:CreateTexture(nil, "ARTWORK")
@@ -2430,13 +2525,77 @@ local function ShowWelcomePopup()
 	)
 	hiwBody:SetHeight(110)
 
+	-- Auto-Add Equipped opt-in checkbox. Sits between 'How it works' and the
+	-- warning callout. Toggling this on writes the setting to the active
+	-- profile AND immediately runs the one-time sync of currently equipped
+	-- items into Keep, mirroring the General-tab toggle's behavior. Default
+	-- starts off so the user makes an explicit choice; not pre-checked.
+	local aaeChecked = false
+	local aaeCheck = CreateFrame("Button", nil, f)
+	aaeCheck:SetSize(14, 14)
+	aaeCheck:SetPoint("TOPLEFT", 16, -482)
+	aaeCheck:SetBackdrop({ bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 1 })
+	aaeCheck:SetBackdropColor(0.10, 0.10, 0.10, 1)
+	aaeCheck:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+
+	local aaeMark = aaeCheck:CreateTexture(nil, "OVERLAY")
+	aaeMark:SetTexture("Interface\\AddOns\\AutoDelete\\textures\\checkmark.tga")
+	aaeMark:SetSize(12, 12)
+	aaeMark:SetPoint("CENTER")
+	aaeMark:Hide()
+
+	local aaeLabel = f:CreateFontString(nil, "OVERLAY")
+	aaeLabel:SetFont(FONT, 11)
+	aaeLabel:SetPoint("LEFT", aaeCheck, "RIGHT", 6, 0)
+	aaeLabel:SetTextColor(0.85, 0.85, 0.85, 1)
+	aaeLabel:SetText("Auto-Add Equipped Items to Keep")
+
+	local aaeDesc = f:CreateFontString(nil, "OVERLAY")
+	aaeDesc:SetFont(FONT, 10)
+	aaeDesc:SetPoint("TOPLEFT", aaeCheck, "BOTTOMLEFT", 0, -2)
+	aaeDesc:SetPoint("RIGHT", f, "RIGHT", -16, 0)
+	aaeDesc:SetJustifyH("LEFT")
+	aaeDesc:SetWordWrap(true)
+	aaeDesc:SetTextColor(0.55, 0.55, 0.55, 1)
+	aaeDesc:SetText("Adds your currently equipped items to Keep, plus anything you equip later. Recommended.")
+
+	-- Click handler writes to profile and (if enabling) runs the sync.
+	local function ToggleAutoAddEquipped()
+		aaeChecked = not aaeChecked
+		if aaeChecked then aaeMark:Show() else aaeMark:Hide() end
+		_G.AutoDeleteDB = _G.AutoDeleteDB or {}
+		local db = _G.AutoDeleteDB
+		if db.profiles and db.chars then
+			local charKey = (UnitName("player") or "Default") .. "-" .. (GetRealmName() or "")
+			local profileKey = db.chars[charKey] or charKey
+			local p = db.profiles[profileKey]
+			if p then
+				local wasOff = (p.autoAddEquipped ~= true)
+				p.autoAddEquipped = aaeChecked
+				if _G.AutoDelete_RefreshCachedProfile then
+					_G.AutoDelete_RefreshCachedProfile()
+				end
+				if aaeChecked and wasOff and _G.AutoDelete_SyncEquippedToKeep then
+					_G.AutoDelete_SyncEquippedToKeep()
+				end
+			end
+		end
+	end
+	aaeCheck:SetScript("OnClick", ToggleAutoAddEquipped)
+
+	-- Make label clickable too
+	local aaeLabelBtn = CreateFrame("Button", nil, f)
+	aaeLabelBtn:SetPoint("LEFT", aaeCheck, "RIGHT", 0, 0)
+	aaeLabelBtn:SetSize(280, 14)
+	aaeLabelBtn:SetScript("OnClick", ToggleAutoAddEquipped)
+
 	-- Warning callout: bright red box reminding users to put valuable items
 	-- on the Keep list before enabling auto-delete/auto-sell rules. Sits
 	-- between 'How it works' and the footer. Backdrop with red border for
 	-- visual punch so it can't be missed.
 	local warnFrame = CreateFrame("Frame", nil, f)
-	warnFrame:SetPoint("TOPLEFT", 16, -482)
-	warnFrame:SetPoint("TOPRIGHT", -16, -482)
+	warnFrame:SetPoint("TOPLEFT", 16, -522)
+	warnFrame:SetPoint("TOPRIGHT", -16, -522)
 	warnFrame:SetHeight(84)
 	warnFrame:SetBackdrop({
 		bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 2,
@@ -2564,6 +2723,10 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
 		GetDB()
 		RefreshCachedProfile()
+		return
+	end
+	if event == "PLAYER_EQUIPMENT_CHANGED" then
+		HandleEquipmentChanged(arg1)
 		return
 	end
 	if event == "PLAYER_LOGIN" then
@@ -2782,15 +2945,21 @@ local lastMountState      = nil
 -- so we know what to re-summon on dismount.
 local dismissedDueToMount = nil
 
--- True when bags are currently full. Flips back to false once any slot frees
--- up, which re-arms the bag-full trigger.
-local bagsFullArmed       = true   -- true = next 'full' will fire
-local bagsFullSince       = nil    -- GetTime() when bags first became full; reset when a slot frees
+-- True when bags are nearly full (free slots <= BAGS_NEAR_FULL_THRESHOLD).
+-- Flips back to false once free slots rise above the threshold, which re-arms
+-- the trigger.
+local bagsFullArmed       = true   -- true = next 'near full' will fire
+local bagsFullSince       = nil    -- GetTime() when bags first became near-full; reset when a slot frees
 
--- Bag-full auto-summon debounce window. Bags must stay at zero free slots
--- for this many seconds continuously before the Goblin Merchant is summoned.
--- Prevents transient fills (loot a stack that auto-merges with an existing
--- stack a moment later) from triggering a stray summon.
+-- Bag-full auto-summon threshold. The Goblin Merchant fires when free slots
+-- drop to or below this value. Set to 3 so the merchant arrives before bags
+-- are completely full, leaving room for additional drops while vendoring.
+local BAGS_NEAR_FULL_THRESHOLD = 3
+
+-- Bag-full auto-summon debounce window. Bags must stay at or below the
+-- threshold continuously for this many seconds before the Goblin Merchant is
+-- summoned. Prevents transient fills (loot a stack that auto-merges with an
+-- existing stack a moment later) from triggering a stray summon.
 local BAGS_FULL_DELAY = 1.5
 
 -- ============================================================================
@@ -3023,17 +3192,17 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 			elseif (pollNow - lastSummonAt) < USER_DISMISS_WINDOW then
 				userDismissUntil = pollNow + USER_DISMISS_GRACE
 				activeTracked = nil
-			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() == 0 and combatOk then
+			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= BAGS_NEAR_FULL_THRESHOLD and combatOk then
 				SummonGoblinMerchant()
 				-- Re-arm the bag-full timer state since we just resummoned.
 				bagsFullArmed = false
 				bagsFullSince = nil
 			else
 				activeTracked = nil
-				-- Merchant despawned while bags are still full (zoned, died,
+				-- Merchant despawned while bags are still near-full (zoned, died,
 				-- etc.). Re-arm so the periodic bag-full check can fire a
 				-- fresh summon on the next BAGS_FULL_DELAY tick.
-				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() == 0 then
+				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= BAGS_NEAR_FULL_THRESHOLD then
 					bagsFullArmed = true
 					bagsFullSince = nil
 				end
@@ -3044,13 +3213,13 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 	-- (3) Bag-full auto-summon. See BAGS_FULL_DELAY above for debounce rationale.
 	if p.summonMerchantWhenBagsFull then
 		local free = ComputeTotalFreeSlots()
-		if free == 0 then
+		if free <= BAGS_NEAR_FULL_THRESHOLD then
 			if bagsFullArmed and combatOk then
 				-- Start the timer if it isn't already running.
 				if not bagsFullSince then
 					bagsFullSince = GetTime()
 				elseif (GetTime() - bagsFullSince) >= BAGS_FULL_DELAY then
-					-- Bags have stayed full long enough; fire.
+					-- Bags have stayed near-full long enough; fire.
 					bagsFullArmed = false
 					bagsFullSince = nil
 					SummonGoblinMerchant()
@@ -3058,7 +3227,7 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 				end
 			end
 		else
-			-- A slot freed up: reset the timer and re-arm for next time.
+			-- Free slots rose above the threshold: reset the timer and re-arm.
 			bagsFullSince = nil
 			bagsFullArmed = true
 		end
@@ -3174,15 +3343,15 @@ companionEventFrame:SetScript("OnEvent", function(_, event)
 			if (now - lastSummonAt) < USER_DISMISS_WINDOW then
 				userDismissUntil = now + USER_DISMISS_GRACE
 				activeTracked = nil
-			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() == 0 and combatOk then
+			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= BAGS_NEAR_FULL_THRESHOLD and combatOk then
 				SummonGoblinMerchant()
 				bagsFullArmed = false
 				bagsFullSince = nil
 			else
 				activeTracked = nil
 				-- Keep bag-full re-arm semantics consistent with the polling tick:
-				-- merchant despawned while bags still full -> re-arm.
-				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() == 0 then
+				-- merchant despawned while bags still near-full -> re-arm.
+				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= BAGS_NEAR_FULL_THRESHOLD then
 					bagsFullArmed = true
 					bagsFullSince = nil
 				end

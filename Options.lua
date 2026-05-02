@@ -85,6 +85,9 @@ local function MakeToggle(parent, label, color, tooltip, tooltipTitle)
 
 	local text = MakeText(row, 10, C_TEXT, "OUTLINE")
 	text:SetPoint("LEFT", box, "RIGHT", 8, 0)
+	text:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+	text:SetJustifyH("LEFT")
+	text:SetWordWrap(true)
 	text:SetText(label)
 
 	row._checked = false
@@ -160,7 +163,7 @@ local function MakeDropdown(parent, width, options, onChange)
 
 	local btnText = btn:CreateFontString(nil, "OVERLAY")
 	btnText:SetDrawLayer("OVERLAY", 7)
-	btnText:SetFont(FONT, 12)
+	btnText:SetFont(FONT, 11)
 	btnText:SetTextColor(1, 1, 1, 1)
 	btnText:SetShadowColor(0, 0, 0, 0)
 	btnText:SetPoint("LEFT", 8, 0)
@@ -216,7 +219,7 @@ local function MakeDropdown(parent, width, options, onChange)
 
 		local rowText = row:CreateFontString(nil, "OVERLAY")
 		rowText:SetDrawLayer("OVERLAY", 7)
-		rowText:SetFont(FONT, 12)
+		rowText:SetFont(FONT, 11)
 		rowText:SetTextColor(1, 1, 1, 1)
 		rowText:SetShadowColor(0, 0, 0, 0)
 		rowText:SetJustifyH("LEFT")
@@ -757,7 +760,7 @@ end
 -- ============================================================================
 
 local frame = CreateFrame("Frame", "AutoDeleteFrame", UIParent)
-frame:SetSize(540, 840)   -- 800+40 to accommodate the taller tabbed settings area
+frame:SetSize(580, 840)   -- 540+40 to give cards more breathing room
 frame:SetPoint("CENTER")
 frame:SetFrameStrata("DIALOG")
 frame:SetFrameLevel(100)
@@ -841,11 +844,11 @@ local function BuildUI(self)
 	local CONTENT_START = 20   -- content inside section boxes
 	local LABEL_START = 20     -- label text start (same as content start)
 	local INPUT_START = 200    -- right-column value/input start
-	local RIGHT_EDGE = 525     -- right margin (540 - 15)
+	local RIGHT_EDGE = 565     -- right margin (580 - 15)
 
 	local LEFT_X = LEFT_EDGE
 	local RIGHT_X = RIGHT_EDGE
-	local CONTENT_W = RIGHT_X - LEFT_X                                     -- 510 (540 frame - 2*15 margins)
+	local CONTENT_W = RIGHT_X - LEFT_X                                     -- 550 (580 frame - 2*15 margins)
 	local INPUT_W = 60                                                     -- numeric input width
 	local INPUT_GAP = 8
 	local SECTION_GAP = 6                                                  -- vertical space between sections
@@ -916,14 +919,17 @@ local function BuildUI(self)
 			local btn = tabButtons[k]
 			local pg = tabPages[k]
 			if k == key then
-				-- Active: orange fill like active list tab
+				-- Active: orange fill, dark text without OUTLINE for clean readability,
+				-- bumped to 12pt to add visual weight (fakes bold on a tab strip).
 				ApplyBackdrop(btn, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.9 }, C_ACCENT)
-				btn._text:SetTextColor(1, 1, 1, 1)
+				btn._text:SetFont(FONT, 12, "")
+				btn._text:SetTextColor(0.05, 0.05, 0.05, 1)
 				pg:Show()
 			else
-				-- Inactive: dark bg, muted text (CSS btn-bg #131313, btn-border #343434)
+				-- Inactive: dark bg, white outlined text
 				ApplyBackdrop(btn, { 0.07, 0.07, 0.07, 1 }, { 0.20, 0.20, 0.20, 1 })
-				btn._text:SetTextColor(0.55, 0.55, 0.55, 1)
+				btn._text:SetFont(FONT, 11, "OUTLINE")
+				btn._text:SetTextColor(1, 1, 1, 1)
 				pg:Hide()
 			end
 		end
@@ -943,7 +949,7 @@ local function BuildUI(self)
 	for i, key in ipairs(TAB_KEYS) do
 		local btn = CreateFrame("Button", nil, tabStrip)
 		btn:SetHeight(TAB_BTN_H)
-		local text = MakeText(btn, 10, C_DIM, "OUTLINE")
+		local text = MakeText(btn, 11, { 1, 1, 1, 1 }, "OUTLINE")
 		text:SetPoint("CENTER")
 		text:SetText(TAB_LABELS[i])
 		btn._text = text
@@ -1013,6 +1019,16 @@ local function BuildUI(self)
 	AddToggleDescription(tglEnable, "Allow AutoDelete to manage your items.",
 		cardW - CARD_INNER_PAD_X * 2 - 26)
 	self._tglEnable = tglEnable
+
+	-- Row 3: Auto-Add Equipped. Single toggle that drives both behaviours:
+	-- a one-time sync of currently equipped items into Keep on toggle-flip,
+	-- and reactive add-to-Keep on every PLAYER_EQUIPMENT_CHANGED. Description
+	-- omitted to fit in card1's 92px height under Enable + its description.
+	local tglAutoAddEquipped = MakeToggle(card1, "Auto-Add Equipped", C_ACCENT,
+		"When ON, every item you equip is added to the Keep list automatically. Toggling this on also syncs your currently equipped items to Keep as a one-time pass. Shirts and tabards are skipped.")
+	tglAutoAddEquipped:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
+	tglAutoAddEquipped:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglAutoAddEquipped = tglAutoAddEquipped
 
 	-- card2: Auto-Delete Junk, Auto-Delete Common, Auto-Sell Greens
 	-- Three rows stacked. No descriptions to keep them compact within cardH=92.
@@ -1089,6 +1105,9 @@ local function BuildUI(self)
 		text:SetFont(FONT, 9, "OUTLINE")
 		text:SetTextColor(unpack(C_DIM))
 		text:SetPoint("LEFT", box, "RIGHT", 6, 0)
+		text:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+		text:SetJustifyH("LEFT")
+		text:SetWordWrap(true)
 		text:SetText(label)
 
 		row._checked = false
@@ -1299,14 +1318,14 @@ local function BuildUI(self)
 	lootDD:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 30))
 	self._lootDD = lootDD
 
-	-- CARD 3: Party Management header + 2 sub-toggles (Convert to raid, Invite requester)
-	local partyLabel = MakeText(aCard3, 10, C_TEXT, "OUTLINE")
-	partyLabel:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y - 2)
-	partyLabel:SetText("Party Management")
-
-	local tglConvertRaid = MakeSubToggle(aCard3, "Convert to raid when full", C_DK_RED)
-	tglConvertRaid:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 22))
-	tglConvertRaid:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
+	-- CARD 3: Convert to raid (main toggle).
+	-- Was previously a "Party Management" header + 2 sub-toggles (Convert + Invite
+	-- Requester). Invite Requester was removed in v3.17. Now just a single main
+	-- toggle for the Convert behavior.
+	local tglConvertRaid = MakeToggle(aCard3, "Convert to raid when full", C_ACCENT,
+		"When the 6th player joins your party, automatically convert it to a raid group.")
+	tglConvertRaid:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
+	tglConvertRaid:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglConvertRaid = tglConvertRaid
 
 	-- ========================================================================
@@ -1931,12 +1950,13 @@ local function BuildUI(self)
 	local scanCardH = 34                                                   -- fits 26-tall buttons + 4px pad top/bot
 	local scanBox = MakeSection(self, "Scan Options", yOff, 1)
 
-	-- Full-width inner card: holds Delete/Sell/Keep tab buttons
-	-- Anchored L and R so width auto-fits inside the section.
+	-- Full-width inner card: holds Delete/Sell/Keep tab buttons.
+	-- Anchored flush to section edges (1px) so the buttons read as edge-aligned
+	-- with the section's outer frame margin.
 	local scanRightCard = CreateFrame("Frame", nil, scanBox)
 	scanRightCard:SetHeight(scanCardH)
-	scanRightCard:SetPoint("TOPLEFT", scanBox, "TOPLEFT", 10, -8)
-	scanRightCard:SetPoint("TOPRIGHT", scanBox, "TOPRIGHT", -10, -8)
+	scanRightCard:SetPoint("TOPLEFT", scanBox, "TOPLEFT", 1, -1)
+	scanRightCard:SetPoint("TOPRIGHT", scanBox, "TOPRIGHT", -1, -1)
 	scanRightCard:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
 	scanRightCard:SetBackdropColor(0.03, 0.03, 0.03, 1)  -- #080808
 	scanRightCard:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)  -- #232323
@@ -1950,7 +1970,7 @@ local function BuildUI(self)
 		local tab = CreateFrame("Button", nil, parent)
 		tab:SetHeight(TAB_H)
 		ApplyBackdrop(tab, C_ROW_ODD, { 0.20, 0.20, 0.20, 1 })
-		local text = MakeText(tab, 10, C_DIM, "OUTLINE")
+		local text = MakeText(tab, 11, { 1, 1, 1, 1 }, "OUTLINE")
 		text:SetPoint("CENTER")
 		text:SetText(name)
 		return tab, text
@@ -2016,13 +2036,16 @@ local function BuildUI(self)
 	local emptyText
 	local function SetTabActive(tab, text, active)
 		if active then
-			-- Strong orange fill with white text - matches mockup's highlighted Delete tab
+			-- Active: orange fill, dark text without OUTLINE for clean readability,
+			-- bumped to 12pt to add visual weight (fakes bold on a tab strip).
 			ApplyBackdrop(tab, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.9 }, C_ACCENT)
-			text:SetTextColor(1, 1, 1, 1)
+			text:SetFont(FONT, 12, "")
+			text:SetTextColor(0.05, 0.05, 0.05, 1)
 		else
-			-- Inactive: CSS btn-bg #131313, btn-border #343434, btn-muted #8b8b8b
+			-- Inactive: dark bg, white outlined text
 			ApplyBackdrop(tab, { 0.07, 0.07, 0.07, 1 }, { 0.20, 0.20, 0.20, 1 })
-			text:SetTextColor(0.55, 0.55, 0.55, 1)
+			text:SetFont(FONT, 11, "OUTLINE")
+			text:SetTextColor(1, 1, 1, 1)
 		end
 	end
 
@@ -2144,8 +2167,8 @@ local function BuildUI(self)
 	-- Item List (inside manageBox, below Item Name header)
 	-- ========================================================================
 	local listBox = CreateFrame("Frame", nil, manageBox)
-	listBox:SetPoint("TOPLEFT", 6, -62)                                    -- below header (40) + header height (22)
-	listBox:SetPoint("BOTTOMRIGHT", -6, 36)                                -- reserve 36px at bottom for pagination
+	listBox:SetPoint("TOPLEFT", 1, -62)                                    -- below header (40) + header height (22)
+	listBox:SetPoint("BOTTOMRIGHT", -1, 36)                                -- reserve 36px at bottom for pagination
 	listBox:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
 	listBox:SetBackdropColor(0.035, 0.035, 0.035, 1)  -- #090909
 	listBox:SetBackdropBorderColor(0.15, 0.15, 0.15, 1)  -- #262626
@@ -2432,6 +2455,26 @@ local function BuildUI(self)
 		local p = GetActiveProfile(db)
 		p.enabled = btn._checked
 		print("|cffff8000[AutoDelete]|r " .. (p.enabled and "|cff00ff00enabled|r" or "|cffff0000disabled|r"))
+	end)
+
+	-- Auto-Add Equipped: flipping ON triggers the one-time sync of currently
+	-- equipped items. Reactive add-on-equip is handled in AutoDelete.lua's
+	-- PLAYER_EQUIPMENT_CHANGED handler, which reads the current cachedProfile.
+	-- We refresh cachedProfile after writing here so the event handler sees
+	-- the new value without waiting for the next scan.
+	tglAutoAddEquipped:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		local p = GetActiveProfile(db)
+		local wasOff = (p.autoAddEquipped ~= true)
+		p.autoAddEquipped = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+		if btn._checked and wasOff and _G.AutoDelete_SyncEquippedToKeep then
+			_G.AutoDelete_SyncEquippedToKeep()
+			if self.Refresh then self:Refresh() end
+		end
 	end)
 
 	tglGray:SetScript("OnClick", function(btn)
@@ -2824,6 +2867,7 @@ local function BuildUI(self)
 	function self:Refresh()
 		local p = GetActiveProfile(db)
 		tglEnable:SetChecked(p.enabled)
+		tglAutoAddEquipped:SetChecked(p.autoAddEquipped)
 
 		-- BoE Armor card
 		boeArmor.enable:SetChecked(p.boeArmorEnabled)
