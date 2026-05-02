@@ -1,7 +1,7 @@
 # AutoDelete
 
 <div align="center">
-<img src="https://img.shields.io/badge/version-v3.17.1-a335ee?style=for-the-badge" /><br>
+<img src="https://img.shields.io/badge/version-v3.17.2-a335ee?style=for-the-badge" /><br>
 <img src="https://img.shields.io/github/downloads/disarrayed/AutoDelete/total?style=for-the-badge&color=ff8000" /><br>
 <img src="https://img.shields.io/badge/PLATFORM-PROJECT%20EBONHOLD-e6cc80?style=for-the-badge" />
 <br><br>
@@ -97,5 +97,5 @@ Drop items onto the **Delete / Sell / Keep** buttons next to your bags, or open 
 AutoDelete is built for **Project Ebonhold (WoW 3.3.5a)** to simplify inventory management without changing gameplay. Every automatic feature is **opt-in** and gated behind toggles, so the addon does nothing until you tell it what you want.
 
 <div align="center">
-<sub>Made with ❤️ for the Project Ebonhold community</sub>
+<sub>Made with ❤️ and 🤖 for the Project Ebonhold community. Fork it. Rebrand it. I don't care.</sub>
 </div>
