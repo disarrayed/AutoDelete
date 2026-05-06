@@ -1,7 +1,7 @@
 # AutoDelete
 
 <div align="center">
-<img src="https://img.shields.io/badge/version-v3.17.2-a335ee?style=for-the-badge" /><br>
+<img src="https://img.shields.io/badge/version-v3.18-a335ee?style=for-the-badge" /><br>
 <img src="https://img.shields.io/github/downloads/disarrayed/AutoDelete/total?style=for-the-badge&color=ff8000" /><br>
 <img src="https://img.shields.io/badge/PLATFORM-PROJECT%20EBONHOLD-e6cc80?style=for-the-badge" />
 <br><br>
@@ -28,7 +28,7 @@ Three lists drive everything:
 
 Drop items onto the **Delete / Sell / Keep** buttons next to your bags, or open the settings panel and use the matching tabs.
 
-> 📜 **Quest items are always protected** from every automatic rule.
+> 📜 **Quest items are always protected** from every automatic rule, no matter what list or filter is active.
 
 ---
 
@@ -36,6 +36,7 @@ Drop items onto the **Delete / Sell / Keep** buttons next to your bags, or open 
 
 ### 📋 List Management
 - Drag-and-drop **Delete**, **Sell**, and **Keep** lists with built-in search
+- **Shift-click** any item to instantly filter the active list
 - **Per-character lists** with profile tools (copy from alts, import, clear)
 
 ### 🎒 ElvUI Bag Frame Integration

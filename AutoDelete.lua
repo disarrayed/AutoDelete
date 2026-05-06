@@ -122,8 +122,9 @@ local DEFAULT_PROFILE = {
 	--   2) Reactive: PLAYER_EQUIPMENT_CHANGED fires any time you swap
 	--      gear; the new item is added to Keep automatically.
 	-- Existing Keep entries are deduped by item id, so this is safe to
-	-- re-trigger.
-	autoAddEquipped  = false,
+	-- re-trigger. Defaults to true so new users are protected without
+	-- having to know about the feature.
+	autoAddEquipped  = true,
 
 	-- ============================================================
 	-- Sell categories (Sell tab, three cards)
@@ -1257,6 +1258,33 @@ local function FindCompanionById(creatureId, fallbackName)
 	return FindCompanionByName(fallbackName)
 end
 
+-- Check if any companion OTHER than the named one is currently summoned.
+-- Used by the summon helpers to decide whether to dismiss-first before
+-- calling CallCompanion. Some realms drop the second call when the slot
+-- is occupied, so an explicit dismiss is more reliable than relying on
+-- CallCompanion's atomic-toggle behavior.
+local function IsOtherCompanionSummoned(skipName)
+	local n = GetNumCompanions("CRITTER")
+	if not n or n <= 0 then return false end
+	skipName = string.lower(skipName or "")
+	for i = 1, n do
+		local _, cName, _, _, summoned = GetCompanionInfo("CRITTER", i)
+		if (summoned == 1 or summoned == true) and cName then
+			if not string.find(string.lower(cName), skipName) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+-- Cooldown gate so we don't fire CallCompanion more than once every few
+-- seconds. The server can take a moment to confirm a summon under load,
+-- and a second call inside that window can either no-op or get queued
+-- as a redundant toggle.
+local lastSummonCallAt = 0
+local SUMMON_RESPECT_WINDOW = 5
+
 local function SummonGreedyScavenger(force)
 	local idx, isUp, cId = FindCompanionById(SCAVENGER_CREATURE_ID, "greedy scavenger")
 	if cId then SCAVENGER_CREATURE_ID = cId end  -- cache for next time
@@ -1271,7 +1299,36 @@ local function SummonGreedyScavenger(force)
 		end
 		return
 	end
+	-- Server-confirm window: if we fired a CallCompanion very recently,
+	-- the server may not have flipped the summoned flag yet. Skip this
+	-- attempt; the next tick or trigger will retry once the window is up.
+	if (GetTime() - lastSummonCallAt) < SUMMON_RESPECT_WINDOW then
+		return
+	end
+	-- Dismiss-first when another companion holds the slot. CallCompanion
+	-- alone toggles atomically on most realms, but some queue both calls
+	-- and only the last one takes effect. The explicit dismiss + small
+	-- delay makes the swap reliable on PE.
+	if IsOtherCompanionSummoned("greedy scavenger") then
+		if DismissCompanion then DismissCompanion("CRITTER") end
+		AfterDelay(0.4, function()
+			-- Re-check after the dismiss in case state changed during the gap.
+			local idx2, isUp2 = FindCompanionById(SCAVENGER_CREATURE_ID, "greedy scavenger")
+			if not idx2 or isUp2 then return end
+			CallCompanion("CRITTER", idx2)
+			lastSummonCallAt = GetTime()
+			print("|cffff8000[AutoDelete]|r: Summoned Greedy Scavenger")
+			if _G.AutoDelete_SetActiveTrackedPet then
+				_G.AutoDelete_SetActiveTrackedPet("scavenger")
+			end
+			if _G.AutoDelete_RecordSummonAt then
+				_G.AutoDelete_RecordSummonAt(GetTime())
+			end
+		end)
+		return
+	end
 	CallCompanion("CRITTER", idx)
+	lastSummonCallAt = GetTime()
 	print("|cffff8000[AutoDelete]|r: Summoned Greedy Scavenger")
 	if _G.AutoDelete_SetActiveTrackedPet then
 		_G.AutoDelete_SetActiveTrackedPet("scavenger")
@@ -1296,7 +1353,28 @@ local function SummonGoblinMerchant(force)
 		end
 		return
 	end
+	if (GetTime() - lastSummonCallAt) < SUMMON_RESPECT_WINDOW then
+		return
+	end
+	if IsOtherCompanionSummoned("goblin merchant") then
+		if DismissCompanion then DismissCompanion("CRITTER") end
+		AfterDelay(0.4, function()
+			local idx2, isUp2 = FindCompanionById(MERCHANT_CREATURE_ID, "goblin merchant")
+			if not idx2 or isUp2 then return end
+			CallCompanion("CRITTER", idx2)
+			lastSummonCallAt = GetTime()
+			print("|cffff8000[AutoDelete]|r: Summoned Goblin Merchant. Target it and press your Interact With Target keybind to open the vendor.")
+			if _G.AutoDelete_SetActiveTrackedPet then
+				_G.AutoDelete_SetActiveTrackedPet("merchant")
+			end
+			if _G.AutoDelete_RecordSummonAt then
+				_G.AutoDelete_RecordSummonAt(GetTime())
+			end
+		end)
+		return
+	end
 	CallCompanion("CRITTER", idx)
+	lastSummonCallAt = GetTime()
 	print("|cffff8000[AutoDelete]|r: Summoned Goblin Merchant. Target it and press your Interact With Target keybind to open the vendor.")
 	if _G.AutoDelete_SetActiveTrackedPet then
 		_G.AutoDelete_SetActiveTrackedPet("merchant")
@@ -1895,12 +1973,16 @@ local function SellItems(silent)
 			-- Vendor window is still open here (MERCHANT_CLOSED fires later).
 			-- Only trigger at Goblin Merchant. If summonOnlyInCombat is set, the
 			-- player must be in combat at THIS moment for the summon to fire.
+			-- Delay is 2.0s to give the merchant time to despawn before scav
+			-- summon. SummonGreedyScavenger now does dismiss-first when another
+			-- pet is up, but the extra second avoids racing against the server's
+			-- post-sell cleanup of the merchant pet.
 			if cachedProfile and cachedProfile.summonScavenger and cachedProfile.summonAfterSell then
 				local combatOk = (not cachedProfile.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player"))
 				if combatOk then
 					local merchant = string.lower(lastMerchantName or "")
 					if string.find(merchant, "goblin merchant") then
-						DelayedSummon(1.5)
+						DelayedSummon(2.0)
 					end
 				end
 			end
@@ -2529,8 +2611,23 @@ local function ShowWelcomePopup()
 	-- warning callout. Toggling this on writes the setting to the active
 	-- profile AND immediately runs the one-time sync of currently equipped
 	-- items into Keep, mirroring the General-tab toggle's behavior. Default
-	-- starts off so the user makes an explicit choice; not pre-checked.
-	local aaeChecked = false
+	-- is ON (matches the profile default), so new users are protected without
+	-- having to know about the feature.
+	-- Read initial state from the profile so the popup reflects current setting
+	-- if the user has already toggled it elsewhere.
+	local aaeChecked = true
+	do
+		_G.AutoDeleteDB = _G.AutoDeleteDB or {}
+		local db = _G.AutoDeleteDB
+		if db.profiles and db.chars then
+			local charKey = (UnitName("player") or "Default") .. "-" .. (GetRealmName() or "")
+			local profileKey = db.chars[charKey] or charKey
+			local p = db.profiles[profileKey]
+			if p and p.autoAddEquipped ~= nil then
+				aaeChecked = (p.autoAddEquipped == true)
+			end
+		end
+	end
 	local aaeCheck = CreateFrame("Button", nil, f)
 	aaeCheck:SetSize(14, 14)
 	aaeCheck:SetPoint("TOPLEFT", 16, -482)
@@ -2542,7 +2639,7 @@ local function ShowWelcomePopup()
 	aaeMark:SetTexture("Interface\\AddOns\\AutoDelete\\textures\\checkmark.tga")
 	aaeMark:SetSize(12, 12)
 	aaeMark:SetPoint("CENTER")
-	aaeMark:Hide()
+	if aaeChecked then aaeMark:Show() else aaeMark:Hide() end
 
 	local aaeLabel = f:CreateFontString(nil, "OVERLAY")
 	aaeLabel:SetFont(FONT, 11)

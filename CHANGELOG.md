@@ -2,11 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
-## [3.17.2] - 2026-04-27
+## [3.18] - 2026-05-02
 
-### Improved
+### Added
 
-- **Better bag full detection.** Goblin Merchant now summons when you have 3 or fewer free bag slots instead of waiting for bags to be completely full. Still requires the threshold to hold for 1.5 seconds before firing, so transient drops won't trigger stray summons.
+- Auto-Add Equipped Items (default on)
+- Goblin Merchant summons at 3 or fewer free slots
+
+### Changed
+
+- Wider settings panel
+- Cleaner tabs and dropdowns
+- Tracking shows gold only
+
+### Fixed
+
+- Long labels no longer overflow
 
 ## [3.17.1] - 2026-04-27
 
