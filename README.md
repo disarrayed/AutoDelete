@@ -4,7 +4,7 @@
 
 WoW 3.3.5a inventory manager for Project Ebonhold. Mark items to **Delete**, **Sell**, or **Keep**. Every automatic feature is opt-in.
 
-![v3.18](https://img.shields.io/badge/v3.18-ff8000?style=for-the-badge) ![downloads](https://img.shields.io/github/downloads/disarrayed/AutoDelete/total?style=for-the-badge&color=ff8000) ![platform](https://img.shields.io/badge/PROJECT%20EBONHOLD-3.3.5a-e6cc80?style=for-the-badge)
+![version](https://img.shields.io/badge/version-v3.18-ff8000?style=for-the-badge) ![downloads](https://img.shields.io/github/downloads/disarrayed/AutoDelete/total?style=for-the-badge&color=ff8000) ![platform](https://img.shields.io/badge/PROJECT%20EBONHOLD-3.3.5a-e6cc80?style=for-the-badge)
 
 [**Download**](https://github.com/disarrayed/AutoDelete/releases/latest) · [**Source**](https://github.com/disarrayed/AutoDelete)
 
