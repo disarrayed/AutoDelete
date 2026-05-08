@@ -180,115 +180,133 @@ Initial release of the v3.10 line. Major feature set and rework consolidated fro
 
 ### Fixed
 
-- Profile cached so OnUpdate no longer fetches it every frame
-- Raw list editor rebuilt: click, paste, scroll, and cursor-follow all work
-- Sell Green Gear removed from OnUpdate (handled at vendor open)
+- Major performance fix: OnUpdate no longer calls GetDB/GetActiveProfile every frame. Profile is cached and refreshed only on events.
+- Raw list editor completely rebuilt. Removed UIPanelScrollFrameTemplate that was eating mouse clicks, replaced with direct scroll frame that properly passes input to the edit box.
+- Click anywhere in the raw editor area to focus it
+- Mouse wheel scrolling and cursor-follow scrolling work properly
+- Removed SellGreenGear from OnUpdate loop (MERCHANT_SHOW handles it)
 
 ## [1.6.2] - 2026-02-08
 
 ### Fixed
 
-- Raw list editor stays interactive while open
+- Raw list editor no longer gets replaced while editing. GET_ITEM_INFO_RECEIVED and auto-gray scans no longer touch the raw editor when it's open.
+- Raw editor stays fully interactive (clickable, pasteable, editable) at all times
 
 ## [1.6.1] - 2026-02-08
 
-### Added
-
-- Duplicate items stripped when parsing the raw list
-
 ### Fixed
 
-- Pasting into the raw list editor saves correctly
+- Pasting into the raw list editor now properly saves and updates the item list
+- Raw editor no longer requires manual typing to register changes. Paste, import, and replace all work.
+
+### Changed
+
+- Duplicate items are automatically stripped when parsing the raw list
+- Programmatic text updates no longer trigger false saves (prevents data corruption loops)
 
 ## [1.6.0] - 2026-02-08
 
 ### Added
 
-- Continuous auto-sell while vendor is open
-- Silent mode when nothing to sell
+- Continuous auto-sell while a vendor is open. Items from the sell list and green gear are sold on every scan tick, not just on vendor open.
+- Auto-sell uses the same scan speed as auto-delete
+- Silent mode when nothing to sell (no chat spam during continuous scans)
 
 ## [1.5.0] - 2026-02-08
 
 ### Added
 
-- Sell List with drag-and-drop
-- Toggle tabs to switch between Delete and Sell lists
-- ElvUI sell button accepts drag-and-drop
-- Auto-sell on vendor open
+- Sell List. Drag-and-drop items to auto-sell at vendors, works identically to the delete list.
+- Delete List / Sell List toggle tabs above the search box to switch between lists
+- ElvUI sell button now accepts drag-and-drop to add items to the sell list
+- Auto-sell triggers on MERCHANT_SHOW. Sells green gear and sell-list items when opening a vendor.
+- `sellListText` added to per-character profile data
 
 ## [1.4.0] - 2026-02-08
 
 ### Added
 
-- Sell Green Gear button on the ElvUI bag frame
-- `/sellgreens` slash command
+- Sell Green Gear button on ElvUI bag frame (coin icon, next to the AutoDelete button)
+- Sells all green (uncommon) quality armor and weapons to the current vendor
+- Chat output shows how many items sold and total gold earned
+- Tooltip warns if you're not at a vendor
+- `/sellgreens` slash command for non-ElvUI users
 
 ## [1.3.0] - 2026-02-08
 
 ### Added
 
-- Configurable scan speed (0.75s, 10s, 30s, 2m, 5m, 10m)
+- Configurable scan speed with radio-style options: 0.75s, 10s, 30s, 2m, 5m, 10m
+- Auto-delete pauses while dragging an item, preventing interference with drag-and-drop
 
 ### Changed
 
-- Compact red X remove buttons
-- Cleaner vertical spacing
+- Replaced remove buttons with compact red X icons that no longer overlap the scrollbar
+- Improved vertical spacing between Scan Speed, Search, and item list sections
 
 ### Fixed
 
-- Dragging items no longer interrupted by the scanner
+- Dragging items no longer gets interrupted by the auto-delete scanner
 
 ## [1.2.1] - 2026-02-06
 
 ### Fixed
 
-- Auto-delete pauses while dragging items
-- Gray scanner pauses when the cursor is holding an item
+- Auto-delete no longer fires while dragging an item, which was preventing drag-and-drop from working properly
+- Gray item scanner also pauses when cursor is holding an item
 
 ## [1.2.0] - 2026-02-06
 
 ### Added
 
-- ElvUI bag button is now a drop target; right-click opens settings
-- List rows accept drag-and-drop
-- Empty-state hint text
+- Auto-add gray (junk) items checkbox. Automatically adds quality-0 items to the deletion list on loot.
+- ElvUI bag button is now a drop target. Drag items onto it to add them to the list.
+- Right-click ElvUI bag button to open settings
+- List box itself now accepts drag-and-drop (removed separate drop zone)
+- Empty state hint text when list is empty: "Drag items here to add to deletion list"
+- Each list row also accepts drag-and-drop
+- Profile dropdown skinned with thin ElvUI-style border
+- Search box restyled with thin border and dark background (no more default InputBoxTemplate)
 
 ### Changed
 
-- Thin 1px borders across all UI
-- Profile dropdown and search box restyled
+- All UI borders changed from thick Blizzard tooltip borders to thin 1px ElvUI-style borders (`Interface\Buttons\WHITE8X8`)
+- ElvUI bag button changed from click-to-open to drop-target with red highlight on hover
+- Drop zone removed in favor of list box accepting drops directly
 
 ### Fixed
 
-- Backdrop colors unified
+- Backdrop colors unified across all UI elements for consistent look
 
 ## [1.1.0] - 2026-02-06
 
 ### Added
 
-- Auto-add gray items toggle
-- ElvUI bag button to open settings
+- Auto-add gray items feature (checkbox + scanning logic)
+- ElvUI bag button that opens settings panel
+- `autoGray` field added to profile data
 
 ### Changed
 
-- Thin 1px borders on UI elements
+- All UI borders updated to thin 1px style using `Interface\Buttons\WHITE8X8`
 
 ## [1.0.1] - 2026-02-05
 
 ### Added
 
-- Item icons next to names
-- Empty-state message when list is empty
+- Item icons next to names with proper caching via GET_ITEM_INFO_RECEIVED
+- Empty state message when list is empty
 
 ### Changed
 
-- List accepts drag-and-drop directly
+- List itself accepts drag-and-drop (removed separate drop zone in earlier iteration)
 
 ### Fixed
 
-- UI sizing fits the interface panel
-- Items delete during combat
-- Raw list shows item IDs with name comments
+- UI sizing to fit properly in interface panel (360x180 list)
+- Raw list now shows item IDs with name comments (`item:12345 # Item Name`)
+- Removed combat lockdown restriction. Items delete during combat.
 
 ## [1.0.0] - 2026-02-05
 
@@ -297,9 +315,12 @@ First public mention: https://discord.com/channels/1429854156444794884/146757898
 ### Added
 
 - Initial release
-- Auto-deletion engine with bag scanning
-- Drag-and-drop interface for adding items
+- Core auto-deletion engine with throttled bag scanning (0.75s between scans)
+- Drag and drop interface for adding items
 - Visual item list with icons, names, and remove buttons
-- Per-character deletion lists with profile system
-- Search filter and raw list view
-- Slash commands `/del` and `/autodelete`
+- Profile system with per-character deletion lists
+- Search filter for finding items in the list
+- Raw list view for advanced editing
+- Slash commands: `/del` and `/autodelete`
+- SavedVariables database with migration support
+- Periodic scanning every 2 seconds when enabled
