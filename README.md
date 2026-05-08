@@ -1,19 +1,15 @@
+<div align="center">
+
 # AutoDelete
 
-<div align="center">
-<img src="https://img.shields.io/badge/version-v3.18-ff8000?style=for-the-badge" /><br>
-<img src="https://img.shields.io/github/downloads/disarrayed/AutoDelete/total?style=for-the-badge&color=ff8000" /><br>
-<img src="https://img.shields.io/badge/PLATFORM-PROJECT%20EBONHOLD-e6cc80?style=for-the-badge" />
-<br><br>
-<a href="https://github.com/disarrayed/AutoDelete/releases/latest"><b>Download Latest</b></a> &nbsp;·&nbsp; <a href="https://github.com/disarrayed/AutoDelete">View Source</a>
-</div>
+WoW 3.3.5a inventory manager for Project Ebonhold. Mark items to **Delete**, **Sell**, or **Keep**. Every automatic feature is opt-in.
 
----
+![v3.18](https://img.shields.io/badge/v3.18-ff8000?style=for-the-badge) ![downloads](https://img.shields.io/github/downloads/disarrayed/AutoDelete/total?style=for-the-badge&color=ff8000) ![platform](https://img.shields.io/badge/PROJECT%20EBONHOLD-3.3.5a-e6cc80?style=for-the-badge)
 
-A WoW 3.3.5a addon for Project Ebonhold. Mark items to **Delete**, **Sell**, or **Keep**. The addon handles them on bag scan and at vendors. Every automatic feature is opt-in.
+[**Download**](https://github.com/disarrayed/AutoDelete/releases/latest) · [**Source**](https://github.com/disarrayed/AutoDelete)
 
-<div align="center">
 <img src="screenshots/panel.png" alt="AutoDelete settings panel" width="540" />
+
 </div>
 
 ---
