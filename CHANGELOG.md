@@ -79,6 +79,8 @@ All notable changes to this project will be documented in this file.
 - **Right-click on usable bag items (Hearthstone, potions, mounts, scrolls, food) now works.** Earlier versions globally replaced `UseContainerItem`, which poisoned WoW 3.3.5's secure-action call path and silently rejected use of any castable item. Switched to `hooksecurefunc` with a bag-snapshot mechanism so manual sell tracking still works at vendors without breaking item use.
 - **Shift-click of a chat item link no longer double-prints.** A single click was firing both `ChatEdit_InsertLink` and `HandleModifiedItemClick` paths, producing two "added to keep list" or "already in the list" messages. Added a 0.5-second per-item dedupe.
 
+> **Versions 3.14 and 3.15 do not exist.** They were skipped during development; their planned content shipped as part of v3.16. Anyone citing "AutoDelete v3.14" or "v3.15" in source comments or related projects should update the reference to v3.16.
+
 ## [3.13] - 2026-04-25
 
 ### Fixed
