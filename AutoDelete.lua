@@ -2418,6 +2418,15 @@ local function AutoOpenScanBags()
 		and UnitAffectingCombat and UnitAffectingCombat("player") then return end
 	if SpellIsTargeting and SpellIsTargeting() then return end
 
+	-- CRITICAL: never run at a vendor. UseContainerItem at a merchant
+	-- SELLS the item instead of opening it. Without this guard, every
+	-- container in bags (including any on the Keep list, since UseContainerItem
+	-- doesn't consult the addon's lists) would be auto-sold whenever the
+	-- merchant frame is open.
+	if MerchantFrame and MerchantFrame:IsShown() then return end
+
+	local profile = cachedProfile
+
 	local now = GetTime()
 	for bag = 0, NUM_BAG_SLOTS do
 		local slots = GetContainerNumSlots(bag)
@@ -2426,16 +2435,24 @@ local function AutoOpenScanBags()
 			if link then
 				local id = GetItemIDFromLink(link)
 				if id and AUTO_OPEN_ITEM_IDS[id] then
-					local isLocked = AUTO_OPEN_LOCKED_IDS[id]
-					if (not isLocked) or cachedProfile.autoOpenLocked then
-						local lastTry = autoOpenLastTry[id .. "_" .. bag .. "_" .. slot]
-						if not lastTry or (now - lastTry) >= OPEN_RETRY_WINDOW then
-							autoOpenLastTry[id .. "_" .. bag .. "_" .. slot] = now
-							UseContainerItem(bag, slot)
-							-- Only open one per scan to avoid stacking
-							-- multiple Open windows on top of each other
-							-- when the player has many of the same container.
-							return
+					-- Defense in depth: skip Keep-list items. Even though
+					-- the merchant guard above is the primary safety net,
+					-- Keep is the user's explicit "do not touch" list and
+					-- should win over auto-open just like it wins over
+					-- auto-sell and auto-delete.
+					local nameForKeep = GetItemInfo(link)
+					if not IsWhitelisted(profile, id, nameForKeep) then
+						local isLocked = AUTO_OPEN_LOCKED_IDS[id]
+						if (not isLocked) or cachedProfile.autoOpenLocked then
+							local lastTry = autoOpenLastTry[id .. "_" .. bag .. "_" .. slot]
+							if not lastTry or (now - lastTry) >= OPEN_RETRY_WINDOW then
+								autoOpenLastTry[id .. "_" .. bag .. "_" .. slot] = now
+								UseContainerItem(bag, slot)
+								-- Only open one per scan to avoid stacking
+								-- multiple Open windows on top of each other
+								-- when the player has many of the same container.
+								return
+							end
 						end
 					end
 				end
