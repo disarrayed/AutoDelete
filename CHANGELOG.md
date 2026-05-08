@@ -175,3 +175,131 @@ Initial release of the v3.10 line. Major feature set and rework consolidated fro
 
 - WoW 3.3.5a (Wrath of the Lich King)
 - Tested on Project Ebonhold with PE-ElvUI fork
+
+## [1.7.0] - 2026-02-08
+
+### Fixed
+
+- Profile cached so OnUpdate no longer fetches it every frame
+- Raw list editor rebuilt: click, paste, scroll, and cursor-follow all work
+- Sell Green Gear removed from OnUpdate (handled at vendor open)
+
+## [1.6.2] - 2026-02-08
+
+### Fixed
+
+- Raw list editor stays interactive while open
+
+## [1.6.1] - 2026-02-08
+
+### Added
+
+- Duplicate items stripped when parsing the raw list
+
+### Fixed
+
+- Pasting into the raw list editor saves correctly
+
+## [1.6.0] - 2026-02-08
+
+### Added
+
+- Continuous auto-sell while vendor is open
+- Silent mode when nothing to sell
+
+## [1.5.0] - 2026-02-08
+
+### Added
+
+- Sell List with drag-and-drop
+- Toggle tabs to switch between Delete and Sell lists
+- ElvUI sell button accepts drag-and-drop
+- Auto-sell on vendor open
+
+## [1.4.0] - 2026-02-08
+
+### Added
+
+- Sell Green Gear button on the ElvUI bag frame
+- `/sellgreens` slash command
+
+## [1.3.0] - 2026-02-08
+
+### Added
+
+- Configurable scan speed (0.75s, 10s, 30s, 2m, 5m, 10m)
+
+### Changed
+
+- Compact red X remove buttons
+- Cleaner vertical spacing
+
+### Fixed
+
+- Dragging items no longer interrupted by the scanner
+
+## [1.2.1] - 2026-02-06
+
+### Fixed
+
+- Auto-delete pauses while dragging items
+- Gray scanner pauses when the cursor is holding an item
+
+## [1.2.0] - 2026-02-06
+
+### Added
+
+- ElvUI bag button is now a drop target; right-click opens settings
+- List rows accept drag-and-drop
+- Empty-state hint text
+
+### Changed
+
+- Thin 1px borders across all UI
+- Profile dropdown and search box restyled
+
+### Fixed
+
+- Backdrop colors unified
+
+## [1.1.0] - 2026-02-06
+
+### Added
+
+- Auto-add gray items toggle
+- ElvUI bag button to open settings
+
+### Changed
+
+- Thin 1px borders on UI elements
+
+## [1.0.1] - 2026-02-05
+
+### Added
+
+- Item icons next to names
+- Empty-state message when list is empty
+
+### Changed
+
+- List accepts drag-and-drop directly
+
+### Fixed
+
+- UI sizing fits the interface panel
+- Items delete during combat
+- Raw list shows item IDs with name comments
+
+## [1.0.0] - 2026-02-05
+
+First public mention: https://discord.com/channels/1429854156444794884/1467578986878996491/1470000027043889154
+
+### Added
+
+- Initial release
+- Auto-deletion engine with bag scanning
+- Drag-and-drop interface for adding items
+- Visual item list with icons, names, and remove buttons
+- Per-character deletion lists with profile system
+- Search filter and raw list view
+- Slash commands `/del` and `/autodelete`
