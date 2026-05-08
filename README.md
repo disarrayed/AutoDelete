@@ -96,6 +96,20 @@ Drop items onto the **Delete / Sell / Keep** buttons next to your bags, or open 
 
 AutoDelete is built for **Project Ebonhold (WoW 3.3.5a)** to simplify inventory management without changing gameplay. Every automatic feature is **opt-in** and gated behind toggles, so the addon does nothing until you tell it what you want.
 
+---
+
+## 📜 Influence
+
+AutoDelete started February 5, 2026. EbonholdStuff by Badutski2 (GitHub repo created February 13, 2026, last commit February 17) is another addon in the same niche. Both use the same Blizzard 3.3.5a API surface; some ideas crossed over. The code is original, written from scratch, with no shared snippets.
+
+AutoDelete has been re-implemented in part by EbonClearance, which is itself a fork of EbonholdStuff. We appreciate the shoutouts in their source comments, even when one cites "AutoDelete v3.14," a version we apparently forgot to ship. We'll get to it.
+
+The chocolate box stays. We appreciate the passion. The chocolate would like you to know it is in a safe place.
+
+GitHub timestamps every commit, not us. Dates are public. Knock yourself out.
+
+---
+
 <div align="center">
 <sub>Made with ❤️ and 🤖 for the Project Ebonhold community. Fork it. Rebrand it. I don't care.</sub>
 </div>
