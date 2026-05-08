@@ -176,6 +176,14 @@ Initial release of the v3.10 line. Major feature set and rework consolidated fro
 - WoW 3.3.5a (Wrath of the Lich King)
 - Tested on Project Ebonhold with PE-ElvUI fork
 
+## [2.9] - 2026-04-22
+
+Final private build before the v3.10 public release. End of the v2 testing line.
+
+## [2.0] - 2026-02-15
+
+Private testing line for what became v3. Distributed only to friends in the Project Ebonhold Discord. Never tagged, never publicly released, no formal changelog kept during this period. Internal iteration during these weeks informed the v3.x architecture.
+
 ## [1.7.0] - 2026-02-08
 
 ### Fixed
