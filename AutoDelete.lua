@@ -661,6 +661,15 @@ end
 local autoDeleteSelling = false
 local merchantBagSnapshot = {}
 
+-- Merchant-state flag for the auto-open feature. UseContainerItem at a
+-- vendor SELLS the item instead of opening it, so auto-open must never
+-- fire while a vendor is or has just been open. This flag is set at
+-- MERCHANT_SHOW and cleared on a delay after MERCHANT_CLOSED so that
+-- trailing BAG_UPDATE events from the sell loop's tail don't slip
+-- through and trigger an auto-open attempt on a freshly-emptied slot.
+local merchantOpen = false
+local MERCHANT_CLOSE_GRACE = 1.5
+
 local function SnapshotAllBags()
 	merchantBagSnapshot = {}
 	for bag = 0, 4 do
@@ -2366,7 +2375,7 @@ local AUTO_OPEN_ITEM_IDS = {
 	[7973]  = true,   -- Big-mouth Clam
 	[15874] = true,   -- Soft-shelled Clam
 	[24476] = true,   -- Jaggal Clam
-	[36781] = true,   -- Jaggal Clam (Northrend)
+	[36781] = true,   -- Darkwater Clam
 	-- Mysterious crates and chests
 	[34835] = true,   -- Mysterious Egg (Oracles)
 	[44606] = true,   -- Cracked Egg (Oracles, opens to a vanity reward set)
@@ -2418,12 +2427,19 @@ local function AutoOpenScanBags()
 		and UnitAffectingCombat and UnitAffectingCombat("player") then return end
 	if SpellIsTargeting and SpellIsTargeting() then return end
 
-	-- CRITICAL: never run at a vendor. UseContainerItem at a merchant
-	-- SELLS the item instead of opening it. Without this guard, every
-	-- container in bags (including any on the Keep list, since UseContainerItem
-	-- doesn't consult the addon's lists) would be auto-sold whenever the
-	-- merchant frame is open.
+	-- CRITICAL multi-guard: never run at or just after a vendor.
+	-- UseContainerItem at a merchant SELLS the item instead of opening it.
+	-- We use four overlapping checks so any single failure path still bails:
+	--   1. merchantOpen flag      - set on MERCHANT_SHOW, cleared 1.5s after
+	--                               MERCHANT_CLOSED. Catches the post-close
+	--                               window where trailing BAG_UPDATEs can fire.
+	--   2. MerchantFrame:IsShown  - live check, in case the flag missed.
+	--   3. autoDeleteSelling      - addon's own sell loop is in flight.
+	--   4. CursorHasItem          - player is mid drag/drop, never call use.
+	if merchantOpen then return end
 	if MerchantFrame and MerchantFrame:IsShown() then return end
+	if autoDeleteSelling then return end
+	if CursorHasItem and CursorHasItem() then return end
 
 	local profile = cachedProfile
 
@@ -3120,6 +3136,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		return
 	end
 	if event == "MERCHANT_SHOW" then
+		-- Set the auto-open block flag FIRST, before anything else can fire
+		-- a BAG_UPDATE. The flag stays true until the post-close grace expires.
+		merchantOpen = true
 		RefreshCachedProfile()
 		lastMerchantName = UnitName("npc") or ""
 		sellSessionCount = 0
@@ -3143,6 +3162,11 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		return
 	end
 	if event == "MERCHANT_CLOSED" then
+		-- Defer the unblock so any BAG_UPDATE events fired in the immediate
+		-- aftermath of closing the merchant (sell loop tail, manual sells
+		-- still being processed by the server) don't trigger auto-open on
+		-- the now-just-emptied slot.
+		AfterDelay(MERCHANT_CLOSE_GRACE, function() merchantOpen = false end)
 		if sellSessionCount > 0 then
 			print("|cffff8000[AutoDelete]|r: Sold " .. sellSessionCount .. " item(s) for " .. FormatMoney(sellSessionCopper))
 			sellSessionCount = 0
