@@ -109,6 +109,21 @@ local DEFAULT_PROFILE = {
 	-- These three run on every scan and are independent of the BoE
 	-- Armor / BoP / BoE Weapons category sections below. They all
 	-- skip quest items, items on the Keep list, and shirts/tabards.
+	-- ============================================================
+	-- Tools (Tools tab)
+	-- ============================================================
+	-- Auto-Open Containers: opens lootable bag containers (clams, crates,
+	-- mysterious eggs, manna biscuits, lockboxes) automatically when they
+	-- enter the bag. Saves bag space during long farms.
+	autoOpenContainers = false,
+	autoOpenLocked     = false,   -- include lockboxes (need a key/picks)
+	autoOpenSkipCombat = true,    -- skip while in combat to avoid GCD waste
+
+	-- Sell Threshold: skip selling items worth less than this many gold.
+	-- 0 disables the check. Compares to vendor sell value, so an expensive
+	-- crafted white is protected automatically when this is set.
+	sellThresholdGold  = 0,
+
 	autoGray         = false,  -- Auto-Delete Junk   (gray quality, any item)
 	autoDeleteCommon = false,  -- Auto-Delete Common (white quality, equippable gear only)
 	autoSellGreens   = false,  -- Auto-Sell Greens   (green quality, equippable gear only)
@@ -575,6 +590,29 @@ local function HandleItemDrop(listKey)
 		end
 	end
 end
+
+-- Remove a single item id from the named list. Used by the row context
+-- menu's Remove and Move-to actions. Silent on no-op (item wasn't on the
+-- list anyway). Returns true if a line was actually removed.
+local function RemoveItemFromList(listKey, itemId)
+	if not itemId then return false end
+	local db = GetDB()
+	local profile = GetActiveProfile(db)
+	local line = "item:" .. tostring(itemId)
+	local current = profile[listKey] or ""
+	if not HasExactLine(current, line) then return false end
+	-- Rebuild the list text without the matching line.
+	local kept = {}
+	for entry in string.gmatch(current, "[^\r\n]+") do
+		if entry ~= line then table.insert(kept, entry) end
+	end
+	profile[listKey] = table.concat(kept, "\n") .. (#kept > 0 and "\n" or "")
+	return true
+end
+
+-- Globals for the row context menu in Options.lua to call.
+_G.AutoDelete_AddItemToList = AddItemToList
+_G.AutoDelete_RemoveItemFromList = RemoveItemFromList
 
 -- Global functions for ElvUI buttons - always target the correct list
 _G.AutoDelete_AddToDeleteList = function() HandleItemDrop("listText") end
@@ -1922,6 +1960,27 @@ local function SellItems(silent)
 					end
 
 					if shouldSell then
+						-- Sell Threshold gate (Tools tab). Skip selling items
+						-- worth less than profile.sellThresholdGold gold per
+						-- unit. The check uses the unit vendor price (not the
+						-- stack total), so an expensive crafted white in a
+						-- stack of 1 is protected the same way as a single.
+						-- Threshold of 0 disables the check.
+						local thresholdGold = tonumber(profile.sellThresholdGold) or 0
+						if thresholdGold > 0 and vendorPrice and vendorPrice > 0 then
+							local thresholdCopper = thresholdGold * 10000
+							if vendorPrice < thresholdCopper then
+								shouldSell = false
+								if _G.AutoDelete_DebugSell then
+									print(string.format(
+										"|cffff8000[AutoDelete DEBUG]|r SKIPPED (threshold): %s | unitPrice=%dc | thresholdCopper=%dc",
+										tostring(name), vendorPrice, thresholdCopper))
+								end
+							end
+						end
+					end
+
+					if shouldSell then
 						-- DEBUG TRACE: print why the item is selling. Toggle with /del debug.
 						-- Shows every input that fed the decision chain so the user can
 						-- pinpoint which rule is matching when something unexpected sells.
@@ -2284,6 +2343,103 @@ local function HandleEquipmentChanged(slot)
 		if panel and panel._built and panel:IsVisible()
 			and not (panel._rawBoxHolder and panel._rawBoxHolder:IsShown()) then
 			panel:Refresh()
+		end
+	end
+end
+
+-- ============================================================================
+-- Auto-Open Containers (settings.autoOpenContainers)
+-- ============================================================================
+-- Walks the bags after every BAG_UPDATE and opens any openable container
+-- found. The known list is an allow-list of item IDs that are safe to open
+-- on PE (clams, crates, eggs, biscuits, lockboxes when allowed). This avoids
+-- false positives that would happen if we tried to detect "openable" by
+-- item class alone, since the API doesn't expose a direct "is openable" flag.
+--
+-- Per-item throttle: we record the time we last tried each item id and skip
+-- it for OPEN_RETRY_WINDOW seconds. The reopen window catches edge cases
+-- where the server rejects the first call (full bags, etc).
+local AUTO_OPEN_ITEM_IDS = {
+	-- Clams (drop fresh water clam meat / pearls)
+	[5523]  = true,   -- Small Barnacled Clam
+	[5524]  = true,   -- Thick-shelled Clam
+	[7973]  = true,   -- Big-mouth Clam
+	[15874] = true,   -- Soft-shelled Clam
+	[24476] = true,   -- Jaggal Clam
+	[36781] = true,   -- Jaggal Clam (Northrend)
+	-- Mysterious crates and chests
+	[34835] = true,   -- Mysterious Egg (Oracles)
+	[44606] = true,   -- Cracked Egg (Oracles, opens to a vanity reward set)
+	[39878] = true,   -- Mysterious Egg
+	-- Crates from fishing daily and similar
+	[33454] = true,   -- Mr. Pinchy
+	-- Northrend openables
+	[44663] = true,   -- Nurtured Penguin Egg
+	-- Manna biscuit container
+	[34062] = true,   -- Bag of Fishing Treasures
+	[45328] = true,   -- Bag of Fishing Treasures (Northrend)
+	[62799] = true,   -- Reinforced Crate
+	-- Containers with random valuable drops (keep small, expand on user request)
+	[11938] = true,   -- Heavy Crate
+	[16885] = true,   -- Battered Junkbox
+	[4633]  = true,   -- Heavy Iron-Bound Chest
+	[4634]  = true,   -- Iron-Bound Chest
+	[4636]  = true,   -- Strong Iron-Bound Chest
+	[4637]  = true,   -- Solid Chest
+	[4638]  = true,   -- Reinforced Steel Lockbox
+	[5760]  = true,   -- Mossy Footlocker
+	[5759]  = true,   -- Sturdy Locked Chest
+	[6712]  = true,   -- Practice Locked Chest
+	[16882] = true,   -- Battered Junkbox
+	[16883] = true,   -- Worn Junkbox
+	[16884] = true,   -- Sturdy Junkbox
+	[29569] = true,   -- Strong Junkbox
+	[43622] = true,   -- Iceforged Junkbox (WotLK)
+	[43575] = true,   -- Reinforced Junkbox
+	[63349] = true,   -- Flame-Scarred Junkbox
+}
+
+-- Locked containers are a subset; the autoOpenLocked toggle gates these.
+-- These are the same lockboxes/chests as above that need a key or rogue.
+local AUTO_OPEN_LOCKED_IDS = {
+	[4633]  = true, [4634]  = true, [4636]  = true, [4637]  = true,
+	[4638]  = true, [5759]  = true, [5760]  = true, [6712]  = true,
+	[16882] = true, [16883] = true, [16884] = true, [16885] = true,
+	[29569] = true, [43575] = true, [43622] = true, [63349] = true,
+}
+
+-- Per-item retry throttle so a stuck item doesn't get hammered every tick.
+local autoOpenLastTry = {}
+local OPEN_RETRY_WINDOW = 3.0   -- seconds
+
+local function AutoOpenScanBags()
+	if not cachedProfile or not cachedProfile.autoOpenContainers then return end
+	if cachedProfile.autoOpenSkipCombat
+		and UnitAffectingCombat and UnitAffectingCombat("player") then return end
+	if SpellIsTargeting and SpellIsTargeting() then return end
+
+	local now = GetTime()
+	for bag = 0, NUM_BAG_SLOTS do
+		local slots = GetContainerNumSlots(bag)
+		for slot = 1, slots do
+			local link = GetContainerItemLink(bag, slot)
+			if link then
+				local id = GetItemIDFromLink(link)
+				if id and AUTO_OPEN_ITEM_IDS[id] then
+					local isLocked = AUTO_OPEN_LOCKED_IDS[id]
+					if (not isLocked) or cachedProfile.autoOpenLocked then
+						local lastTry = autoOpenLastTry[id .. "_" .. bag .. "_" .. slot]
+						if not lastTry or (now - lastTry) >= OPEN_RETRY_WINDOW then
+							autoOpenLastTry[id .. "_" .. bag .. "_" .. slot] = now
+							UseContainerItem(bag, slot)
+							-- Only open one per scan to avoid stacking
+							-- multiple Open windows on top of each other
+							-- when the player has many of the same container.
+							return
+						end
+					end
+				end
+			end
 		end
 	end
 end
@@ -2995,6 +3151,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 	-- BAG_UPDATE / BAG_UPDATE_DELAYED
 	RefreshCachedProfile()
 	RequestScan()
+	-- Auto-open containers runs alongside the regular scan. Self-gated on
+	-- the autoOpenContainers toggle, so this is a cheap no-op when off.
+	AutoOpenScanBags()
 end)
 
 scanner:SetScript("OnUpdate", function(self, elapsed)

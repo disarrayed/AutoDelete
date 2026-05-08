@@ -749,10 +749,19 @@ local function ParseRawViewText(text)
 	return table.concat(lines, "\n") .. (#lines > 0 and "\n" or "")
 end
 
-local function SortEntries(entries)
-	table.sort(entries, function(a, b)
-		return Normalize(GetDisplayForEntry(a)) < Normalize(GetDisplayForEntry(b))
-	end)
+-- Sort entries by display name. Default is ascending (A->Z); pass true
+-- for descending (Z->A). Used by the column header click-to-sort and the
+-- regular alphabetic refresh path.
+local function SortEntries(entries, descending)
+	if descending then
+		table.sort(entries, function(a, b)
+			return Normalize(GetDisplayForEntry(a)) > Normalize(GetDisplayForEntry(b))
+		end)
+	else
+		table.sort(entries, function(a, b)
+			return Normalize(GetDisplayForEntry(a)) < Normalize(GetDisplayForEntry(b))
+		end)
+	end
 end
 
 -- ============================================================================
@@ -895,10 +904,10 @@ local function BuildUI(self)
 	tabContent:SetPoint("TOPLEFT", tabStrip, "BOTTOMLEFT", 0, -TAB_STRIP_GAP)
 	tabContent:SetPoint("TOPRIGHT", tabStrip, "BOTTOMRIGHT", 0, -TAB_STRIP_GAP)
 
-	-- Create 5 tab content pages (frames parented to tabContent, filling it)
+	-- Create 6 tab content pages (frames parented to tabContent, filling it)
 	local tabPages = {}
-	local TAB_KEYS = { "general", "goblin", "autoinv", "tracking", "profiles" }
-	local TAB_LABELS = { "General", "Goblin", "AutoInv", "Tracking", "Profiles" }
+	local TAB_KEYS = { "general", "goblin", "tools", "autoinv", "tracking", "profiles" }
+	local TAB_LABELS = { "General", "Goblin", "Tools", "AutoInv", "Tracking", "Profiles" }
 	for i, key in ipairs(TAB_KEYS) do
 		local page = CreateFrame("Frame", nil, tabContent)
 		page:SetAllPoints(tabContent)
@@ -1215,6 +1224,89 @@ local function BuildUI(self)
 	self._tglSummonMerchant = tglSummonMerchant
 
 	-- ========================================================================
+	-- TOOLS TAB: utility features. Currently:
+	-- Card 1: Auto-Open Containers (clams, crates, eggs, manna biscuits etc)
+	-- Card 2: Sell Threshold (skip selling items worth less than N gold)
+	-- Card 3: reserved for future utilities
+	-- ========================================================================
+	local toolsPage = tabPages.tools
+
+	local function MakeToolsCard(xOff)
+		local card = CreateFrame("Frame", nil, toolsPage)
+		card:SetSize(cardW, cardH)
+		card:SetPoint("TOPLEFT", xOff, -4)
+		card:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
+		card:SetBackdropColor(0.04, 0.04, 0.04, 1)
+		card:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)
+		return card
+	end
+
+	local tCard1 = MakeToolsCard(0)
+	local tCard2 = MakeToolsCard(cardW + CARD_GAP)
+
+	-- Tools Card 1: Auto-Open Containers
+	local tglAutoOpen = MakeToggle(tCard1, "Auto-Open Containers", C_ACCENT,
+		"Automatically open lootable bag containers (clams, crates, mysterious eggs, enriched manna biscuits, etc). Items inside are added to your bags. Skips lockboxes that need a key unless you toggle the option below.")
+	tglAutoOpen:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
+	tglAutoOpen:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglAutoOpen = tglAutoOpen
+
+	local tglAutoOpenLocked = MakeSubToggle(tCard1, "Open locked", C_DK_RED)
+	tglAutoOpenLocked:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 22))
+	tglAutoOpenLocked:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
+	self._tglAutoOpenLocked = tglAutoOpenLocked
+
+	local tglAutoOpenInCombat = MakeSubToggle(tCard1, "Skip in combat", C_DK_RED)
+	tglAutoOpenInCombat:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 40))
+	tglAutoOpenInCombat:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
+	self._tglAutoOpenInCombat = tglAutoOpenInCombat
+
+	-- Tools Card 2: Sell Threshold (numeric editbox)
+	-- Skip selling items worth less than N gold. Defaults to 0 (no threshold).
+	-- The check runs against the vendor sell value, not the item rarity, so
+	-- expensive crafted whites will be protected automatically when this is set.
+	local sellThresholdLabel = MakeText(tCard2, 10, C_TEXT, "OUTLINE")
+	sellThresholdLabel:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y - 2)
+	sellThresholdLabel:SetText("Sell Threshold")
+
+	local sellThresholdHelp = MakeText(tCard2, 9, C_DIM, "OUTLINE")
+	sellThresholdHelp:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 18))
+	sellThresholdHelp:SetPoint("RIGHT", tCard2, "RIGHT", -CARD_INNER_PAD_X, 0)
+	sellThresholdHelp:SetJustifyH("LEFT")
+	sellThresholdHelp:SetWordWrap(true)
+	sellThresholdHelp:SetText("Skip items worth less than:")
+
+	-- Editbox for the threshold value (in gold). 0 = disabled.
+	local thresholdBox = CreateFrame("Frame", nil, tCard2)
+	thresholdBox:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	thresholdBox:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
+	ApplyBackdrop(thresholdBox, C_DROP_BG, C_DROP_BORDER)
+
+	local thresholdEdit = CreateFrame("EditBox", nil, thresholdBox)
+	thresholdEdit:SetFont(FONT, 10, "OUTLINE")
+	thresholdEdit:SetTextColor(unpack(C_TEXT))
+	thresholdEdit:SetAutoFocus(false)
+	thresholdEdit:SetNumeric(true)
+	thresholdEdit:SetMaxLetters(8)
+	thresholdEdit:SetPoint("TOPLEFT", 4, -1)
+	thresholdEdit:SetPoint("BOTTOMRIGHT", -22, 1)
+	thresholdEdit:SetJustifyH("LEFT")
+	thresholdEdit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
+	thresholdEdit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
+	thresholdEdit:SetScript("OnEditFocusLost", function(s)
+		local val = tonumber(s:GetText()) or 0
+		if val < 0 then val = 0 end
+		s:SetText(tostring(val))
+		local p = GetActiveProfile(db)
+		p.sellThresholdGold = val
+	end)
+	self._thresholdEdit = thresholdEdit
+
+	local thresholdSuffix = MakeText(thresholdBox, 10, C_DIM, "OUTLINE")
+	thresholdSuffix:SetPoint("RIGHT", thresholdBox, "RIGHT", -4, 0)
+	thresholdSuffix:SetText("g")
+
+	-- ========================================================================
 	-- AUTOINV TAB: 3 cards (Enable+Keywords, Loot Rules, Party Management)
 	-- Same card dimensions as General/Goblin tabs.
 	-- ========================================================================
@@ -1403,11 +1495,28 @@ local function BuildUI(self)
 			resetText:SetTextColor(unpack(C_DIM))
 		end)
 		resetBtn:SetScript("OnClick", function()
-			if _G.AutoDelete_Stats and _G.AutoDelete_Stats.Reset then
-				_G.AutoDelete_Stats.Reset()
-				print("|cffff8000[AutoDelete]|r: Stats reset.")
-				if self.RefreshTrackingStats then self:RefreshTrackingStats() end
+			-- Confirmation popup. Stats reset is destructive and irreversible
+			-- so a single click shouldn't fire it. Uses Blizzard's StaticPopup
+			-- system, registered once on first click.
+			if not StaticPopupDialogs["AUTODELETE_RESET_STATS"] then
+				StaticPopupDialogs["AUTODELETE_RESET_STATS"] = {
+					text = "Reset all AutoDelete stats?\n\nLifetime and session counters will be cleared. This cannot be undone.",
+					button1 = "Reset",
+					button2 = "Cancel",
+					OnAccept = function()
+						if _G.AutoDelete_Stats and _G.AutoDelete_Stats.Reset then
+							_G.AutoDelete_Stats.Reset()
+							print("|cffff8000[AutoDelete]|r: Stats reset.")
+							if self.RefreshTrackingStats then self:RefreshTrackingStats() end
+						end
+					end,
+					timeout = 0,
+					whileDead = true,
+					hideOnEscape = true,
+					preferredIndex = 3,
+				}
 			end
+			StaticPopup_Show("AUTODELETE_RESET_STATS")
 		end)
 	end
 
@@ -2152,7 +2261,9 @@ local function BuildUI(self)
 	end)
 
 	-- "Item Name" column header above the list (CSS: list-header, h=40, bg #101010)
-	local itemNameHeader = CreateFrame("Frame", nil, manageBox)
+	-- Click to toggle ascending/descending sort. Arrow indicator next to the
+	-- label shows current direction.
+	local itemNameHeader = CreateFrame("Button", nil, manageBox)
 	itemNameHeader:SetPoint("TOPLEFT", 6, -40)
 	itemNameHeader:SetPoint("TOPRIGHT", -6, -40)
 	itemNameHeader:SetHeight(22)
@@ -2161,6 +2272,24 @@ local function BuildUI(self)
 	local itemNameLabel = MakeText(itemNameHeader, 10, C_TEXT, "OUTLINE")
 	itemNameLabel:SetPoint("LEFT", 10, 0)
 	itemNameLabel:SetText("Item Name")
+
+	local sortArrow = MakeText(itemNameHeader, 9, C_DIM, "OUTLINE")
+	sortArrow:SetPoint("LEFT", itemNameLabel, "RIGHT", 6, 0)
+	sortArrow:SetText("v")  -- v = descending visual; we start ascending so default text rotates
+	self._sortDescending = false
+
+	itemNameHeader:SetScript("OnEnter", function()
+		itemNameHeader:SetBackdropColor(0.10, 0.10, 0.10, 1)
+	end)
+	itemNameHeader:SetScript("OnLeave", function()
+		itemNameHeader:SetBackdropColor(0.063, 0.063, 0.063, 1)
+	end)
+	itemNameHeader:SetScript("OnClick", function()
+		self._sortDescending = not self._sortDescending
+		sortArrow:SetText(self._sortDescending and "^" or "v")
+		if self.Refresh then self:Refresh() end
+	end)
+	self._sortArrow = sortArrow
 
 
 	-- ========================================================================
@@ -2267,8 +2396,113 @@ local function BuildUI(self)
 		row.text:SetPoint("RIGHT", row.remove, "LEFT", -4, 0)
 		row.text:SetWordWrap(false)
 
+		-- Right-click context menu. Provides quick "move to other list" actions
+		-- and remove. Left-click is reserved (not currently used) so the row
+		-- registers for both button kinds. The menu is a single shared frame
+		-- created lazily on first right-click; see EnsureRowContextMenu.
+		row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+		row:SetScript("OnClick", function(self, button)
+			if button == "RightButton" and self.entry then
+				if _G.AutoDelete_ShowRowContextMenu then
+					_G.AutoDelete_ShowRowContextMenu(self, self.entry)
+				end
+			end
+		end)
+
 		self._rows[i] = row
 	end
+
+	-- Build (lazily) and show the row context menu near a row. Single frame
+	-- shared across all rows. Each click rebuilds the items based on the
+	-- current list mode so "Move to" only shows the OTHER lists, not the
+	-- current one. Items are routed through the same Add/Remove paths the
+	-- buttons use, so list-conflict checks and statistics stay consistent.
+	local rowMenu
+	local function EnsureRowContextMenu()
+		if rowMenu then return rowMenu end
+		rowMenu = CreateFrame("Frame", "AutoDelete_RowContextMenu", UIParent)
+		rowMenu:SetFrameStrata("FULLSCREEN_DIALOG")
+		rowMenu:SetFrameLevel(200)
+		rowMenu:EnableMouse(true)
+		ApplyBackdrop(rowMenu, C_BG, { 0.30, 0.30, 0.30, 1 })
+		rowMenu:Hide()
+		rowMenu._items = {}
+		rowMenu:SetScript("OnHide", function() if rowMenu._closer then rowMenu._closer:Hide() end end)
+		-- Click-elsewhere closer (full-screen invisible button, behind the menu)
+		local closer = CreateFrame("Button", nil, UIParent)
+		closer:SetAllPoints(UIParent)
+		closer:SetFrameStrata("FULLSCREEN_DIALOG")
+		closer:SetFrameLevel(199)
+		closer:RegisterForClicks("AnyDown")
+		closer:SetScript("OnClick", function() rowMenu:Hide() end)
+		closer:Hide()
+		rowMenu._closer = closer
+		return rowMenu
+	end
+
+	local function ShowRowContextMenu(row, entry)
+		local menu = EnsureRowContextMenu()
+		menu:ClearAllPoints()
+		menu:SetPoint("TOPLEFT", row, "TOPRIGHT", 4, 0)
+		-- Build the action list based on current list mode
+		local mode = self._listMode or "delete"
+		local actions = {}
+		if mode ~= "delete"    then table.insert(actions, { label = "Move to Delete", target = "listText" }) end
+		if mode ~= "sell"      then table.insert(actions, { label = "Move to Sell",   target = "sellListText" }) end
+		if mode ~= "whitelist" then table.insert(actions, { label = "Move to Keep",   target = "whitelistText" }) end
+		table.insert(actions, { label = "Remove", target = nil })
+
+		-- Tear down old item buttons
+		for _, btn in ipairs(menu._items) do btn:Hide() end
+		menu._items = {}
+
+		local rowH = 22
+		local W = 140
+		menu:SetSize(W, rowH * #actions + 4)
+		for i, action in ipairs(actions) do
+			local btn = CreateFrame("Button", nil, menu)
+			btn:SetSize(W - 4, rowH)
+			btn:SetPoint("TOPLEFT", 2, -2 - (i - 1) * rowH)
+			ApplyBackdrop(btn, C_ROW_ODD, { 0, 0, 0, 0 })
+			local txt = MakeText(btn, 10, C_TEXT, "OUTLINE", "LEFT")
+			txt:SetPoint("LEFT", 8, 0)
+			txt:SetText(action.label)
+			btn:SetScript("OnEnter", function()
+				ApplyBackdrop(btn, C_ROW_HOVER, { 0, 0, 0, 0 })
+				txt:SetTextColor(1, 1, 1, 1)
+			end)
+			btn:SetScript("OnLeave", function()
+				ApplyBackdrop(btn, C_ROW_ODD, { 0, 0, 0, 0 })
+				txt:SetTextColor(unpack(C_TEXT))
+			end)
+			btn:SetScript("OnClick", function()
+				menu:Hide()
+				if entry.kind ~= "id" then return end
+				local id = entry.id
+				if action.target then
+					-- Move = remove from current + add to target
+					local currentKey = GetActiveListKey()
+					if _G.AutoDelete_RemoveItemFromList then
+						_G.AutoDelete_RemoveItemFromList(currentKey, id)
+					end
+					if _G.AutoDelete_AddItemToList then
+						_G.AutoDelete_AddItemToList(action.target, id)
+					end
+				else
+					-- Remove only
+					local currentKey = GetActiveListKey()
+					if _G.AutoDelete_RemoveItemFromList then
+						_G.AutoDelete_RemoveItemFromList(currentKey, id)
+					end
+				end
+				if self.Refresh then self:Refresh() end
+			end)
+			table.insert(menu._items, btn)
+		end
+		menu:Show()
+		menu._closer:Show()
+	end
+	_G.AutoDelete_ShowRowContextMenu = ShowRowContextMenu
 
 	-- ========================================================================
 	-- Pagination UI (below listBox, inside manageBox)
@@ -2605,6 +2839,36 @@ local function BuildUI(self)
 		GetActiveProfile(db).autoInviteConvertToRaid = btn._checked
 	end)
 
+	-- Tools tab: Auto-Open Containers toggles. Refresh cached profile after
+	-- writing so the LOOT-event handler in AutoDelete.lua sees the new value
+	-- without waiting for the next scan tick.
+	tglAutoOpen:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		GetActiveProfile(db).autoOpenContainers = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+	end)
+
+	tglAutoOpenLocked:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		GetActiveProfile(db).autoOpenLocked = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+	end)
+
+	tglAutoOpenInCombat:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		GetActiveProfile(db).autoOpenSkipCombat = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+	end)
+
 	-- Returns the display-friendly name of a list key for chat output.
 	local function ListLabelForKey(key)
 		if key == "listText" then return "Delete" end
@@ -2869,6 +3133,12 @@ local function BuildUI(self)
 		tglEnable:SetChecked(p.enabled)
 		tglAutoAddEquipped:SetChecked(p.autoAddEquipped)
 
+		-- Tools tab: Auto-Open Containers + sub-toggles, Sell Threshold
+		tglAutoOpen:SetChecked(p.autoOpenContainers)
+		tglAutoOpenLocked:SetChecked(p.autoOpenLocked)
+		tglAutoOpenInCombat:SetChecked(p.autoOpenSkipCombat)
+		thresholdEdit:SetText(tostring(p.sellThresholdGold or 0))
+
 		-- BoE Armor card
 		boeArmor.enable:SetChecked(p.boeArmorEnabled)
 		boeArmor.rare:SetChecked(p.boeArmorRare)
@@ -2927,7 +3197,7 @@ local function BuildUI(self)
 			for _, entry in ipairs(self._entries) do
 				if entry.kind == "id" then GetItemInfo("item:" .. entry.id) end
 			end
-			SortEntries(self._entries)
+			SortEntries(self._entries, self._sortDescending)
 			self._filtered = {}
 			local f = Normalize(self._filterText or "")
 			for _, e in ipairs(self._entries) do
