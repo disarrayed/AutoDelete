@@ -1831,7 +1831,10 @@ local function BuildUI(self)
 	-- CARD 2 (Pets): Summon Goblin Merchant. Moved here from the old Card 3
 	-- so Scavenger and Merchant sit adjacent. Gated by the Summon Scavenger
 	-- master + the AutoDelete master Enable.
-	local tglSummonMerchant = MakeToggle(gCard2, "Summon Goblin Merchant", C_ACCENT,
+	-- Label is "Summon Merchant" (not "Summon Goblin Merchant"): the full
+	-- name truncated on the ~175px card width. Tooltip still names the
+	-- Goblin Merchant explicitly.
+	local tglSummonMerchant = MakeToggle(gCard2, "Summon Merchant", C_ACCENT,
 		"Automatically summon your Goblin Merchant companion when your bags reach zero free slots and stay full for 3 seconds. The 3-second wait avoids stray summons from transient fills (e.g. stacks that auto-merge a moment later). You still need to target the merchant and press your Interact With Target keybind to open the vendor window. Gated by the Summon Scavenger master toggle and by the AutoDelete master Enable.")
 	tglSummonMerchant:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglSummonMerchant:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
