@@ -134,16 +134,49 @@ local DEFAULT_PROFILE = {
 	bagSpaceWarnEnabled       = false,
 	bagSpaceWarnThreshold     = 5,
 
-	-- One-Key Disenchant (Tools tab Card 1): a SecureActionButton wired to
-	-- the next disenchantable BoP item in bags. The user binds a key in the
-	-- Key Bindings UI; pressing the key fires `/cast Disenchant` + `/use bag
-	-- slot`. 3.3.5a's protected-function gate is satisfied because the hardware
-	-- keypress (not addon code) is what triggers the macro.
-	--   disenchantEnabled gates the whole feature (off by default; opt-in).
-	--   disenchantRare adds BoP Rare (blue) gear to the eligibility set;
-	--   default off so v1 only auto-targets greens (the common case).
-	disenchantEnabled = false,
-	disenchantRare    = false,
+	-- One-Key Disenchant (Keybinds tab): a SecureActionButton wired to the
+	-- next disenchantable item in bags. The user binds a key in the panel's
+	-- in-panel key-capture row; pressing it fires `/cast Disenchant` + `/use
+	-- bag slot`. 3.3.5a's protected-function gate is satisfied because the
+	-- hardware keypress (not addon code) is what triggers the macro.
+	--   disenchantEnabled   gates the whole feature (off by default; opt-in).
+	--   disenchantBoP       targets Soulbound items. Default ON: the common
+	--                       case is clearing greens you ground out.
+	--   disenchantBoE       targets items that are still BoE (haven't been
+	--                       equipped yet). Default OFF because BoE items are
+	--                       often more valuable to AH or pass to alts.
+	--   disenchantUncommon  greens. Default ON.
+	--   disenchantRare      blues. Default OFF.
+	--   disenchantEpic      epics. Default OFF.
+	--   disenchantIlvlMin   per-quality floor (0 = use Blizzard mechanical
+	--                       floor: 5 for greens, 55 for blues, 95 for epics).
+	--   disenchantIlvlMax   per-quality ceiling (0 = no cap; Disenchant will
+	--                       still refuse to cast on items above the live game
+	--                       maximum, ~373 in WotLK).
+	disenchantEnabled  = false,
+	disenchantBoP      = true,
+	disenchantBoE      = false,
+	disenchantUncommon = true,
+	disenchantRare     = false,
+	disenchantEpic     = false,
+	disenchantIlvlMin  = 0,
+	disenchantIlvlMax  = 0,
+
+	-- One-Key Open (Tools tab): wires a SecureActionButton to the next
+	-- openable item in bags so the user can clear clams, lockboxes,
+	-- coin purses, eggs, etc. with one keypress. Architecture mirrors
+	-- One-Key Disenchant; see that module's header for the protected-
+	-- function-gate rationale and the SecureActionButton + macrotext
+	-- pattern.
+	--   autoOpenEnabled gates the feature (off by default; opt-in).
+	--   autoOpenIncludeLocked controls whether locked-tier items (junkboxes
+	--   etc.) are eligible targets when currently unlocked. Items marked
+	--   "false" in the allow-list (lockable items) only become a target
+	--   when unlocked AND this toggle is on. Default ON because a player
+	--   who has a key/rogue would always want unlocked junkboxes to be
+	--   targetable; turning it off hides the entire locked-tier set.
+	autoOpenEnabled       = false,
+	autoOpenIncludeLocked = true,
 
 	autoGray         = false,  -- Auto-Delete Junk   (gray quality, any item)
 	autoDeleteCommon = false,  -- Auto-Delete Common (white quality, equippable gear only)
@@ -1290,6 +1323,37 @@ local function IsBindOnEquip(bag, slot)
 	end
 	boeTip:Hide()
 	return foundBoE
+end
+
+-- Auto-Open Containers uses this to gate "locked" items (e.g. Battered
+-- Junkbox) on whether the player has actually picked the lock yet. 3.3.5a
+-- does NOT return a usable "locked" flag from GetContainerItemInfo for most
+-- container types (the field is for stack-merging locks, not key-locks),
+-- so we tooltip-scan for the global LOCKED string the same way we scan for
+-- "Binds when equipped". Cheap (one SetBagItem call), locale-correct via
+-- the LOCKED global.
+local function IsItemLocked(bag, slot)
+	boeTip:Hide()
+	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
+	boeTip:ClearLines()
+	boeTip:SetBagItem(bag, slot)
+	boeTip:Show()
+	local n = boeTip:NumLines()
+	-- LOCKED is the standard global ("Locked" in enUS). Fall back to the
+	-- English literal if the global is missing on a weird locale.
+	local locked = _G.LOCKED or "Locked"
+	for i = 2, n do
+		local fs = _G["AutoDelete_BoETipTextLeft" .. i]
+		local txt = fs and fs:GetText()
+		-- Anchor at line start so "Unlocking..." (a cast-state line) never
+		-- false-positives if it ever sneaks into the tooltip.
+		if txt and string.find(txt, "^" .. locked) then
+			boeTip:Hide()
+			return true
+		end
+	end
+	boeTip:Hide()
+	return false
 end
 
 -- One-Key Disenchant uses this to confirm an item is bound to the player
@@ -2653,6 +2717,213 @@ local function HandleEquipmentChanged(slot)
 end
 
 -- ============================================================================
+-- One-Key Open
+-- ============================================================================
+-- Wires a SecureActionButton to the next "openable" item in the player's
+-- bags. The user binds a key in the AutoDelete options panel; pressing it
+-- fires `/use <bag> <slot>` for the next targeted item from a hardware-
+-- event path, which is the ONLY path on WoW 3.3.5a that satisfies the
+-- protected-function gate for UseContainerItem.
+--
+-- Why a keybind rather than an auto-scanner: confirmed by both Blizzard
+-- docs and disassembly of the 3.3.5a client, the protection check lives
+-- inside Wow.exe and tests a hardware-event flag set only by real OS
+-- input. No Lua technique flips it; every working WotLK addon in this
+-- space (LockSmith, LockboxHelper, Lockbox Cracker, Lazy LockBoxes) uses
+-- this same SecureActionButton + macrotext + user-keypress pattern. An
+-- earlier draft of this module shipped an automatic scanner; testing on
+-- Project Ebonhold confirmed every clam, junkbox, and lockbox tripped
+-- ADDON_ACTION_BLOCKED. We deleted it.
+--
+-- AUTO_OPEN_ALLOW: explicit allow-list of items the keybind can target.
+-- 3.3.5a does NOT expose an "is openable" flag on container slots, and
+-- class/subclass inference catches the wrong items (every potion is
+-- "consumable"). Values:
+--   true  = always targetable
+--   false = targetable ONLY if currently unlocked (e.g. a Battered Junkbox
+--           the rogue has Pick-Locked). IsItemLocked confirms the state.
+--
+-- Wrapped in a `do ... end` block so all the locals stay out of the main
+-- chunk's 200-local cap (Lua 5.1 limit; we'd otherwise bump against it).
+do
+
+local AUTO_OPEN_ALLOW = {
+	-- Clams (food + pearl drops). Mob drops and fishing pulls.
+	[5523]  = true,  -- Small Barnacled Clam
+	[5524]  = true,  -- Thick-shelled Clam
+	[7973]  = true,  -- Big-mouth Clam
+	[15874] = true,  -- Soft-shelled Clam
+	[24476] = true,  -- Jaggal Clam
+	[36781] = true,  -- Darkwater Clam
+	-- Coin purses (rogue pickpocket loot, vendor-buyable consumables).
+	[10456] = true,  -- A Bulging Coin Purse
+	[10654] = true,  -- A Heavy Coin Purse
+	[10720] = true,  -- A Small Coin Purse
+	[10940] = true,  -- A Rich Coin Purse
+	-- Crates / sealed shipments. No cast required.
+	[4633]  = true,  -- Heavy Crate
+	[4634]  = true,  -- Iron-Bound Trunk
+	[4638]  = true,  -- Reinforced Locked Chest
+	[34440] = true,  -- Tightly Sealed Trunk
+	-- Lockboxes / locked chests. Targetable only when unlocked.
+	[4636]  = false, -- Strong Iron Lockbox
+	[4637]  = false, -- Sturdy Locked Chest
+	[5758]  = false, -- Mithril Lockbox
+	[5759]  = false, -- Thorium Lockbox
+	[5760]  = false, -- Eternium Lockbox
+	[6354]  = false, -- Small Locked Chest
+	[6355]  = false, -- Sturdy Locked Chest
+	-- Junkboxes (rogue Pick Lock targets).
+	[16882] = false, -- Battered Junkbox
+	[16883] = false, -- Worn Junkbox
+	[16884] = false, -- Sturdy Junkbox
+	[16885] = false, -- Heavy Junkbox
+	[29569] = false, -- Strong Junkbox (TBC)
+	[43575] = false, -- Reinforced Junkbox (WotLK)
+	-- WotLK lockboxes.
+	[43622] = false, -- Iceforged Lockbox
+	[43624] = false, -- Frozen Lockbox
+	-- Mysterious Eggs / oracle holiday loot.
+	[39878] = true,  -- Mysterious Egg (Oracle)
+	[44663] = true,  -- Cracked Egg
+	-- Gift bags / event containers.
+	[34480] = true,  -- Sealed Pollen-Packed Envelope (Noblegarden)
+}
+
+-- Module state. The button is created at PLAYER_LOGIN; before then the
+-- helpers below safely no-op via the `if not openButton` guard.
+local openButton          = nil
+local openUpdatePending   = false  -- true while a SetAttribute is deferred for combat
+local openLastTarget      = nil    -- { bag, slot, link, name } or nil
+
+-- Walks the bags looking for the next eligible target. Priority order is
+-- bag/slot ascending so two players standing at the same vendor with the
+-- same loot will see the same "next" item. Returns (bag, slot, link, name)
+-- or nil on no match.
+local function FindNextOpenable(profile)
+	if not profile or not profile.autoOpenEnabled then return nil end
+	for bag = 0, NUM_BAG_SLOTS do
+		local slots = GetContainerNumSlots(bag) or 0
+		for slot = 1, slots do
+			local link = GetContainerItemLink(bag, slot)
+			if link then
+				local id = GetItemIDFromLink(link)
+				local allow = id and AUTO_OPEN_ALLOW[id]
+				if allow ~= nil then
+					-- Lock check: items with allow==true bypass it; items
+					-- with allow==false are skipped while still locked.
+					-- The autoOpenIncludeLocked toggle gates whether we
+					-- even consider locked-tier items at all (some users
+					-- want to keep junkboxes around for selling).
+					local lockedOk = (allow == true) or
+						(profile.autoOpenIncludeLocked and not IsItemLocked(bag, slot))
+					if lockedOk then
+						local name = GetItemInfo(link) or ("item:" .. (id or "?"))
+						return bag, slot, link, name
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+-- Writes the macrotext attribute. MUST be out of combat (caller's job to
+-- check). Empty body on no-target so a stale keypress no-ops cleanly
+-- rather than firing `/use` against a slot whose contents changed since
+-- the last rescan (e.g. the player looted an item into the staged slot).
+local function ApplyOpenMacrotext(bag, slot)
+	if not openButton then return end
+	if bag and slot then
+		openButton:SetAttribute("macrotext", "/use " .. bag .. " " .. slot)
+	else
+		openButton:SetAttribute("macrotext", "")
+	end
+end
+
+-- Rescans and rewires the button. Self-defers via InCombatLockdown so we
+-- never trip the SetAttribute taint protection; PLAYER_REGEN_ENABLED's
+-- handler flushes the deferred update post-combat. Cheap when the feature
+-- is off (one bool check, no scan).
+local function UpdateOpenButton()
+	if not openButton then return end
+	local profile = cachedProfile
+	if not profile or not profile.autoOpenEnabled then
+		openLastTarget = nil
+		if InCombatLockdown and InCombatLockdown() then
+			openUpdatePending = true
+		else
+			ApplyOpenMacrotext(nil, nil)
+		end
+		return
+	end
+	if InCombatLockdown and InCombatLockdown() then
+		openUpdatePending = true
+		return
+	end
+	local bag, slot, link, name = FindNextOpenable(profile)
+	if bag and slot then
+		openLastTarget = { bag = bag, slot = slot, link = link, name = name }
+	else
+		openLastTarget = nil
+	end
+	ApplyOpenMacrotext(bag, slot)
+	-- Push the new "Next: ..." text to the options panel if it's open.
+	local panel = _G.AutoDeleteOptionsPanel
+	if panel and panel.IsShown and panel:IsShown() and panel._refreshOpenStatus then
+		panel:_refreshOpenStatus()
+	end
+end
+
+-- Status string for the options UI. Pure helper, safe to call any time.
+local function GetOpenStatus()
+	local profile = cachedProfile
+	if not profile or not profile.autoOpenEnabled then
+		return "Disabled", 0.55, 0.55, 0.55
+	end
+	if openLastTarget and openLastTarget.link then
+		return "Next: " .. openLastTarget.link, 0.7, 0.85, 1.0
+	end
+	return "No openable items in bags", 0.55, 0.55, 0.55
+end
+
+-- Returns/creates the secure button. Called from PLAYER_LOGIN. Separate
+-- function so the event handler can call this and immediately do an
+-- UpdateOpenButton() pass to wire the first target.
+local function EnsureOpenButton()
+	if openButton then return openButton end
+	openButton = CreateFrame(
+		"Button",
+		"AutoDeleteOpenButton",
+		UIParent,
+		"SecureActionButtonTemplate"
+	)
+	openButton:Hide()                    -- invisible; only the bound key matters
+	openButton:RegisterForClicks("AnyDown")
+	openButton:SetAttribute("type", "macro")
+	openButton:SetAttribute("macrotext", "")
+	return openButton
+end
+
+-- Called from the PLAYER_REGEN_ENABLED handler. If the macrotext update
+-- was blocked by combat, flush it now. The pending flag prevents redundant
+-- scans when nothing actually changed.
+local function FlushDeferredOpenUpdate()
+	if not openUpdatePending then return end
+	openUpdatePending = false
+	UpdateOpenButton()
+end
+
+-- Exports. Inside the `do` block so the locals above stay scoped here;
+-- only these globals leak out to the main chunk.
+_G.AutoDelete_EnsureOpenButton        = EnsureOpenButton
+_G.AutoDelete_UpdateOpenButton        = UpdateOpenButton
+_G.AutoDelete_FlushDeferredOpenUpdate = FlushDeferredOpenUpdate
+_G.AutoDelete_GetOpenStatus           = GetOpenStatus
+
+end  -- end of One-Key Open `do` block
+
+-- ============================================================================
 -- One-Key Disenchant
 -- ============================================================================
 -- A SecureActionButton whose `macrotext` attribute is rewritten by addon code
@@ -2709,8 +2980,12 @@ local function CharacterCanDisenchant() return cachedDisenchantKnown end
 -- iLvl floors for Disenchant. Items below the floor for their quality
 -- cannot be disenchanted on the live 3.3.5a client; targeting them just
 -- wastes a keypress. Numbers are conservative (Blizzard's published values).
+-- These are used when the profile's disenchantIlvlMin is 0 (the default,
+-- meaning "use the mechanical floor"); a non-zero profile value overrides
+-- the per-quality default with a single global floor.
 local DE_UNCOMMON_FLOOR = 5
 local DE_RARE_FLOOR     = 55
+local DE_EPIC_FLOOR     = 95
 -- Upper bounds left open; the spell handles "above max" by refusing to cast.
 
 -- Returns true if (bag, slot) holds an item that the disenchant macro
@@ -2730,17 +3005,49 @@ local function IsDisenchantable(profile, bag, slot)
 	-- Armor (class 2) or Weapon (class 1). GetItemInfo's 12th return is the
 	-- numeric item class on 3.3.5a clients.
 	if classId ~= 1 and classId ~= 2 then return false end
-	-- Quality + iLvl gates.
+
+	-- Quality gate. Each tier has its own toggle and its own mechanical
+	-- iLvl floor; the profile's disenchantIlvlMin overrides the floor when
+	-- set, disenchantIlvlMax adds an optional ceiling. Both are zero by
+	-- default ("no override / no cap").
+	ilvl = ilvl or 0
+	local effectiveFloor, effectiveCeiling
 	if quality == 2 then
-		if (ilvl or 0) < DE_UNCOMMON_FLOOR then return false end
+		if not profile.disenchantUncommon then return false end
+		effectiveFloor = DE_UNCOMMON_FLOOR
 	elseif quality == 3 then
 		if not profile.disenchantRare then return false end
-		if (ilvl or 0) < DE_RARE_FLOOR then return false end
+		effectiveFloor = DE_RARE_FLOOR
+	elseif quality == 4 then
+		if not profile.disenchantEpic then return false end
+		effectiveFloor = DE_EPIC_FLOOR
 	else
 		return false
 	end
-	-- Must be soulbound. Tooltip scan is the only path in 3.3.5a.
-	if not IsSoulbound(bag, slot) then return false end
+	-- Profile-level overrides. Non-zero values replace the per-quality floor
+	-- or impose a ceiling; zero leaves the default behavior intact.
+	local floorOverride = tonumber(profile.disenchantIlvlMin) or 0
+	if floorOverride > 0 then effectiveFloor = floorOverride end
+	local ceilingOverride = tonumber(profile.disenchantIlvlMax) or 0
+	if ceilingOverride > 0 then effectiveCeiling = ceilingOverride end
+	if ilvl < effectiveFloor then return false end
+	if effectiveCeiling and ilvl > effectiveCeiling then return false end
+
+	-- Bind-state gate. An item in the player's bags is in exactly one of
+	-- three states for our purposes:
+	--   1) Soulbound (BoP or bound-BoE)         -> route through disenchantBoP
+	--   2) BoE not yet bound                    -> route through disenchantBoE
+	--   3) Anything else (e.g. account-bound stash items, unbound non-BoE)
+	--                                            -> not a disenchant target
+	-- The two tooltip scans answer (1) and (2) respectively; we accept the
+	-- item if its category is enabled in the profile.
+	if IsSoulbound(bag, slot) then
+		if not profile.disenchantBoP then return false end
+	elseif IsBindOnEquip(bag, slot) then
+		if not profile.disenchantBoE then return false end
+	else
+		return false
+	end
 	return true
 end
 
@@ -2848,13 +3155,13 @@ end
 _G.AutoDelete_GetDisenchantStatus = GetDisenchantStatus
 _G.AutoDelete_UpdateDisenchantButton = UpdateDisenchantButton
 
--- Display strings for the Key Bindings UI. The header groups our bindings
--- under "AutoDelete" in the Blizzard Key Bindings menu; the per-binding
--- name shows up as the human-readable row. Bindings.xml references the
--- CLICK target by its lower-level name; these globals are what the user
--- actually sees.
-_G.BINDING_HEADER_AUTODELETE = "AutoDelete"
-_G["BINDING_NAME_CLICK AutoDeleteDisenchantButton:LeftButton"] = "Disenchant next BoP item"
+-- (No BINDING_HEADER / BINDING_NAME globals here. Earlier dev iterations
+-- registered the disenchant button via Bindings.xml so it appeared under
+-- the Blizzard Key Bindings menu. We replaced that with the panel's
+-- in-panel key-capture row, which calls SetBinding directly and saves
+-- via SaveBindings(GetCurrentBindingSet()). Result: addon stays at two
+-- files, binding still persists across sessions, and users never have
+-- to leave our settings panel to assign a key.)
 
 local scanner = CreateFrame("Frame")
 scanner:RegisterEvent("ADDON_LOADED")
@@ -3400,11 +3707,14 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		RefreshCachedProfile()
 		print("|cffff8000[AutoDelete]|r loaded. Type |cff00ff00/del|r to configure.")
 
-		-- One-Key Disenchant: create the SecureActionButton once. Name MUST
-		-- match the CLICK target in Bindings.xml so the Key Bindings UI can
-		-- attach a keypress to it. Created here rather than at file load
-		-- because SecureActionButtonTemplate is only safe to instantiate
-		-- after PLAYER_LOGIN (some servers reject earlier creation paths).
+		-- One-Key Disenchant: create the SecureActionButton once. Name is
+		-- referenced by the panel's key-capture row as the CLICK target
+		-- ("CLICK AutoDeleteDisenchantButton:LeftButton"). Created here
+		-- rather than at file load because SecureActionButtonTemplate is
+		-- only safe to instantiate after PLAYER_LOGIN (some private servers
+		-- reject earlier creation paths). UIParent is the parent: keeps the
+		-- button out of any tainted ancestor chain so the protected call
+		-- the macro fires stays secure.
 		if not disenchantButton then
 			disenchantButton = CreateFrame(
 				"Button",
@@ -3419,6 +3729,18 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		end
 		RefreshDisenchantKnown()
 		UpdateDisenchantButton()
+
+		-- One-Key Open: create the secure button now (PLAYER_LOGIN is the
+		-- earliest safe time for SecureActionButtonTemplate on some private
+		-- servers) and stage the first target. The button has no Bindings.xml
+		-- entry; the options panel installs a binding via SetBindingClick
+		-- when the user picks a key in the in-panel capture row.
+		if _G.AutoDelete_EnsureOpenButton then
+			_G.AutoDelete_EnsureOpenButton()
+			if _G.AutoDelete_UpdateOpenButton then
+				_G.AutoDelete_UpdateOpenButton()
+			end
+		end
 
 		-- One-time notice: the v3.02 schema migration moved sell rules into
 		-- per-category sections. EnsureProfileFields sets this flag when it
@@ -3540,12 +3862,16 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		return
 	end
 	if event == "PLAYER_REGEN_ENABLED" then
-		-- Combat just ended. Flush any deferred disenchant-button update
-		-- that was blocked by InCombatLockdown. Safe no-op when the flag
-		-- wasn't set or when the feature is off.
+		-- Combat just ended. Flush any deferred secure-button macrotext
+		-- updates that were blocked by InCombatLockdown. Each module owns
+		-- its own pending flag and FlushDeferred* helper so they stay
+		-- independent; both calls are safe no-ops when nothing's queued.
 		if disenchantUpdatePending then
 			disenchantUpdatePending = false
 			UpdateDisenchantButton()
+		end
+		if _G.AutoDelete_FlushDeferredOpenUpdate then
+			_G.AutoDelete_FlushDeferredOpenUpdate()
 		end
 		return
 	end
@@ -3613,11 +3939,12 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 	-- BAG_UPDATE / BAG_UPDATE_DELAYED
 	RefreshCachedProfile()
 	RequestScan()
-	-- Rewire the one-key disenchant button. Combat-safe: self-defers via
-	-- InCombatLockdown when needed and is a cheap no-op when the feature
-	-- is off. Runs on every bag update so the next-target pointer is
-	-- always current (looted item, used item, gear swap).
+	-- Rewire the secure-action buttons. Each module is combat-safe (self-
+	-- defers via InCombatLockdown) and a cheap no-op when its feature is
+	-- off. Running on every bag update keeps the next-target pointer
+	-- current as the player loots, uses, sells, or rearranges items.
 	if UpdateDisenchantButton then UpdateDisenchantButton() end
+	if _G.AutoDelete_UpdateOpenButton then _G.AutoDelete_UpdateOpenButton() end
 	-- Bag-space warning. Edge-triggered so we print at most once per
 	-- "fell below threshold" event, then re-arm after slots rise above it.
 	-- Defensive nil-check: ComputeTotalFreeSlots is forward-declared and

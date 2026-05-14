@@ -906,8 +906,8 @@ local function BuildUI(self)
 
 	-- Create 6 tab content pages (frames parented to tabContent, filling it)
 	local tabPages = {}
-	local TAB_KEYS = { "general", "goblin", "tools", "autoinv", "tracking", "profiles" }
-	local TAB_LABELS = { "General", "Goblin", "Tools", "AutoInv", "Tracking", "Profiles" }
+	local TAB_KEYS = { "general", "goblin", "tools", "keybinds", "autoinv", "tracking", "profiles" }
+	local TAB_LABELS = { "General", "Goblin", "Tools", "Keybinds", "AutoInv", "Tracking", "Profiles" }
 	for i, key in ipairs(TAB_KEYS) do
 		local page = CreateFrame("Frame", nil, tabContent)
 		page:SetAllPoints(tabContent)
@@ -1252,36 +1252,13 @@ local function BuildUI(self)
 	local tCard2 = MakeToolsCard(cardW + CARD_GAP)
 	local tCard3 = MakeToolsCard((cardW + CARD_GAP) * 2)
 
-	-- Tools Card 1: One-Key Disenchant. Mirrors Card 2's vertical rhythm:
-	-- section title at top, main toggle, sub-toggle, and a status row at the
-	-- bottom showing the current "next target" item link (or why the feature
-	-- isn't doing anything). The status text is refreshed on every panel
-	-- Refresh() so the link tracks what bag scans found.
-	local card1Title = MakeText(tCard1, 11, C_ACCENT, "OUTLINE")
-	card1Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
-	card1Title:SetText("One-Key Disenchant")
-
-	local tglDisenchant = MakeToggle(tCard1, "Enabled", C_ACCENT,
-		"Wires the next disenchantable BoP item in your bags to a hidden keybind. Open Key Bindings -> AutoDelete and assign a key to 'Disenchant next BoP item'. Pressing that key fires /cast Disenchant followed by /use on the targeted bag slot. Auto-retargets to the next eligible item after each cast. Requires the Enchanting profession.")
-	tglDisenchant:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
-	tglDisenchant:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglDisenchant = tglDisenchant
-
-	local tglDisenchantRare = MakeSubToggle(tCard1, "Include Rare (blue)", C_DK_RED)
-	tglDisenchantRare:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 22))
-	tglDisenchantRare:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
-	self._tglDisenchantRare = tglDisenchantRare
-
-	-- Status line: shows the current next-target link, "Disabled", or
-	-- "Requires Enchanting". Wraps via SetWordWrap so a long item link
-	-- truncates instead of overflowing the card.
-	local disenchantStatus = MakeText(tCard1, 9, C_DIM)
-	disenchantStatus:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -68)
-	disenchantStatus:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -68)
-	disenchantStatus:SetJustifyH("LEFT")
-	disenchantStatus:SetWordWrap(false)
-	disenchantStatus:SetText("")
-	self._disenchantStatus = disenchantStatus
+	-- Tools Card 1: reserved slot. One-Key Disenchant lived here until it
+	-- migrated to the Keybinds tab alongside One-Key Open. Holds a centered
+	-- placeholder so the empty card reads as intentional rather than broken;
+	-- the next tools feature lands here.
+	local tCard1Placeholder = MakeText(tCard1, 11, C_ACCENT, "OUTLINE")
+	tCard1Placeholder:SetPoint("CENTER", tCard1, "CENTER", 0, 0)
+	tCard1Placeholder:SetText("Coming Soon!")
 
 	-- Tools Card 2: Affix Protection. Same density as Card 1: a small
 	-- section title at top, two main toggles (using shorter labels so
@@ -1411,6 +1388,357 @@ local function BuildUI(self)
 		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
 	end)
 	self._bagSpaceWarnEdit = thresholdEdit
+
+	-- ========================================================================
+	-- KEYBINDS TAB: holds the secure-button features (One-Key Open, future
+	-- One-Key Disenchant migration). On WoW 3.3.5a the only path that can
+	-- fire a protected function (UseContainerItem, CastSpell on a bag item)
+	-- from addon code is a user-pressed key on a SecureActionButton. Each
+	-- card on this tab is one such feature. The key-capture row in each
+	-- card writes the binding via SetBinding + SaveBindings, so the addon
+	-- stays in two files (no Bindings.xml required).
+	--
+	-- Wrapped in a `do ... end` block so its locals stay out of the panel-
+	-- builder function's local-count (Lua 5.1 has a 200-local cap per
+	-- function and we'd otherwise bump against it). Widgets that need to
+	-- survive across scopes (OnClick handlers, Refresh path) are stored
+	-- on `self` and accessed via self._tglOpenEnabled etc. later.
+	-- ========================================================================
+	do
+	local keybindsPage = tabPages.keybinds
+
+	-- Reusable key-capture row. Renders a labelled button that displays the
+	-- currently bound key for `bindingCmd` (the BINDING name, e.g. "CLICK
+	-- AutoDeleteOpenButton:LeftButton"). Click to enter capture mode; the
+	-- next non-modifier key (with current modifiers) becomes the binding.
+	-- Right-click clears the binding. Returns the row Frame so the caller
+	-- can :SetPoint() it.
+	--
+	-- Combat-safe: SetBinding/SetBindingClick is taint-locked while combat
+	-- is active. We refuse to enter capture mode in combat and show a one-
+	-- shot chat note instead.
+	local function MakeKeyCaptureRow(parent, bindingCmd, width)
+		local row = CreateFrame("Frame", nil, parent)
+		row:SetSize(width or 200, 22)
+
+		local btn = CreateFrame("Button", nil, row)
+		btn:SetAllPoints(row)
+		ApplyBackdrop(btn, C_DROP_BG, C_DROP_BORDER)
+
+		local label = MakeText(btn, 10, C_TEXT, "OUTLINE")
+		label:SetPoint("CENTER", btn, "CENTER", 0, 0)
+
+		-- RefreshLabel reads the current binding and renders either the key
+		-- combo or a "click to bind" placeholder. Called after every state
+		-- change and on panel Refresh.
+		local capturing = false
+		local function RefreshLabel()
+			if capturing then
+				label:SetText("Press a key...")
+				label:SetTextColor(unpack(C_ACCENT))
+				return
+			end
+			local key1 = GetBindingKey(bindingCmd)
+			if key1 then
+				label:SetText(key1)
+				label:SetTextColor(unpack(C_TEXT))
+			else
+				label:SetText("Click to bind")
+				label:SetTextColor(unpack(C_DIM))
+			end
+		end
+		row._refresh = RefreshLabel
+		RefreshLabel()
+
+		-- Enter / exit capture mode. EnableKeyboard captures every key
+		-- press globally (game input also runs, but our handler grabs the
+		-- key first). We use a propagation block (return true semantics
+		-- by setting PropagateKeyboardInput on later clients; 3.3.5a does
+		-- not have it, so we just live with the side effect that the key
+		-- ALSO fires its normal binding once during capture -- this is a
+		-- one-frame inconvenience and matches how Blizzard's own
+		-- KeyBindingFrame handles it on this client).
+		local function StartCapture()
+			if InCombatLockdown and InCombatLockdown() then
+				print("|cffff8000[AutoDelete]|r Can't change keybinds in combat.")
+				return
+			end
+			capturing = true
+			btn:EnableKeyboard(true)
+			RefreshLabel()
+		end
+		local function StopCapture()
+			capturing = false
+			btn:EnableKeyboard(false)
+			RefreshLabel()
+		end
+
+		btn:SetScript("OnKeyDown", function(self, key)
+			-- Skip modifier-only presses so a combo like SHIFT-A waits for
+			-- the actual letter rather than binding to SHIFT alone.
+			if key == "LSHIFT" or key == "RSHIFT"
+				or key == "LCTRL"  or key == "RCTRL"
+				or key == "LALT"   or key == "RALT" then
+				return
+			end
+			-- Escape cancels.
+			if key == "ESCAPE" then StopCapture(); return end
+			-- Build the combo string. Order matches Blizzard convention
+			-- so SetBinding's lookup matches what the binding UI shows.
+			local combo = ""
+			if IsAltKeyDown()     then combo = combo .. "ALT-"   end
+			if IsControlKeyDown() then combo = combo .. "CTRL-"  end
+			if IsShiftKeyDown()   then combo = combo .. "SHIFT-" end
+			combo = combo .. key
+			-- Clear any prior binding of this combo first so two features
+			-- never collide on the same key. SetBinding(key, nil) unbinds.
+			SetBinding(combo, bindingCmd)
+			SaveBindings(GetCurrentBindingSet())
+			StopCapture()
+		end)
+
+		btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+		btn:SetScript("OnClick", function(self, mouseButton)
+			if mouseButton == "RightButton" then
+				if InCombatLockdown and InCombatLockdown() then
+					print("|cffff8000[AutoDelete]|r Can't change keybinds in combat.")
+					return
+				end
+				local existing = GetBindingKey(bindingCmd)
+				if existing then SetBinding(existing) end
+				SaveBindings(GetCurrentBindingSet())
+				RefreshLabel()
+				return
+			end
+			if capturing then StopCapture() else StartCapture() end
+		end)
+
+		-- Tooltip explains the click semantics.
+		btn:SetScript("OnEnter", function(self)
+			GameTooltip:SetOwner(self, "ANCHOR_TOP")
+			GameTooltip:SetText("Keybind", 1, 1, 1)
+			GameTooltip:AddLine("Left-click and press a key (with modifiers) to bind.", C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:AddLine("Right-click to clear.", C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:AddLine("Cannot bind in combat.", 1, 0.4, 0.4, true)
+			GameTooltip:Show()
+		end)
+		btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+		row._button = btn
+		return row
+	end
+
+	-- Keybinds tab uses the same 3-card grid as Tools (cardW from above).
+	local function MakeKeybindsCard(xOff)
+		local card = CreateFrame("Frame", nil, keybindsPage)
+		card:SetSize(cardW, cardH)
+		card:SetPoint("TOPLEFT", xOff, -4)
+		card:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
+		card:SetBackdropColor(0.04, 0.04, 0.04, 1)
+		card:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)
+		return card
+	end
+
+	local kCard1 = MakeKeybindsCard(0)
+	local kCard2 = MakeKeybindsCard(cardW + CARD_GAP)
+	local kCard3 = MakeKeybindsCard((cardW + CARD_GAP) * 2)
+
+	-- Keybinds Card 1: One-Key Open. Same vertical rhythm as Tools Card 2
+	-- (Affix Protection): section title, main toggle, sub-toggle, then
+	-- the key-capture row, then the status line.
+	local kCard1Title = MakeText(kCard1, 11, C_ACCENT, "OUTLINE")
+	kCard1Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+	kCard1Title:SetText("One-Key Open")
+
+	local tglOpenEnabled = MakeToggle(kCard1, "Enabled", C_ACCENT,
+		"Wires the next openable item in your bags (clams, coin purses, unlocked junkboxes, eggs, etc.) to the key you bind below. Pressing the key fires /use on that bag slot. Auto-retargets after each open. WoW 3.3.5a requires a real keypress for these calls; no automatic scan can do this for you.")
+	tglOpenEnabled:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+	tglOpenEnabled:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglOpenEnabled = tglOpenEnabled
+
+	local tglOpenIncludeLocked = MakeSubToggle(kCard1, "Include locked-tier", C_DK_RED)
+	tglOpenIncludeLocked:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 22))
+	tglOpenIncludeLocked:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
+	self._tglOpenIncludeLocked = tglOpenIncludeLocked
+
+	-- Key capture row, full card width, sits between sub-toggle and status.
+	local openKeyRow = MakeKeyCaptureRow(kCard1, "CLICK AutoDeleteOpenButton:LeftButton",
+		cardW - CARD_INNER_PAD_X * 2)
+	openKeyRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
+	self._openKeyRow = openKeyRow
+
+	-- Status line at the bottom of the card. Pushed from AutoDelete.lua's
+	-- UpdateOpenButton via panel:_refreshOpenStatus().
+	local openStatus = MakeText(kCard1, 9, C_DIM)
+	openStatus:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 70))
+	openStatus:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 70))
+	openStatus:SetJustifyH("LEFT")
+	openStatus:SetWordWrap(false)
+	openStatus:SetText("")
+	self._openStatus = openStatus
+
+	-- Keybinds Card 2: One-Key Disenchant. Migrated from the Tools tab so
+	-- all secure-button features live together. Layout is dense because we
+	-- want six concerns visible at once (master toggle, bind-state filter,
+	-- quality filter, iLvl filter, key capture, status). Two inline rows
+	-- of small sub-toggles do the bulk of the filter UI; iLvl and key
+	-- share one row split into two columns.
+	local kCard2Title = MakeText(kCard2, 11, C_ACCENT, "OUTLINE")
+	kCard2Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+	kCard2Title:SetText("One-Key Disenchant")
+
+	local tglDisenchant = MakeToggle(kCard2, "Enabled", C_ACCENT,
+		"Wires the next disenchantable item in your bags to the key you bind below. Pressing the key fires /cast Disenchant followed by /use on the targeted bag slot. Auto-retargets after each cast. Requires the Enchanting profession.")
+	tglDisenchant:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -20)
+	tglDisenchant:SetSize(cardW - CARD_INNER_PAD_X * 2, 18)
+	self._tglDisenchant = tglDisenchant
+
+	-- Bind-state filter row: 2 inline sub-toggles. Default BoP on, BoE off
+	-- since most users want to clear soulbound gear without touching BoEs
+	-- that might still go to AH or alts.
+	local bindRowY = -40
+	local tglDisenchantBoP = MakeSubToggle(kCard2, "BoP", C_DK_RED)
+	tglDisenchantBoP:SetPoint("TOPLEFT", CARD_INNER_PAD_X, bindRowY)
+	tglDisenchantBoP:SetWidth(50)
+	self._tglDisenchantBoP = tglDisenchantBoP
+
+	local tglDisenchantBoE = MakeSubToggle(kCard2, "BoE", C_DK_RED)
+	tglDisenchantBoE:SetPoint("TOPLEFT", CARD_INNER_PAD_X + 55, bindRowY)
+	tglDisenchantBoE:SetWidth(50)
+	self._tglDisenchantBoE = tglDisenchantBoE
+
+	-- Quality filter row: 3 inline sub-toggles. Default Uncommon on (most
+	-- common case), Rare and Epic off (those are usually worth equipping
+	-- or selling instead of disenchanting at low iLvl).
+	local qualityRowY = -56
+	local tglDisenchantUnc = MakeSubToggle(kCard2, "Unc", C_DK_RED)
+	tglDisenchantUnc:SetPoint("TOPLEFT", CARD_INNER_PAD_X, qualityRowY)
+	tglDisenchantUnc:SetWidth(44)
+	self._tglDisenchantUnc = tglDisenchantUnc
+
+	local tglDisenchantRare = MakeSubToggle(kCard2, "Rare", C_DK_RED)
+	tglDisenchantRare:SetPoint("TOPLEFT", CARD_INNER_PAD_X + 48, qualityRowY)
+	tglDisenchantRare:SetWidth(50)
+	self._tglDisenchantRare = tglDisenchantRare
+
+	local tglDisenchantEpic = MakeSubToggle(kCard2, "Epic", C_DK_RED)
+	tglDisenchantEpic:SetPoint("TOPLEFT", CARD_INNER_PAD_X + 102, qualityRowY)
+	tglDisenchantEpic:SetWidth(48)
+	self._tglDisenchantEpic = tglDisenchantEpic
+
+	-- iLvl row: two small numeric inputs side by side under a single "iLvl"
+	-- label. Zero in either box means "no override / no cap" — the floor
+	-- falls back to the per-quality mechanical default (5/55/95), the
+	-- ceiling falls back to "unlimited". A tooltip on the row explains both.
+	local ILVL_ROW_Y = -74
+	local ilvlRow = CreateFrame("Frame", nil, kCard2)
+	ilvlRow:SetSize(cardW - CARD_INNER_PAD_X * 2, 16)
+	ilvlRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, ILVL_ROW_Y)
+
+	local ilvlLabel = ilvlRow:CreateFontString(nil, "OVERLAY")
+	ilvlLabel:SetFont(FONT, 10, "OUTLINE")
+	ilvlLabel:SetTextColor(unpack(C_DIM))
+	ilvlLabel:SetPoint("LEFT", ilvlRow, "LEFT", 0, 0)
+	ilvlLabel:SetText("iLvl:")
+
+	local ILVL_TOOLTIP_TITLE = "iLvl range"
+	local ILVL_TOOLTIP_BODY  = "Min: items at or above this iLvl are eligible. 0 = use the mechanical floor for the quality (5/55/95).\nMax: items at or below this iLvl are eligible. 0 = no cap."
+	ilvlRow:EnableMouse(true)
+	ilvlRow:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText(ILVL_TOOLTIP_TITLE, 1, 1, 1)
+		GameTooltip:AddLine(ILVL_TOOLTIP_BODY, C_DIM[1], C_DIM[2], C_DIM[3], true)
+		GameTooltip:Show()
+	end)
+	ilvlRow:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+	-- Two small editboxes. Width tuned so both + a dash + the label fit
+	-- inside the iLvl row without crowding the key-capture row beside it.
+	local function MakeIlvlEdit(parent, x)
+		local box = CreateFrame("Frame", nil, parent)
+		box:SetSize(34, 16)
+		box:SetPoint("LEFT", parent, "LEFT", x, 0)
+		ApplyBackdrop(box, C_DROP_BG, C_DROP_BORDER)
+		box:EnableMouse(true)
+		box:SetScript("OnEnter", function(self)
+			GameTooltip:SetOwner(self, "ANCHOR_TOP")
+			GameTooltip:SetText(ILVL_TOOLTIP_TITLE, 1, 1, 1)
+			GameTooltip:AddLine(ILVL_TOOLTIP_BODY, C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		box:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+		local edit = CreateFrame("EditBox", nil, box)
+		edit:SetFont(FONT, 9, "OUTLINE")
+		edit:SetTextColor(unpack(C_TEXT))
+		edit:SetAutoFocus(false)
+		edit:SetNumeric(true)
+		edit:SetMaxLetters(4)
+		edit:SetPoint("TOPLEFT", 3, -1)
+		edit:SetPoint("BOTTOMRIGHT", -3, 1)
+		edit:SetJustifyH("CENTER")
+		edit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
+		edit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
+		return edit
+	end
+
+	local ilvlMinEdit = MakeIlvlEdit(ilvlRow, 28)
+	self._disenchantIlvlMinEdit = ilvlMinEdit
+	ilvlMinEdit:SetScript("OnEditFocusLost", function(s)
+		local val = tonumber(s:GetText()) or 0
+		if val < 0 then val = 0 end
+		s:SetText(tostring(val))
+		GetActiveProfile(db).disenchantIlvlMin = val
+		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+		if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
+		if self._refreshDisenchantStatus then self:_refreshDisenchantStatus() end
+	end)
+
+	local ilvlDash = ilvlRow:CreateFontString(nil, "OVERLAY")
+	ilvlDash:SetFont(FONT, 10, "OUTLINE")
+	ilvlDash:SetTextColor(unpack(C_DIM))
+	ilvlDash:SetPoint("LEFT", ilvlRow, "LEFT", 64, 0)
+	ilvlDash:SetText("-")
+
+	local ilvlMaxEdit = MakeIlvlEdit(ilvlRow, 71)
+	self._disenchantIlvlMaxEdit = ilvlMaxEdit
+	ilvlMaxEdit:SetScript("OnEditFocusLost", function(s)
+		local val = tonumber(s:GetText()) or 0
+		if val < 0 then val = 0 end
+		s:SetText(tostring(val))
+		GetActiveProfile(db).disenchantIlvlMax = val
+		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+		if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
+		if self._refreshDisenchantStatus then self:_refreshDisenchantStatus() end
+	end)
+
+	-- Key capture sits to the right of the iLvl inputs on the same row.
+	-- Width fills the remaining card horizontal space.
+	local disenchantKeyRow = MakeKeyCaptureRow(
+		kCard2,
+		"CLICK AutoDeleteDisenchantButton:LeftButton",
+		cardW - CARD_INNER_PAD_X * 2 - 110
+	)
+	disenchantKeyRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X + 108, ILVL_ROW_Y + 1)
+	self._disenchantKeyRow = disenchantKeyRow
+
+	-- Status line tucked at the bottom edge. 9pt so it stays under the 92px
+	-- card height even with the dense rows above. SetWordWrap(false) +
+	-- truncation when an item link is long; the full link is reachable via
+	-- hovering the bag slot itself, so truncation here is acceptable.
+	local disenchantStatus = MakeText(kCard2, 9, C_DIM)
+	disenchantStatus:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -90)
+	disenchantStatus:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -90)
+	disenchantStatus:SetJustifyH("LEFT")
+	disenchantStatus:SetWordWrap(false)
+	disenchantStatus:SetText("")
+	self._disenchantStatus = disenchantStatus
+
+	-- Card 3 reserved for the next secure-button feature we add.
+	local kCard3Placeholder = MakeText(kCard3, 11, C_ACCENT, "OUTLINE")
+	kCard3Placeholder:SetPoint("CENTER", kCard3, "CENTER", 0, 0)
+	kCard3Placeholder:SetText("Coming Soon!")
+	end  -- end of Keybinds-tab `do` block
 
 	-- ========================================================================
 	-- AUTOINV TAB: 3 cards (Enable+Keywords, Loot Rules, Party Management)
@@ -2977,30 +3305,31 @@ local function BuildUI(self)
 		GetActiveProfile(db).autoInviteConvertToRaid = btn._checked
 	end)
 
-	-- Tools tab: One-Key Disenchant. Toggle + sub-toggle update the profile
-	-- and immediately re-arm the secure button so the next-target pointer
-	-- reflects the new eligibility set without waiting for a BAG_UPDATE.
-	tglDisenchant:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).disenchantEnabled = btn._checked
-		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
-		if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
-		if self._refreshDisenchantStatus then self:_refreshDisenchantStatus() end
-	end)
-	tglDisenchantRare:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).disenchantRare = btn._checked
-		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
-		if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
-		if self._refreshDisenchantStatus then self:_refreshDisenchantStatus() end
-	end)
+	-- Keybinds tab: One-Key Disenchant. Each toggle writes to the profile,
+	-- refreshes the cached profile, re-arms the secure button, and pokes
+	-- the status text. Inputs (iLvl min/max) wire their own OnEditFocusLost
+	-- handlers at construction time; nothing to do here for them.
+	local function MakeDisenchantToggleHandler(field)
+		return function(btn)
+			btn._checked = not btn._checked
+			btn:SetChecked(btn._checked)
+			GetActiveProfile(db)[field] = btn._checked
+			if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+			if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
+			if self._refreshDisenchantStatus then self:_refreshDisenchantStatus() end
+		end
+	end
+	if self._tglDisenchant     then self._tglDisenchant:SetScript("OnClick",     MakeDisenchantToggleHandler("disenchantEnabled"))  end
+	if self._tglDisenchantBoP  then self._tglDisenchantBoP:SetScript("OnClick",  MakeDisenchantToggleHandler("disenchantBoP"))      end
+	if self._tglDisenchantBoE  then self._tglDisenchantBoE:SetScript("OnClick",  MakeDisenchantToggleHandler("disenchantBoE"))      end
+	if self._tglDisenchantUnc  then self._tglDisenchantUnc:SetScript("OnClick",  MakeDisenchantToggleHandler("disenchantUncommon")) end
+	if self._tglDisenchantRare then self._tglDisenchantRare:SetScript("OnClick", MakeDisenchantToggleHandler("disenchantRare"))     end
+	if self._tglDisenchantEpic then self._tglDisenchantEpic:SetScript("OnClick", MakeDisenchantToggleHandler("disenchantEpic"))     end
 
-	-- Updates the status line from the live disenchant module. Stored on
-	-- self so the OnClick handlers above and the Refresh path below share
-	-- one implementation. Safe to call before AutoDelete.lua exports the
-	-- accessor (falls back to a dim "..." string).
+	-- Updates the disenchant status line from the live module. Stored on
+	-- self so both the Keybinds-tab card's handlers and the Refresh path
+	-- below share one implementation. Safe to call before AutoDelete.lua
+	-- exports the accessor (falls back to a dim "..." string).
 	function self:_refreshDisenchantStatus()
 		if not self._disenchantStatus then return end
 		local getter = _G.AutoDelete_GetDisenchantStatus
@@ -3012,6 +3341,49 @@ local function BuildUI(self)
 		local text, r, g, b = getter()
 		self._disenchantStatus:SetText(text or "")
 		self._disenchantStatus:SetTextColor(r or 0.55, g or 0.55, b or 0.55)
+	end
+
+	-- Keybinds tab: One-Key Open. Toggle + sub-toggle update the profile
+	-- and immediately re-arm the secure button so the next-target pointer
+	-- reflects the new eligibility set. Self references for both toggles
+	-- because they live inside a `do ... end` block above and are out of
+	-- this scope's view by lexical reach.
+	if self._tglOpenEnabled then
+		self._tglOpenEnabled:SetScript("OnClick", function(btn)
+			btn._checked = not btn._checked
+			btn:SetChecked(btn._checked)
+			GetActiveProfile(db).autoOpenEnabled = btn._checked
+			if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+			if _G.AutoDelete_UpdateOpenButton then _G.AutoDelete_UpdateOpenButton() end
+			if self._refreshOpenStatus then self:_refreshOpenStatus() end
+		end)
+	end
+	if self._tglOpenIncludeLocked then
+		self._tglOpenIncludeLocked:SetScript("OnClick", function(btn)
+			btn._checked = not btn._checked
+			btn:SetChecked(btn._checked)
+			GetActiveProfile(db).autoOpenIncludeLocked = btn._checked
+			if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+			if _G.AutoDelete_UpdateOpenButton then _G.AutoDelete_UpdateOpenButton() end
+			if self._refreshOpenStatus then self:_refreshOpenStatus() end
+		end)
+	end
+
+	-- Pulls the current "Next: <item>" / "Disabled" / "No openable items"
+	-- string from the One-Key Open module and paints the status text.
+	-- Called from the toggle handlers above, from the Refresh path below,
+	-- and from AutoDelete.lua's UpdateOpenButton when the panel is open.
+	function self:_refreshOpenStatus()
+		if not self._openStatus then return end
+		local getter = _G.AutoDelete_GetOpenStatus
+		if not getter then
+			self._openStatus:SetText("...")
+			self._openStatus:SetTextColor(0.55, 0.55, 0.55)
+			return
+		end
+		local text, r, g, b = getter()
+		self._openStatus:SetText(text or "")
+		self._openStatus:SetTextColor(r or 0.55, g or 0.55, b or 0.55)
 	end
 
 	-- Tools tab: Affix Protection toggles. Same RefreshCachedProfile call
@@ -3323,10 +3695,38 @@ local function BuildUI(self)
 		tglEnable:SetChecked(p.enabled)
 		tglAutoAddEquipped:SetChecked(p.autoAddEquipped)
 
-		-- Tools tab: One-Key Disenchant
-		tglDisenchant:SetChecked(p.disenchantEnabled)
-		tglDisenchantRare:SetChecked(p.disenchantRare)
+		-- Keybinds tab: One-Key Disenchant (toggles live behind self refs
+		-- because the card builder is in a `do ... end` block above).
+		if self._tglDisenchant      then self._tglDisenchant:SetChecked(p.disenchantEnabled) end
+		if self._tglDisenchantBoP   then self._tglDisenchantBoP:SetChecked(p.disenchantBoP) end
+		if self._tglDisenchantBoE   then self._tglDisenchantBoE:SetChecked(p.disenchantBoE) end
+		if self._tglDisenchantUnc   then self._tglDisenchantUnc:SetChecked(p.disenchantUncommon) end
+		if self._tglDisenchantRare  then self._tglDisenchantRare:SetChecked(p.disenchantRare) end
+		if self._tglDisenchantEpic  then self._tglDisenchantEpic:SetChecked(p.disenchantEpic) end
+		if self._disenchantIlvlMinEdit then
+			self._disenchantIlvlMinEdit:SetText(tostring(p.disenchantIlvlMin or 0))
+		end
+		if self._disenchantIlvlMaxEdit then
+			self._disenchantIlvlMaxEdit:SetText(tostring(p.disenchantIlvlMax or 0))
+		end
+		if self._disenchantKeyRow and self._disenchantKeyRow._refresh then
+			self._disenchantKeyRow:_refresh()
+		end
 		if self._refreshDisenchantStatus then self:_refreshDisenchantStatus() end
+
+		-- Keybinds tab: One-Key Open. Toggles live behind self refs (the
+		-- card builder is scoped in a `do ... end` block). Status pulls
+		-- straight from the module's GetOpenStatus exporter.
+		if self._tglOpenEnabled then
+			self._tglOpenEnabled:SetChecked(p.autoOpenEnabled)
+		end
+		if self._tglOpenIncludeLocked then
+			self._tglOpenIncludeLocked:SetChecked(p.autoOpenIncludeLocked)
+		end
+		if self._openKeyRow and self._openKeyRow._refresh then
+			self._openKeyRow:_refresh()
+		end
+		if self._refreshOpenStatus then self:_refreshOpenStatus() end
 
 		-- Tools tab: Affix Protection
 		tglProtectAffixFromDelete:SetChecked(p.protectAffixFromDelete)

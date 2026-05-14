@@ -8,4 +8,3 @@
 
 AutoDelete.lua
 Options.lua
-Bindings.xml
