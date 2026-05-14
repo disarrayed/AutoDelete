@@ -1588,8 +1588,12 @@ local function BuildUI(self)
 
 	-- Create 6 tab content pages (frames parented to tabContent, filling it)
 	local tabPages = {}
+	-- Tab keys are stable internal identifiers (referenced in tabPages[<key>]
+	-- across the file); tab labels are user-facing and renamed without
+	-- migrating the keys. Goblin -> Pets, Tools -> Filters, AutoInv -> Invites
+	-- reflect what the tabs actually contain after the Option B reorg.
 	local TAB_KEYS = { "general", "goblin", "tools", "keybinds", "autoinv", "tracking", "profiles" }
-	local TAB_LABELS = { "General", "Goblin", "Tools", "Keybinds", "AutoInv", "Tracking", "Profiles" }
+	local TAB_LABELS = { "General", "Pets", "Filters", "Keybinds", "Invites", "Tracking", "Profiles" }
 	for i, key in ipairs(TAB_KEYS) do
 		local page = CreateFrame("Frame", nil, tabContent)
 		page:SetAllPoints(tabContent)
@@ -1721,25 +1725,22 @@ local function BuildUI(self)
 	tglAutoAddEquipped:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglAutoAddEquipped = tglAutoAddEquipped
 
-	-- card2: Auto-Delete Junk, Auto-Delete Common, Auto-Sell Greens
-	-- Three rows stacked. No descriptions to keep them compact within cardH=92.
-	local tglGray = MakeToggle(card2, "Auto-Delete Junk", C_ACCENT,
-		"Automatically destroy poor (gray) quality items. Quest items, shirts, and tabards are protected. Items on the Keep list are also protected.")
-	tglGray:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
-	tglGray:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglGray = tglGray
+	-- card2: Auto-Repair (master) + Use Guild Bank money (sub). Moved here
+	-- from the old Goblin tab; Auto-Repair runs at any vendor, has nothing
+	-- to do with pets, and pairs more naturally with the General tab's
+	-- enable-and-globals theme.
+	-- Sub-toggle indent matches MakeSubToggle convention (parent box+gap=32).
+	local SUBTGL_INDENT_GEN = CARD_INNER_PAD_X + 14 + 8
+	local tglRepair = MakeToggle(card2, "Auto-Repair", C_ACCENT,
+		"Repair your gear automatically when you open a vendor.")
+	tglRepair:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
+	tglRepair:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglRepair = tglRepair
 
-	local tglDelCommon = MakeToggle(card2, "Auto-Delete Common", C_ACCENT,
-		"Automatically destroy Common (white) quality equippable gear. Quest items, reagents, consumables, shirts, tabards, and items on the Keep list are protected.")
-	tglDelCommon:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 22))
-	tglDelCommon:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglDelCommon = tglDelCommon
-
-	local tglSellGreensGen = MakeToggle(card2, "Auto-Sell Greens", C_ACCENT,
-		"Automatically sell Uncommon (green) gear at vendors. Equippable gear only. Quest items and items on the Keep list are protected.")
-	tglSellGreensGen:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
-	tglSellGreensGen:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglSellGreensGen = tglSellGreensGen
+	local tglRepairGuild = MakeSubToggle(card2, "Use Guild Bank money", C_DK_RED)
+	tglRepairGuild:SetPoint("TOPLEFT", SUBTGL_INDENT_GEN, -(CARD_INNER_PAD_Y + 22))
+	tglRepairGuild:SetWidth(cardW - SUBTGL_INDENT_GEN - CARD_INNER_PAD_X)
+	self._tglRepairGuild = tglRepairGuild
 
 	-- Scan Speed card (moved here from the old Scan Options left card)
 	local scanSpeedCard = card3
@@ -1798,54 +1799,39 @@ local function BuildUI(self)
 	local gCard2 = MakeGoblinCard(cardW + CARD_GAP)
 	local gCard3 = MakeGoblinCard((cardW + CARD_GAP) * 2)
 
-	-- CARD 1: Auto-Repair (main + sub) + Hide Greedy Spam (main)
-	local tglRepair = MakeToggle(gCard1, "Auto-Repair", C_ACCENT,
-		"Repair your gear automatically when you open a vendor.")
-	tglRepair:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
-	tglRepair:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglRepair = tglRepair
+	-- Sub-toggle indent shared by Scavenger and Bag Warning rows below.
+	-- Lines up the sub-toggle's checkbox with the parent toggle's label text:
+	-- parent x=10, parent box=14, gap=8 -> text starts at 32.
+	local SUBTGL_INDENT = CARD_INNER_PAD_X + 14 + 8   -- 32
 
-	-- Sub-toggles indent to align their box with the parent toggle's TEXT.
-	-- Parent anchor = CARD_INNER_PAD_X (10), parent box = 14 wide, gap 8 → text starts at 32.
-	local SUBTGL_INDENT = CARD_INNER_PAD_X + 14 + 8   -- 32 (card pad + parent box + gap)
-	local tglRepairGuild = MakeSubToggle(gCard1, "Use Guild Bank money", C_DK_RED)
-	tglRepairGuild:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 20))
-	tglRepairGuild:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
-	self._tglRepairGuild = tglRepairGuild
-
-	-- Row 3 on Card 1: Hide Greedy Spam (main toggle).
-	local tglHideSpam = MakeToggle(gCard1, "Hide Greedy Spam", C_ACCENT,
-		"Hides Greedy Scavenger's chat messages and speech bubbles.")
-	tglHideSpam:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
-	tglHideSpam:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglHideSpam = tglHideSpam
-
-	-- CARD 2: Summon Scavenger (master + 3 sub-toggles)
-	local tglScav = MakeToggle(gCard2, "Summon Scavenger", C_ACCENT,
+	-- CARD 1 (Pets, was Goblin's Scavenger card): master Summon Scavenger
+	-- toggle + 3 sub-toggles. Moved here from the old Goblin Card 2 so the
+	-- Scavenger pet feature lives in the leftmost slot of the Pets tab.
+	local tglScav = MakeToggle(gCard1, "Summon Scavenger", C_ACCENT,
 		"Master toggle for Greedy Scavenger pet management. When enabled, the addon dismisses your Scavenger when you mount and re-summons on dismount, and re-summons it if it gets stuck or despawns. The summon itself is triggered by the After sell or After vendor close sub-toggles below. Gated by the AutoDelete master Enable on the General tab.")
 	tglScav:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglScav:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglScav = tglScav
 
-	local tglScavAfterSell = MakeSubToggle(gCard2, "After sell", C_DK_RED)
+	local tglScavAfterSell = MakeSubToggle(gCard1, "After sell", C_DK_RED)
 	tglScavAfterSell:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 20))
 	tglScavAfterSell:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglScavAfterSell = tglScavAfterSell
 
-	local tglScavAfterClose = MakeSubToggle(gCard2, "After vendor close", C_DK_RED)
+	local tglScavAfterClose = MakeSubToggle(gCard1, "After vendor close", C_DK_RED)
 	tglScavAfterClose:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 36))
 	tglScavAfterClose:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglScavAfterClose = tglScavAfterClose
 
-	local tglScavOnlyInCombat = MakeSubToggle(gCard2, "Only in Combat", C_DK_RED)
+	local tglScavOnlyInCombat = MakeSubToggle(gCard1, "Only in Combat", C_DK_RED)
 	tglScavOnlyInCombat:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 52))
 	tglScavOnlyInCombat:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglScavOnlyInCombat = tglScavOnlyInCombat
 
-	-- CARD 3: Summon Merchant on bags full (main toggle).
-	-- Shares the Summon Scavenger master toggle for mount-aware and
-	-- stuck-detection behavior.
-	local tglSummonMerchant = MakeToggle(gCard3, "Summon Goblin Merchant", C_ACCENT,
+	-- CARD 2 (Pets): Summon Goblin Merchant. Moved here from the old Card 3
+	-- so Scavenger and Merchant sit adjacent. Gated by the Summon Scavenger
+	-- master + the AutoDelete master Enable.
+	local tglSummonMerchant = MakeToggle(gCard2, "Summon Goblin Merchant", C_ACCENT,
 		"Automatically summon your Goblin Merchant companion when your bags reach zero free slots and stay full for 3 seconds. The 3-second wait avoids stray summons from transient fills (e.g. stacks that auto-merge a moment later). You still need to target the merchant and press your Interact With Target keybind to open the vendor window. Gated by the Summon Scavenger master toggle and by the AutoDelete master Enable.")
 	tglSummonMerchant:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglSummonMerchant:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
@@ -1853,6 +1839,63 @@ local function BuildUI(self)
 		"Summons the Goblin Merchant when bags are full.",
 		cardW - CARD_INNER_PAD_X * 2 - 26)
 	self._tglSummonMerchant = tglSummonMerchant
+
+	-- CARD 3 (Pets): Bag Warning + Hide Greedy Spam. Two notification-style
+	-- toggles. Bag Warning fires a chat line when free slots fall below the
+	-- threshold (one-shot per low cycle). Hide Greedy Spam suppresses the
+	-- Scavenger's chat / speech-bubble strings. Threshold here also gates
+	-- the chat notification only; Goblin Merchant summon triggers at zero
+	-- free slots independently.
+	local tglBagSpaceWarn = MakeToggle(gCard3, "Bag warning", C_ACCENT,
+		"Prints a chat warning the first time free bag slots drop to or below the Warn threshold below. Re-arms once slots rise back above the threshold.")
+	tglBagSpaceWarn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
+	tglBagSpaceWarn:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglBagSpaceWarn = tglBagSpaceWarn
+
+	-- Threshold row beneath the Bag warning toggle. Small EditBox + label.
+	local thresholdRow = CreateFrame("Frame", nil, gCard3)
+	thresholdRow:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	thresholdRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 22))
+
+	local thresholdLabel = thresholdRow:CreateFontString(nil, "OVERLAY")
+	thresholdLabel:SetFont(FONT, 10, "OUTLINE")
+	thresholdLabel:SetTextColor(unpack(C_DIM))
+	thresholdLabel:SetPoint("LEFT", thresholdRow, "LEFT", 0, 0)
+	thresholdLabel:SetText("Free slots:")
+
+	local thresholdBox = CreateFrame("Frame", nil, thresholdRow)
+	thresholdBox:SetSize(44, 20)
+	thresholdBox:SetPoint("RIGHT", thresholdRow, "RIGHT", 0, 0)
+	ApplyBackdrop(thresholdBox, C_DROP_BG, C_DROP_BORDER)
+	local thresholdEdit = CreateFrame("EditBox", nil, thresholdBox)
+	thresholdEdit:SetFont(FONT, 10, "OUTLINE")
+	thresholdEdit:SetTextColor(unpack(C_TEXT))
+	thresholdEdit:SetAutoFocus(false)
+	thresholdEdit:SetNumeric(true)
+	thresholdEdit:SetMaxLetters(3)
+	thresholdEdit:SetPoint("TOPLEFT", 4, -1)
+	thresholdEdit:SetPoint("BOTTOMRIGHT", -4, 1)
+	thresholdEdit:SetJustifyH("CENTER")
+	thresholdEdit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
+	thresholdEdit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
+	thresholdEdit:SetScript("OnEditFocusLost", function(s)
+		local val = tonumber(s:GetText()) or 5
+		if val < 0 then val = 0 end
+		if val > 100 then val = 100 end
+		s:SetText(tostring(val))
+		local p = GetActiveProfile(db)
+		p.bagSpaceWarnThreshold = val
+		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+	end)
+	self._bagSpaceWarnEdit = thresholdEdit
+
+	-- Hide Greedy Spam at the bottom of card 3. Compact toggle, no
+	-- sub-description.
+	local tglHideSpam = MakeToggle(gCard3, "Hide Greedy Spam", C_ACCENT,
+		"Hides Greedy Scavenger's chat messages and speech bubbles.")
+	tglHideSpam:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 48))
+	tglHideSpam:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglHideSpam = tglHideSpam
 
 	-- ========================================================================
 	-- TOOLS TAB: utility features.
@@ -1876,71 +1919,32 @@ local function BuildUI(self)
 	local tCard2 = MakeToolsCard(cardW + CARD_GAP)
 	local tCard3 = MakeToolsCard((cardW + CARD_GAP) * 2)
 
-	-- Tools Card 1: reserved slot. One-Key Disenchant lived here until it
-	-- Tools Card 1: Process Bags launcher. Opens the standalone Process
-	-- Bags panel (built above this scope, after the main settings frame).
-	-- Card shows a title, a count summary, and a launch button. The
-	-- count refreshes on panel Refresh and on BAG_UPDATE via the hook
-	-- registered at the bottom of this file.
-	local tCard1Title = MakeText(tCard1, 11, C_ACCENT, "OUTLINE")
-	tCard1Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
-	tCard1Title:SetText("Process Bags")
+	-- Filters Card 1: Quality Filters (Auto-Delete Junk / Auto-Delete
+	-- Common / Auto-Sell Greens). Moved here from the General tab so
+	-- all auto-rule filters live on the Filters tab. The BoE Armor /
+	-- BoP / BoE Weapons sections below the tabs are the per-category
+	-- companion to these global quality filters.
+	local card1Title = MakeText(tCard1, 11, C_ACCENT, "OUTLINE")
+	card1Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+	card1Title:SetText("Quality Filters")
 
-	-- Count line: "X items eligible: A DE, B Mill, C Prospect, D Open".
-	-- 9pt so we can show the full breakdown without truncating on the
-	-- 175 px card width.
-	local processCount = MakeText(tCard1, 9, C_DIM)
-	processCount:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
-	processCount:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -24)
-	processCount:SetJustifyH("LEFT")
-	processCount:SetWordWrap(true)
-	processCount:SetText("...")
-	self._processCount = processCount
+	local tglGray = MakeToggle(tCard1, "Auto-Delete Junk", C_ACCENT,
+		"Automatically destroy poor (gray) quality items. Quest items, shirts, and tabards are protected. Items on the Keep list are also protected.")
+	tglGray:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+	tglGray:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglGray = tglGray
 
-	-- Launch button. Hover state matches the rest of the panel's button
-	-- conventions (accent fill on hover, dark text). Click toggles the
-	-- standalone Process Bags panel.
-	local launchBtn = CreateFrame("Button", nil, tCard1)
-	launchBtn:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	launchBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -64)
-	ApplyBackdrop(launchBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
-	local launchBtnText = launchBtn:CreateFontString(nil, "OVERLAY")
-	launchBtnText:SetFont(FONT, 11, "OUTLINE")
-	launchBtnText:SetTextColor(unpack(C_TEXT))
-	launchBtnText:SetPoint("CENTER")
-	launchBtnText:SetText("Open Panel")
-	launchBtn:SetScript("OnEnter", function()
-		ApplyBackdrop(launchBtn, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.85 }, C_ACCENT)
-		launchBtnText:SetTextColor(0.05, 0.05, 0.05, 1)
-	end)
-	launchBtn:SetScript("OnLeave", function()
-		ApplyBackdrop(launchBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
-		launchBtnText:SetTextColor(unpack(C_TEXT))
-	end)
-	launchBtn:SetScript("OnClick", function()
-		if _G.AutoDelete_ToggleProcessPanel then _G.AutoDelete_ToggleProcessPanel() end
-	end)
+	local tglDelCommon = MakeToggle(tCard1, "Auto-Delete Common", C_ACCENT,
+		"Automatically destroy Common (white) quality equippable gear. Quest items, reagents, consumables, shirts, tabards, and items on the Keep list are protected.")
+	tglDelCommon:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
+	tglDelCommon:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglDelCommon = tglDelCommon
 
-	-- Pulls the live counts from AutoDelete_ProcessScanCounts and paints
-	-- the count line. Called from Refresh path and from BAG_UPDATE hook.
-	function self:_refreshProcessCount()
-		if not self._processCount then return end
-		local getter = _G.AutoDelete_ProcessScanCounts
-		if not getter then return end
-		local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
-		local c = getter(profile)
-		if not c or c.total == 0 then
-			self._processCount:SetText("No eligible items")
-			return
-		end
-		-- Compact breakdown: only show action types with non-zero counts.
-		local parts = {}
-		if c.disenchant > 0 then table.insert(parts, c.disenchant .. " DE") end
-		if c.mill       > 0 then table.insert(parts, c.mill       .. " Mill") end
-		if c.prospect   > 0 then table.insert(parts, c.prospect   .. " Prospect") end
-		if c.open       > 0 then table.insert(parts, c.open       .. " Open") end
-		self._processCount:SetText(c.total .. " items: " .. table.concat(parts, ", "))
-	end
+	local tglSellGreensGen = MakeToggle(tCard1, "Auto-Sell Greens", C_ACCENT,
+		"Automatically sell Uncommon (green) gear at vendors. Equippable gear only. Quest items and items on the Keep list are protected.")
+	tglSellGreensGen:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -68)
+	tglSellGreensGen:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglSellGreensGen = tglSellGreensGen
 
 	-- Tools Card 2: Affix Protection. Same density as Card 1: a small
 	-- section title at top, two main toggles (using shorter labels so
@@ -2020,56 +2024,62 @@ local function BuildUI(self)
 	end)
 	self._affixIlvlEdit = affixFloorEdit
 
-	-- Tools Card 3: Bag Space. Section title at top, warning toggle next,
-	-- then two tight label+input rows: warn threshold and summon threshold.
-	-- Same vertical rhythm as Card 2 so the tab flows visually.
+	-- Filters Card 3: Process Bags launcher. Moved here from Tools Card 1
+	-- so the Filters tab's middle card (Affix Protection) reads as the
+	-- focal point and the launcher sits in the trailing slot. Card shows
+	-- a title, a live count summary, and a button that toggles the
+	-- standalone AutoDeleteProcessPanel. The count refreshes on panel
+	-- Refresh and on BAG_UPDATE via the hook in AutoDelete.lua.
 	local card3Title = MakeText(tCard3, 11, C_ACCENT, "OUTLINE")
 	card3Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
-	card3Title:SetText("Bag Space")
+	card3Title:SetText("Process Bags")
 
-	local tglBagSpaceWarn = MakeToggle(tCard3, "Bag warning", C_ACCENT,
-		"Prints a chat warning the first time free bag slots drop to or below the Warn threshold below. Re-arms once slots rise back above the threshold.")
-	tglBagSpaceWarn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
-	tglBagSpaceWarn:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglBagSpaceWarn = tglBagSpaceWarn
+	local processCount = MakeText(tCard3, 9, C_DIM)
+	processCount:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+	processCount:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -24)
+	processCount:SetJustifyH("LEFT")
+	processCount:SetWordWrap(true)
+	processCount:SetText("...")
+	self._processCount = processCount
 
-	-- Single threshold row: drives BOTH the chat warning AND the Goblin
-	-- Merchant bag-full summon trigger. One value, simpler UI.
-	local thresholdRow = CreateFrame("Frame", nil, tCard3)
-	thresholdRow:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	thresholdRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -48)
-
-	local thresholdLabel = thresholdRow:CreateFontString(nil, "OVERLAY")
-	thresholdLabel:SetFont(FONT, 10, "OUTLINE")
-	thresholdLabel:SetTextColor(unpack(C_DIM))
-	thresholdLabel:SetPoint("LEFT", thresholdRow, "LEFT", 0, 0)
-	thresholdLabel:SetText("Free slots:")
-
-	local thresholdBox = CreateFrame("Frame", nil, thresholdRow)
-	thresholdBox:SetSize(44, 20)
-	thresholdBox:SetPoint("RIGHT", thresholdRow, "RIGHT", 0, 0)
-	ApplyBackdrop(thresholdBox, C_DROP_BG, C_DROP_BORDER)
-
-	local thresholdEdit = CreateFrame("EditBox", nil, thresholdBox)
-	thresholdEdit:SetFont(FONT, 10, "OUTLINE")
-	thresholdEdit:SetTextColor(unpack(C_TEXT))
-	thresholdEdit:SetAutoFocus(false)
-	thresholdEdit:SetNumeric(true)
-	thresholdEdit:SetMaxLetters(3)
-	thresholdEdit:SetPoint("TOPLEFT", 4, -1)
-	thresholdEdit:SetPoint("BOTTOMRIGHT", -4, 1)
-	thresholdEdit:SetJustifyH("CENTER")
-	thresholdEdit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
-	thresholdEdit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
-	thresholdEdit:SetScript("OnEditFocusLost", function(s)
-		local val = tonumber(s:GetText()) or 5
-		if val < 0 then val = 0 end
-		s:SetText(tostring(val))
-		local p = GetActiveProfile(db)
-		p.bagSpaceWarnThreshold = val
-		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+	local launchBtn = CreateFrame("Button", nil, tCard3)
+	launchBtn:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	launchBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -64)
+	ApplyBackdrop(launchBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
+	local launchBtnText = launchBtn:CreateFontString(nil, "OVERLAY")
+	launchBtnText:SetFont(FONT, 11, "OUTLINE")
+	launchBtnText:SetTextColor(unpack(C_TEXT))
+	launchBtnText:SetPoint("CENTER")
+	launchBtnText:SetText("Open Panel")
+	launchBtn:SetScript("OnEnter", function()
+		ApplyBackdrop(launchBtn, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.85 }, C_ACCENT)
+		launchBtnText:SetTextColor(0.05, 0.05, 0.05, 1)
 	end)
-	self._bagSpaceWarnEdit = thresholdEdit
+	launchBtn:SetScript("OnLeave", function()
+		ApplyBackdrop(launchBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
+		launchBtnText:SetTextColor(unpack(C_TEXT))
+	end)
+	launchBtn:SetScript("OnClick", function()
+		if _G.AutoDelete_ToggleProcessPanel then _G.AutoDelete_ToggleProcessPanel() end
+	end)
+
+	function self:_refreshProcessCount()
+		if not self._processCount then return end
+		local getter = _G.AutoDelete_ProcessScanCounts
+		if not getter then return end
+		local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
+		local c = getter(profile)
+		if not c or c.total == 0 then
+			self._processCount:SetText("No eligible items")
+			return
+		end
+		local parts = {}
+		if c.disenchant > 0 then table.insert(parts, c.disenchant .. " DE") end
+		if c.mill       > 0 then table.insert(parts, c.mill       .. " Mill") end
+		if c.prospect   > 0 then table.insert(parts, c.prospect   .. " Prospect") end
+		if c.open       > 0 then table.insert(parts, c.open       .. " Open") end
+		self._processCount:SetText(c.total .. " items: " .. table.concat(parts, ", "))
+	end
 
 	-- ========================================================================
 	-- KEYBINDS TAB: holds the secure-button features (One-Key Open, future
@@ -3097,7 +3107,10 @@ local function BuildUI(self)
 	-- the three list-mode tab buttons that drive the list view below.
 	-- ========================================================================
 	local scanCardH = 34                                                   -- fits 26-tall buttons + 4px pad top/bot
-	local scanBox = MakeSection(self, "Scan Options", yOff, 1)
+	-- Section renamed from "Scan Options" to "List Mode": the contained
+	-- buttons select Delete / Sell / Keep list view, not scan settings.
+	-- Scan Speed lives on the General tab.
+	local scanBox = MakeSection(self, "List Mode", yOff, 1)
 	-- Hide the outer section border so it doesn't double up with the inner
 	-- scanRightCard's border below. The inner card is the visible frame.
 	scanBox:SetBackdropBorderColor(0, 0, 0, 0)
@@ -4380,12 +4393,12 @@ local function BuildUI(self)
 		end
 		if self._refreshProspectStatus then self:_refreshProspectStatus() end
 
-		-- Tools tab: Affix Protection
+		-- Filters tab: Affix Protection (Card 2)
 		tglProtectAffixFromDelete:SetChecked(p.protectAffixFromDelete)
 		tglProtectAffixFromSell:SetChecked(p.protectAffixFromSell)
 		affixFloorEdit:SetText(tostring(p.affixIlvlMin or 0))
 
-		-- Tools tab: Bag Space (single threshold drives both warn + summon)
+		-- Pets tab: Bag Warning + threshold (Card 3, moved from Tools tab)
 		tglBagSpaceWarn:SetChecked(p.bagSpaceWarnEnabled)
 		thresholdEdit:SetText(tostring(p.bagSpaceWarnThreshold or 5))
 
@@ -4410,15 +4423,17 @@ local function BuildUI(self)
 		boeWeapons.minBox:SetText(tostring(p.boeWeaponsIlvlMin or 1))
 		boeWeapons.maxBox:SetText(tostring(p.boeWeaponsIlvlMax or 199))
 
-		-- General tab: Auto-Delete Junk + Auto-Delete Common + Auto-Sell Greens
+		-- Filters tab: Quality Filters (Card 1, moved from General tab)
 		tglGray:SetChecked(p.autoGray)
 		tglDelCommon:SetChecked(p.autoDeleteCommon)
 		tglSellGreensGen:SetChecked(p.autoSellGreens)
 
-		tglScav:SetChecked(p.summonScavenger)
-		-- Goblin tab toggles
+		-- General tab: Auto-Repair (Card 2, moved from Goblin tab)
 		tglRepair:SetChecked(p.autoRepair)
 		tglRepairGuild:SetChecked(p.autoRepairUseGuildBank)
+
+		-- Pets tab: Scavenger + Goblin Merchant + Hide Greedy Spam
+		tglScav:SetChecked(p.summonScavenger)
 		tglScavAfterSell:SetChecked(p.summonAfterSell)
 		tglScavAfterClose:SetChecked(p.summonAfterClose)
 		tglScavOnlyInCombat:SetChecked(p.summonOnlyInCombat)
