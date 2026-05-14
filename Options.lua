@@ -820,6 +820,415 @@ closeBtn:SetScript("OnClick", function() frame:Hide() end)
 _G.AutoDeleteOptionsPanel = frame
 
 -- ============================================================================
+-- Process Bags Panel
+-- ============================================================================
+-- Standalone draggable window listing every item in the player's bags that
+-- one of the four secure-action features (Open, Disenchant, Mill, Prospect)
+-- could target right now. Clicking a row arms that item as the next target
+-- for its action; pressing the corresponding bound key fires it.
+--
+-- Built as a sibling frame to the main AutoDeleteFrame -- not a child.
+-- That keeps it openable when the settings panel is closed and lets the
+-- two windows be positioned independently. Position is saved per-character
+-- in AutoDeleteStatsDB.processPanel.
+--
+-- Wrapped in a `do ... end` block so its locals stay out of the main
+-- chunk's 200-cap. Public entry points are _G.AutoDelete_ToggleProcessPanel
+-- and _G.AutoDelete_ProcessPanel set at the bottom.
+
+do
+
+local PROCESS_PANEL_W = 360
+local PROCESS_PANEL_H = 440
+local PROCESS_ROW_H   = 22
+local PROCESS_HEADER_H = 22
+local PROCESS_FOOTER_H = 28
+-- Scroll area height = total - title - header - footer - vertical pads.
+local PROCESS_SCROLL_H = PROCESS_PANEL_H - 24 - PROCESS_HEADER_H - PROCESS_FOOTER_H - 8
+local PROCESS_VISIBLE_ROWS = math.floor(PROCESS_SCROLL_H / PROCESS_ROW_H)
+
+-- The panel itself. Strata MEDIUM so it floats above bag frames but
+-- below DIALOG (so the settings panel stays on top when both are open
+-- and the user clicks the settings panel). Frame name is globally
+-- exposed so /framestack and other diagnostic tools find it.
+local panel = CreateFrame("Frame", "AutoDeleteProcessPanel", UIParent)
+panel:SetSize(PROCESS_PANEL_W, PROCESS_PANEL_H)
+panel:SetFrameStrata("MEDIUM")
+panel:SetFrameLevel(50)
+panel:SetMovable(true)
+panel:EnableMouse(true)
+panel:SetClampedToScreen(true)
+panel:Hide()
+
+-- Backdrop matches the main settings panel: dark fill, mid-grey border.
+panel:SetBackdrop({
+	bgFile   = WHITE8x8,
+	edgeFile = WHITE8x8,
+	edgeSize = 1,
+})
+panel:SetBackdropColor(0.04, 0.04, 0.04, 0.96)
+panel:SetBackdropBorderColor(unpack(C_ACCENT))
+
+-- Title bar: clickable drag handle, accent strip across the top edge.
+local titleBar = CreateFrame("Frame", nil, panel)
+titleBar:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, 0)
+titleBar:SetPoint("TOPRIGHT", panel, "TOPRIGHT", 0, 0)
+titleBar:SetHeight(24)
+titleBar:SetBackdrop({ bgFile = WHITE8x8 })
+titleBar:SetBackdropColor(C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.85)
+titleBar:EnableMouse(true)
+titleBar:RegisterForDrag("LeftButton")
+titleBar:SetScript("OnDragStart", function() panel:StartMoving() end)
+titleBar:SetScript("OnDragStop", function()
+	panel:StopMovingOrSizing()
+	-- Save position to per-character stats DB so the panel re-opens
+	-- in the same place across /reload and logout.
+	local point, _, relPoint, x, y = panel:GetPoint(1)
+	_G.AutoDeleteStatsDB = _G.AutoDeleteStatsDB or {}
+	_G.AutoDeleteStatsDB.processPanel = {
+		point = point, relPoint = relPoint, x = x, y = y,
+	}
+end)
+
+local titleText = titleBar:CreateFontString(nil, "OVERLAY")
+titleText:SetFont(FONT, 12, "OUTLINE")
+titleText:SetTextColor(0.05, 0.05, 0.05, 1)
+titleText:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
+titleText:SetText("Process Bags")
+
+-- Close X in the title bar's right corner.
+local closeX = CreateFrame("Button", nil, titleBar)
+closeX:SetSize(20, 20)
+closeX:SetPoint("RIGHT", titleBar, "RIGHT", -4, 0)
+local closeXText = closeX:CreateFontString(nil, "OVERLAY")
+closeXText:SetFont(FONT, 14, "OUTLINE")
+closeXText:SetText("x")
+closeXText:SetTextColor(0.05, 0.05, 0.05, 1)
+closeXText:SetPoint("CENTER")
+closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.2, 0.2, 1) end)
+closeX:SetScript("OnLeave", function() closeXText:SetTextColor(0.05, 0.05, 0.05, 1) end)
+closeX:SetScript("OnClick", function() panel:Hide() end)
+
+-- Column header row directly under the title bar.
+local headerRow = CreateFrame("Frame", nil, panel)
+headerRow:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, -2)
+headerRow:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT", 0, -2)
+headerRow:SetHeight(PROCESS_HEADER_H)
+headerRow:SetBackdrop({ bgFile = WHITE8x8 })
+headerRow:SetBackdropColor(0.10, 0.10, 0.10, 1)
+
+local headerItemText = headerRow:CreateFontString(nil, "OVERLAY")
+headerItemText:SetFont(FONT, 10, "OUTLINE")
+headerItemText:SetTextColor(unpack(C_DIM))
+headerItemText:SetPoint("LEFT", headerRow, "LEFT", 10 + 18 + 6, 0)  -- after icon column
+headerItemText:SetText("Item")
+
+local headerActionText = headerRow:CreateFontString(nil, "OVERLAY")
+headerActionText:SetFont(FONT, 10, "OUTLINE")
+headerActionText:SetTextColor(unpack(C_DIM))
+headerActionText:SetPoint("RIGHT", headerRow, "RIGHT", -10, 0)
+headerActionText:SetText("Action")
+
+-- FauxScrollFrame for the row list. 3.3.5a-correct (HybridScrollFrame is
+-- later). Rows themselves get created lazily in B.3 via a row pool.
+local scrollContainer = CreateFrame("Frame", nil, panel)
+scrollContainer:SetPoint("TOPLEFT", headerRow, "BOTTOMLEFT", 4, -2)
+scrollContainer:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -22, PROCESS_FOOTER_H + 4)
+
+local scrollFrame = CreateFrame("ScrollFrame", "AutoDeleteProcessScroll",
+	scrollContainer, "FauxScrollFrameTemplate")
+scrollFrame:SetAllPoints(scrollContainer)
+-- The OnVerticalScroll callback is wired in B.3 once the row-update
+-- function exists. Standard FauxScroll idiom.
+scrollFrame:SetScript("OnVerticalScroll", function(self, offset)
+	FauxScrollFrame_OnVerticalScroll(self, offset, PROCESS_ROW_H,
+		function()
+			if _G.AutoDelete_RefreshProcessPanel then
+				_G.AutoDelete_RefreshProcessPanel()
+			end
+		end)
+end)
+
+-- Footer: row count on the left, "Clear Ignored" button on the right.
+local footer = CreateFrame("Frame", nil, panel)
+footer:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 0, 0)
+footer:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 0)
+footer:SetHeight(PROCESS_FOOTER_H)
+footer:SetBackdrop({ bgFile = WHITE8x8 })
+footer:SetBackdropColor(0.07, 0.07, 0.07, 1)
+
+local footerCount = footer:CreateFontString(nil, "OVERLAY")
+footerCount:SetFont(FONT, 10, "OUTLINE")
+footerCount:SetTextColor(unpack(C_DIM))
+footerCount:SetPoint("LEFT", footer, "LEFT", 10, 0)
+footerCount:SetText("")  -- populated by RefreshProcessPanel in B.3
+
+local clearBtn = CreateFrame("Button", nil, footer)
+clearBtn:SetSize(100, 20)
+clearBtn:SetPoint("RIGHT", footer, "RIGHT", -8, 0)
+ApplyBackdrop(clearBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
+local clearBtnText = clearBtn:CreateFontString(nil, "OVERLAY")
+clearBtnText:SetFont(FONT, 10, "OUTLINE")
+clearBtnText:SetTextColor(unpack(C_TEXT))
+clearBtnText:SetPoint("CENTER")
+clearBtnText:SetText("Clear Ignored")
+clearBtn:SetScript("OnEnter", function()
+	ApplyBackdrop(clearBtn, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.85 }, C_ACCENT)
+	clearBtnText:SetTextColor(0.05, 0.05, 0.05, 1)
+	GameTooltip:SetOwner(clearBtn, "ANCHOR_TOP")
+	GameTooltip:SetText("Clear Ignored", 1, 1, 1)
+	GameTooltip:AddLine("Reset the per-character ignore list. Items you've right-clicked off this list will reappear if they're still in your bags.",
+		C_DIM[1], C_DIM[2], C_DIM[3], true)
+	GameTooltip:Show()
+end)
+clearBtn:SetScript("OnLeave", function()
+	ApplyBackdrop(clearBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
+	clearBtnText:SetTextColor(unpack(C_TEXT))
+	GameTooltip:Hide()
+end)
+clearBtn:SetScript("OnClick", function()
+	if _G.AutoDelete_ClearProcessIgnored then _G.AutoDelete_ClearProcessIgnored() end
+	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+end)
+
+-- Position restoration on first Show. Reads saved per-character coords;
+-- falls back to centered on first run.
+panel:SetScript("OnShow", function(self)
+	local saved = _G.AutoDeleteStatsDB and _G.AutoDeleteStatsDB.processPanel
+	if saved and saved.point then
+		self:ClearAllPoints()
+		self:SetPoint(saved.point, UIParent, saved.relPoint or saved.point,
+			saved.x or 0, saved.y or 0)
+	else
+		self:ClearAllPoints()
+		self:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+	end
+	-- Refresh content. The actual list-population happens in B.3; for now
+	-- this is a no-op gated check.
+	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+end)
+
+-- Toggle entry point. Called from the /del process slash command and the
+-- Tools Card 1 launcher button. Idempotent.
+local function ToggleProcessPanel()
+	if panel:IsShown() then panel:Hide() else panel:Show() end
+end
+
+_G.AutoDelete_ProcessPanel       = panel
+_G.AutoDelete_ProcessPanelScroll = scrollFrame
+_G.AutoDelete_ProcessPanelCount  = footerCount
+_G.AutoDelete_ProcessVisibleRows = PROCESS_VISIBLE_ROWS
+_G.AutoDelete_ProcessRowHeight   = PROCESS_ROW_H
+_G.AutoDelete_ToggleProcessPanel = ToggleProcessPanel
+
+-- ------------------------------------------------------------------
+-- Row pool + RefreshProcessPanel
+-- ------------------------------------------------------------------
+-- Skillet-Classic-style row pool: rows are created on demand and never
+-- destroyed. Anchor chain is "row N below row N-1"; row 1 anchors to
+-- the scroll container's TOPLEFT. The pool persists between Refresh
+-- calls -- only the visible window's row.data fields are rewritten.
+--
+-- Selected row (per action) is tracked in `armed[action]` so that the
+-- yellow tint persists across Refresh redraws.
+
+local rowPool = {}          -- [i] = row frame
+local armed = {}            -- ["disenchant"] = {bag, slot, itemId} or nil
+local lastResults = {}      -- cached ProcessScan result, used by row OnClick
+
+-- Lazy row factory. The first call creates the row; subsequent calls
+-- return the cached frame.
+local function GetOrCreateRow(i)
+	if rowPool[i] then return rowPool[i] end
+	local rowName = "AutoDeleteProcessRow" .. i
+	local row = CreateFrame("Button", rowName, scrollContainer)
+	row:SetSize(PROCESS_PANEL_W - 24, PROCESS_ROW_H)
+	if i == 1 then
+		row:SetPoint("TOPLEFT", scrollContainer, "TOPLEFT", 0, 0)
+	else
+		row:SetPoint("TOPLEFT", rowPool[i - 1], "BOTTOMLEFT", 0, 0)
+	end
+	row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+	-- Backdrop is the armed-row highlight. Hidden by default; toggled
+	-- via row.armedTexture:SetShown() on Refresh. Yellow tint is the
+	-- Skillet/Postal convention for "this is the selected/staged target".
+	local armedTexture = row:CreateTexture(nil, "BACKGROUND")
+	armedTexture:SetAllPoints(row)
+	armedTexture:SetTexture(WHITE8x8)
+	armedTexture:SetVertexColor(C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.18)
+	armedTexture:Hide()
+	row.armedTexture = armedTexture
+
+	-- Hover highlight is a separate, dimmer texture so the armed-row
+	-- color reads correctly even when also hovered.
+	local hoverTexture = row:CreateTexture(nil, "BACKGROUND", nil, 1)
+	hoverTexture:SetAllPoints(row)
+	hoverTexture:SetTexture(WHITE8x8)
+	hoverTexture:SetVertexColor(1, 1, 1, 0.06)
+	hoverTexture:Hide()
+	row.hoverTexture = hoverTexture
+
+	-- Icon column: 18x18 texture left-anchored, 4px inset.
+	local icon = row:CreateTexture(nil, "ARTWORK")
+	icon:SetSize(18, 18)
+	icon:SetPoint("LEFT", row, "LEFT", 6, 0)
+	row.icon = icon
+
+	-- Item-name FontString. Positioned after the icon; truncates with
+	-- ellipsis if the link is too long for the column width.
+	local nameText = row:CreateFontString(nil, "OVERLAY")
+	nameText:SetFont(FONT, 10, "OUTLINE")
+	nameText:SetTextColor(unpack(C_TEXT))
+	nameText:SetPoint("LEFT", icon, "RIGHT", 6, 0)
+	nameText:SetPoint("RIGHT", row, "RIGHT", -80, 0)  -- leave room for action tag
+	nameText:SetJustifyH("LEFT")
+	nameText:SetWordWrap(false)
+	row.nameText = nameText
+
+	-- Action tag (DE / Mill / Prospect / Open). Right-aligned, color
+	-- pulled from PROCESS_ACTIONS in AutoDelete.lua.
+	local actionTag = row:CreateFontString(nil, "OVERLAY")
+	actionTag:SetFont(FONT, 10, "OUTLINE")
+	actionTag:SetPoint("RIGHT", row, "RIGHT", -10, 0)
+	actionTag:SetJustifyH("RIGHT")
+	row.actionTag = actionTag
+
+	-- Hover handlers: show tooltip with the item link details + the
+	-- secondary "click to arm / right-click to ignore" hint.
+	row:SetScript("OnEnter", function(self)
+		self.hoverTexture:Show()
+		if self._entry and self._entry.link then
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			GameTooltip:SetHyperlink(self._entry.link)
+			GameTooltip:AddLine(" ", 1, 1, 1)
+			GameTooltip:AddLine("|cff00ff00Left-click|r to arm this item for the action's keybind.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:AddLine("|cffff8000Right-click|r to ignore this item on this character.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end
+	end)
+	row:SetScript("OnLeave", function(self)
+		self.hoverTexture:Hide()
+		GameTooltip:Hide()
+	end)
+
+	-- Click dispatch. Left arms, right ignores. The button-arg form
+	-- (RegisterForClicks("LeftButtonUp", "RightButtonUp") + OnClick
+	-- receives the button name) is the Postal/Bagnon idiom.
+	row:SetScript("OnClick", function(self, mouseButton)
+		local entry = self._entry
+		if not entry then return end
+		if mouseButton == "RightButton" then
+			if _G.AutoDelete_SetProcessIgnored then
+				_G.AutoDelete_SetProcessIgnored(entry.itemId, true)
+			end
+			if _G.AutoDelete_RefreshProcessPanel then
+				_G.AutoDelete_RefreshProcessPanel()
+			end
+			return
+		end
+		-- Left-click: arm the secure-button macrotext for this action.
+		if InCombatLockdown and InCombatLockdown() then
+			print("|cffff8000[AutoDelete]|r Can't arm a target in combat.")
+			return
+		end
+		if _G.AutoDelete_ProcessArm then
+			local ok = _G.AutoDelete_ProcessArm(entry.action, entry.bag, entry.slot)
+			if ok then
+				armed[entry.action] = {
+					bag = entry.bag, slot = entry.slot, itemId = entry.itemId
+				}
+				if _G.AutoDelete_RefreshProcessPanel then
+					_G.AutoDelete_RefreshProcessPanel()
+				end
+			end
+		end
+	end)
+
+	rowPool[i] = row
+	return row
+end
+
+-- Returns true if this entry is the currently-armed target for its
+-- action. Compared by itemId+bag+slot rather than table identity since
+-- armed[] is rewritten on every arm and ProcessScan returns fresh tables.
+local function IsArmed(entry)
+	local a = armed[entry.action]
+	if not a then return false end
+	return a.bag == entry.bag and a.slot == entry.slot and a.itemId == entry.itemId
+end
+
+-- The actual list refresh. Called from OnShow, from BAG_UPDATE hook in
+-- B.4, after a Clear Ignored / Arm / Ignore action, and from the scroll
+-- handler. Cheap when the panel is hidden (early-returns).
+local function RefreshProcessPanel()
+	if not panel:IsShown() then return end
+	local profile = nil
+	if _G.AutoDelete_GetCachedProfile then
+		profile = _G.AutoDelete_GetCachedProfile()
+	end
+	local scan = _G.AutoDelete_ProcessScan
+	local results = (scan and profile) and scan(profile) or {}
+	lastResults = results
+
+	local actionsTable = _G.AutoDelete_PROCESS_ACTIONS or {}
+	local visible = PROCESS_VISIBLE_ROWS
+	local total = #results
+
+	FauxScrollFrame_Update(scrollFrame, total, visible, PROCESS_ROW_H)
+	local offset = FauxScrollFrame_GetOffset(scrollFrame)
+
+	for i = 1, visible do
+		local row = GetOrCreateRow(i)
+		local entry = results[i + offset]
+		if entry then
+			-- Item icon. GetItemInfo's 10th return is the texture path.
+			local _, _, _, _, _, _, _, _, _, texture = GetItemInfo(entry.link)
+			row.icon:SetTexture(texture or "Interface\\Icons\\INV_Misc_QuestionMark")
+			row.nameText:SetText(entry.link)
+			local meta = actionsTable[entry.action]
+			if meta then
+				row.actionTag:SetText(meta.label)
+				row.actionTag:SetTextColor(unpack(meta.color))
+			else
+				row.actionTag:SetText("?")
+				row.actionTag:SetTextColor(0.55, 0.55, 0.55, 1)
+			end
+			row._entry = entry
+			if IsArmed(entry) then
+				row.armedTexture:Show()
+			else
+				row.armedTexture:Hide()
+			end
+			row:Show()
+		else
+			row._entry = nil
+			row:Hide()
+		end
+	end
+
+	-- Footer count: items shown + ignored. Reads ignored count via the
+	-- exposed table from AutoDelete.lua's GetProcessIgnoredTable.
+	local ignoredCount = 0
+	if _G.AutoDeleteStatsDB and _G.AutoDeleteStatsDB.processIgnored then
+		for _ in pairs(_G.AutoDeleteStatsDB.processIgnored) do
+			ignoredCount = ignoredCount + 1
+		end
+	end
+	if ignoredCount > 0 then
+		footerCount:SetText(total .. " items, " .. ignoredCount .. " ignored")
+	else
+		footerCount:SetText(total .. " items")
+	end
+end
+
+_G.AutoDelete_RefreshProcessPanel = RefreshProcessPanel
+
+end  -- end of Process Bags Panel `do` block
+
+-- ============================================================================
 -- Build UI
 -- ============================================================================
 
@@ -1259,12 +1668,70 @@ local function BuildUI(self)
 	local tCard3 = MakeToolsCard((cardW + CARD_GAP) * 2)
 
 	-- Tools Card 1: reserved slot. One-Key Disenchant lived here until it
-	-- migrated to the Keybinds tab alongside One-Key Open. Holds a centered
-	-- placeholder so the empty card reads as intentional rather than broken;
-	-- the next tools feature lands here.
-	local tCard1Placeholder = MakeText(tCard1, 11, C_ACCENT, "OUTLINE")
-	tCard1Placeholder:SetPoint("CENTER", tCard1, "CENTER", 0, 0)
-	tCard1Placeholder:SetText("Coming Soon!")
+	-- Tools Card 1: Process Bags launcher. Opens the standalone Process
+	-- Bags panel (built above this scope, after the main settings frame).
+	-- Card shows a title, a count summary, and a launch button. The
+	-- count refreshes on panel Refresh and on BAG_UPDATE via the hook
+	-- registered at the bottom of this file.
+	local tCard1Title = MakeText(tCard1, 11, C_ACCENT, "OUTLINE")
+	tCard1Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+	tCard1Title:SetText("Process Bags")
+
+	-- Count line: "X items eligible: A DE, B Mill, C Prospect, D Open".
+	-- 9pt so we can show the full breakdown without truncating on the
+	-- 175 px card width.
+	local processCount = MakeText(tCard1, 9, C_DIM)
+	processCount:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+	processCount:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -24)
+	processCount:SetJustifyH("LEFT")
+	processCount:SetWordWrap(true)
+	processCount:SetText("...")
+	self._processCount = processCount
+
+	-- Launch button. Hover state matches the rest of the panel's button
+	-- conventions (accent fill on hover, dark text). Click toggles the
+	-- standalone Process Bags panel.
+	local launchBtn = CreateFrame("Button", nil, tCard1)
+	launchBtn:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	launchBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -64)
+	ApplyBackdrop(launchBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
+	local launchBtnText = launchBtn:CreateFontString(nil, "OVERLAY")
+	launchBtnText:SetFont(FONT, 11, "OUTLINE")
+	launchBtnText:SetTextColor(unpack(C_TEXT))
+	launchBtnText:SetPoint("CENTER")
+	launchBtnText:SetText("Open Panel")
+	launchBtn:SetScript("OnEnter", function()
+		ApplyBackdrop(launchBtn, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.85 }, C_ACCENT)
+		launchBtnText:SetTextColor(0.05, 0.05, 0.05, 1)
+	end)
+	launchBtn:SetScript("OnLeave", function()
+		ApplyBackdrop(launchBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
+		launchBtnText:SetTextColor(unpack(C_TEXT))
+	end)
+	launchBtn:SetScript("OnClick", function()
+		if _G.AutoDelete_ToggleProcessPanel then _G.AutoDelete_ToggleProcessPanel() end
+	end)
+
+	-- Pulls the live counts from AutoDelete_ProcessScanCounts and paints
+	-- the count line. Called from Refresh path and from BAG_UPDATE hook.
+	function self:_refreshProcessCount()
+		if not self._processCount then return end
+		local getter = _G.AutoDelete_ProcessScanCounts
+		if not getter then return end
+		local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
+		local c = getter(profile)
+		if not c or c.total == 0 then
+			self._processCount:SetText("No eligible items")
+			return
+		end
+		-- Compact breakdown: only show action types with non-zero counts.
+		local parts = {}
+		if c.disenchant > 0 then table.insert(parts, c.disenchant .. " DE") end
+		if c.mill       > 0 then table.insert(parts, c.mill       .. " Mill") end
+		if c.prospect   > 0 then table.insert(parts, c.prospect   .. " Prospect") end
+		if c.open       > 0 then table.insert(parts, c.open       .. " Open") end
+		self._processCount:SetText(c.total .. " items: " .. table.concat(parts, ", "))
+	end
 
 	-- Tools Card 2: Affix Protection. Same density as Card 1: a small
 	-- section title at top, two main toggles (using shorter labels so
@@ -3835,6 +4302,9 @@ local function BuildUI(self)
 			self._openKeyRow:_refresh()
 		end
 		if self._refreshOpenStatus then self:_refreshOpenStatus() end
+
+		-- Tools Card 1: Process Bags count summary.
+		if self._refreshProcessCount then self:_refreshProcessCount() end
 
 		-- Keybinds tab: Mill (Inscription)
 		if self._tglMill then self._tglMill:SetChecked(p.millEnabled) end

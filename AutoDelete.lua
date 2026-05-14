@@ -2695,6 +2695,10 @@ RefreshCachedProfile = function()
 	cachedProfile = GetActiveProfile(db)
 end
 _G.AutoDelete_RefreshCachedProfile = RefreshCachedProfile
+-- Read-only accessor for the cached profile. Used by the Process Bags
+-- panel (Options.lua) to scan bags without re-reading the DB on every
+-- refresh.
+_G.AutoDelete_GetCachedProfile = function() return cachedProfile end
 
 -- ============================================================================
 -- Auto-Add Equipped (settings.autoAddEquipped)
@@ -4514,6 +4518,16 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 	if _G.AutoDelete_UpdateOpenButton        then _G.AutoDelete_UpdateOpenButton() end
 	if _G.AutoDelete_UpdateMillButton        then _G.AutoDelete_UpdateMillButton() end
 	if _G.AutoDelete_UpdateProspectButton    then _G.AutoDelete_UpdateProspectButton() end
+
+	-- Refresh the Process Bags panel if it's open. RefreshProcessPanel
+	-- itself early-returns when the panel is hidden, so this is cheap.
+	-- Also update the Tools Card 1 count line on the settings panel if
+	-- the user has it open.
+	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+	local optPanel = _G.AutoDeleteOptionsPanel
+	if optPanel and optPanel.IsShown and optPanel:IsShown() and optPanel._refreshProcessCount then
+		optPanel:_refreshProcessCount()
+	end
 	-- Bag-space warning. Edge-triggered so we print at most once per
 	-- "fell below threshold" event, then re-arm after slots rise above it.
 	-- Defensive nil-check: ComputeTotalFreeSlots is forward-declared and
@@ -5558,6 +5572,14 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		_G.AutoDeleteDB = _G.AutoDeleteDB or {}
 		_G.AutoDeleteDB.welcomeDismissed = false
 		ShowWelcomePopup()
+		return
+	end
+	if arg == "process" then
+		-- Toggle the Process Bags standalone panel. Same effect as clicking
+		-- the "Open Panel" button on Tools tab Card 1.
+		if _G.AutoDelete_ToggleProcessPanel then
+			_G.AutoDelete_ToggleProcessPanel()
+		end
 		return
 	end
 	if arg == "debug" then
