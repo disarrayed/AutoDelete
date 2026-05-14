@@ -2878,33 +2878,44 @@ local openLastTarget      = nil    -- { bag, slot, link, name } or nil
 -- bag/slot ascending so two players standing at the same vendor with the
 -- same loot will see the same "next" item. Returns (bag, slot, link, name)
 -- or nil on no match.
+-- Per-slot predicate. Returns true if the slot holds an item that the
+-- One-Key Open feature should target. Profile flags gate the answer so
+-- the Process Bags panel can call this with the live profile and get
+-- the same answer the keybind scanner would.
+local function IsOpenable(profile, bag, slot)
+	if not profile or not profile.autoOpenEnabled then return false end
+	local link = GetContainerItemLink(bag, slot)
+	if not link then return false end
+	local id = GetItemIDFromLink(link)
+	if not id then return false end
+	local allow = AUTO_OPEN_ALLOW[id]
+	if allow == nil then return false end
+	-- Lock check: items with allow==true bypass it; items with allow==false
+	-- are skipped while still locked. The autoOpenIncludeLocked toggle gates
+	-- whether locked-tier items are considered at all.
+	if allow == true then return true end
+	if not profile.autoOpenIncludeLocked then return false end
+	return not IsItemLocked(bag, slot)
+end
+
 local function FindNextOpenable(profile)
 	if not profile or not profile.autoOpenEnabled then return nil end
 	for bag = 0, NUM_BAG_SLOTS do
 		local slots = GetContainerNumSlots(bag) or 0
 		for slot = 1, slots do
-			local link = GetContainerItemLink(bag, slot)
-			if link then
-				local id = GetItemIDFromLink(link)
-				local allow = id and AUTO_OPEN_ALLOW[id]
-				if allow ~= nil then
-					-- Lock check: items with allow==true bypass it; items
-					-- with allow==false are skipped while still locked.
-					-- The autoOpenIncludeLocked toggle gates whether we
-					-- even consider locked-tier items at all (some users
-					-- want to keep junkboxes around for selling).
-					local lockedOk = (allow == true) or
-						(profile.autoOpenIncludeLocked and not IsItemLocked(bag, slot))
-					if lockedOk then
-						local name = GetItemInfo(link) or ("item:" .. (id or "?"))
-						return bag, slot, link, name
-					end
-				end
+			if IsOpenable(profile, bag, slot) then
+				local link = GetContainerItemLink(bag, slot)
+				local name = GetItemInfo(link) or "?"
+				return bag, slot, link, name
 			end
 		end
 	end
 	return nil
 end
+
+-- Export so the Process Bags aggregator can call this predicate alongside
+-- the disenchant / mill / prospect predicates exported from their modules.
+_G.AutoDelete_IsOpenable = IsOpenable
 
 -- Writes the macrotext attribute. MUST be out of combat (caller's job to
 -- check). Empty body on no-target so a stale keypress no-ops cleanly
@@ -3150,6 +3161,7 @@ _G.AutoDelete_UpdateMillButton        = UpdateMillButton
 _G.AutoDelete_FlushDeferredMillUpdate = FlushDeferredMillUpdate
 _G.AutoDelete_GetMillStatus           = GetMillStatus
 _G.AutoDelete_RefreshMillKnown        = RefreshMillKnown
+_G.AutoDelete_IsMillable              = IsMillable
 
 end  -- end of One-Key Mill `do` block
 
@@ -3294,6 +3306,7 @@ _G.AutoDelete_UpdateProspectButton        = UpdateProspectButton
 _G.AutoDelete_FlushDeferredProspectUpdate = FlushDeferredProspectUpdate
 _G.AutoDelete_GetProspectStatus           = GetProspectStatus
 _G.AutoDelete_RefreshProspectKnown        = RefreshProspectKnown
+_G.AutoDelete_IsProspectable              = IsProspectable
 
 end  -- end of One-Key Prospect `do` block
 
@@ -3529,8 +3542,9 @@ end
 
 -- Export the accessors the Options UI needs. Single global namespace,
 -- matches the pattern used by _G.AutoDelete_RefreshCachedProfile.
-_G.AutoDelete_GetDisenchantStatus = GetDisenchantStatus
+_G.AutoDelete_GetDisenchantStatus    = GetDisenchantStatus
 _G.AutoDelete_UpdateDisenchantButton = UpdateDisenchantButton
+_G.AutoDelete_IsDisenchantable       = IsDisenchantable
 
 -- (No BINDING_HEADER / BINDING_NAME globals here. Earlier dev iterations
 -- registered the disenchant button via Bindings.xml so it appeared under
@@ -3539,6 +3553,155 @@ _G.AutoDelete_UpdateDisenchantButton = UpdateDisenchantButton
 -- via SaveBindings(GetCurrentBindingSet()). Result: addon stays at two
 -- files, binding still persists across sessions, and users never have
 -- to leave our settings panel to assign a key.)
+
+-- ============================================================================
+-- Process Bags
+-- ============================================================================
+-- Aggregates the four secure-action predicates (Open, Disenchant, Mill,
+-- Prospect) into a single bag walk so the Process Bags panel can render
+-- one row per actionable item. Action precedence is gear-first (disenchant)
+-- then crafting (mill, prospect) then container (open) -- in practice
+-- each item satisfies at most one predicate so order rarely matters.
+--
+-- Ignored items are stored per-character in AutoDeleteStatsDB.processIgnored
+-- as {[itemId] = true}. Stats DB is the right home because:
+--   (1) it's already declared SavedVariablesPerCharacter in the TOC, and
+--   (2) ignore decisions are personal to that character ("never disenchant
+--       this transmog piece I keep on my mage"), not a profile preference
+--       that should follow when copying a profile to an alt.
+
+local PROCESS_ACTIONS = {
+	disenchant = { label = "DE",       color = {0.55, 0.45, 0.85, 1} },
+	mill       = { label = "Mill",     color = {0.45, 0.85, 0.55, 1} },
+	prospect   = { label = "Prospect", color = {0.85, 0.65, 0.30, 1} },
+	open       = { label = "Open",     color = {0.45, 0.75, 0.95, 1} },
+}
+
+local function GetProcessIgnoredTable()
+	_G.AutoDeleteStatsDB = _G.AutoDeleteStatsDB or {}
+	_G.AutoDeleteStatsDB.processIgnored = _G.AutoDeleteStatsDB.processIgnored or {}
+	return _G.AutoDeleteStatsDB.processIgnored
+end
+
+local function IsProcessIgnored(itemId)
+	if not itemId then return false end
+	return GetProcessIgnoredTable()[itemId] == true
+end
+
+local function SetProcessIgnored(itemId, ignored)
+	if not itemId then return end
+	local t = GetProcessIgnoredTable()
+	if ignored then t[itemId] = true else t[itemId] = nil end
+end
+
+local function ClearProcessIgnored()
+	local t = GetProcessIgnoredTable()
+	for k in pairs(t) do t[k] = nil end
+end
+
+-- Walks bags once, returns a list of actionable items. Each entry:
+--   { bag, slot, itemId, link, name, action }
+-- action is one of the keys in PROCESS_ACTIONS. Caller renders the list
+-- in returned order (bag/slot ascending = deterministic across reloads).
+local function ProcessScan(profile)
+	local results = {}
+	if not profile then return results end
+	local ignored = GetProcessIgnoredTable()
+
+	local isDisenchantable = _G.AutoDelete_IsDisenchantable
+	local isMillable       = _G.AutoDelete_IsMillable
+	local isProspectable   = _G.AutoDelete_IsProspectable
+	local isOpenable       = _G.AutoDelete_IsOpenable
+
+	for bag = 0, NUM_BAG_SLOTS do
+		local slots = GetContainerNumSlots(bag) or 0
+		for slot = 1, slots do
+			local link = GetContainerItemLink(bag, slot)
+			if link then
+				local id = GetItemIDFromLink(link)
+				if id and not ignored[id] then
+					local action
+					if isDisenchantable and isDisenchantable(profile, bag, slot) then
+						action = "disenchant"
+					elseif isMillable and isMillable(profile, bag, slot) then
+						action = "mill"
+					elseif isProspectable and isProspectable(profile, bag, slot) then
+						action = "prospect"
+					elseif isOpenable and isOpenable(profile, bag, slot) then
+						action = "open"
+					end
+					if action then
+						local name = GetItemInfo(link) or "?"
+						table.insert(results, {
+							bag    = bag,
+							slot   = slot,
+							itemId = id,
+							link   = link,
+							name   = name,
+							action = action,
+						})
+					end
+				end
+			end
+		end
+	end
+	return results
+end
+
+-- Returns counts: { total = N, disenchant = N, mill = N, prospect = N, open = N }
+-- Used by the Tools Card 1 launcher's status line.
+local function ProcessScanCounts(profile)
+	local counts = { total = 0, disenchant = 0, mill = 0, prospect = 0, open = 0 }
+	for _, entry in ipairs(ProcessScan(profile)) do
+		counts.total = counts.total + 1
+		counts[entry.action] = (counts[entry.action] or 0) + 1
+	end
+	return counts
+end
+
+-- Arming: writes the macrotext for a single action's secure button to
+-- point at the chosen (bag, slot). Same hardware-event-required pattern;
+-- the user still presses the bound key to fire. Returns true if the arm
+-- succeeded (false if in combat -- caller can decide to surface a
+-- "armed will apply post-combat" message, but we don't queue here).
+local function ProcessArm(action, bag, slot)
+	if InCombatLockdown and InCombatLockdown() then return false end
+	local btnName
+	if     action == "disenchant" then btnName = "AutoDeleteDisenchantButton"
+	elseif action == "mill"       then btnName = "AutoDeleteMillButton"
+	elseif action == "prospect"   then btnName = "AutoDeleteProspectButton"
+	elseif action == "open"       then btnName = "AutoDeleteOpenButton"
+	else return false end
+	local btn = _G[btnName]
+	if not btn then return false end
+	if bag and slot then
+		btn:SetAttribute("macrotext", "/use " .. bag .. " " .. slot)
+		-- Disenchant / Mill / Prospect need the spell cast first. Detect
+		-- those by name and prepend /cast <spell> so the keypress fires
+		-- the correct two-step.
+		if action == "disenchant" then
+			btn:SetAttribute("macrotext", "/cast " .. GetSpellInfo(13262) ..
+				"\n/use " .. bag .. " " .. slot)
+		elseif action == "mill" then
+			btn:SetAttribute("macrotext", "/cast " .. GetSpellInfo(51005) ..
+				"\n/use " .. bag .. " " .. slot)
+		elseif action == "prospect" then
+			btn:SetAttribute("macrotext", "/cast " .. GetSpellInfo(31252) ..
+				"\n/use " .. bag .. " " .. slot)
+		end
+	else
+		btn:SetAttribute("macrotext", "")
+	end
+	return true
+end
+
+_G.AutoDelete_ProcessScan         = ProcessScan
+_G.AutoDelete_ProcessScanCounts   = ProcessScanCounts
+_G.AutoDelete_ProcessArm          = ProcessArm
+_G.AutoDelete_IsProcessIgnored    = IsProcessIgnored
+_G.AutoDelete_SetProcessIgnored   = SetProcessIgnored
+_G.AutoDelete_ClearProcessIgnored = ClearProcessIgnored
+_G.AutoDelete_PROCESS_ACTIONS     = PROCESS_ACTIONS
 
 local scanner = CreateFrame("Frame")
 scanner:RegisterEvent("ADDON_LOADED")
