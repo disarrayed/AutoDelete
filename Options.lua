@@ -882,7 +882,13 @@ local function BuildUI(self)
 	-- Content area: 82px tall (fits 4 cards at cardH=74 + 8px buffer)
 	-- Inner padding: 6px on each side, 6px gap between strip and content
 	local TAB_STRIP_H = 26
-	local CONTENT_AREA_H = 100   -- grown from 82 to fit Tracking tab's Reset button below the rows
+	-- Grown to fit the Keybinds tab's 2x2 grid (Open / Disenchant / Mill /
+	-- Prospect). Other tabs gain ~96px of unused space at the bottom; this
+	-- is cosmetic and will be addressed in a follow-up by either per-tab
+	-- height switching or moving the lower-density tabs to vertical card
+	-- stacks. For now the tradeoff is: visible breakage on Keybinds (fixed)
+	-- vs visible slack on smaller tabs (acceptable).
+	local CONTENT_AREA_H = 196   -- 92 (row 1) + 8 (row gap) + 92 (row 2) + 4 (bottom slack)
 	local TAB_INNER_PAD = 6
 	local TAB_STRIP_GAP = 6
 	-- Total tab container height: strip + gap + content + inner padding
@@ -1528,112 +1534,127 @@ local function BuildUI(self)
 		return row
 	end
 
-	-- Keybinds tab uses the same 3-card grid as Tools (cardW from above).
-	local function MakeKeybindsCard(xOff)
+	-- Keybinds tab: 2x2 grid. Wider cards (cardW * 1.5-ish, computed from
+	-- a 2-column division) so the Disenchant card has horizontal room for
+	-- its filter rows. Row 1 holds the gear-touching features (Open,
+	-- Disenchant). Row 2 holds the profession-cast features (Mill, Prospect)
+	-- which are simpler (no per-item filters since every herb mills and
+	-- every ore prospects).
+	local keybindsCardW = math.floor((genContentW - CARD_GAP) / 2)
+	local keybindsRow2Y = -(4 + cardH + 8)  -- card top is -4, +cardH, +8px gap
+
+	local function MakeKeybindsCard(xOff, yOff)
 		local card = CreateFrame("Frame", nil, keybindsPage)
-		card:SetSize(cardW, cardH)
-		card:SetPoint("TOPLEFT", xOff, -4)
+		card:SetSize(keybindsCardW, cardH)
+		card:SetPoint("TOPLEFT", xOff, yOff)
 		card:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
 		card:SetBackdropColor(0.04, 0.04, 0.04, 1)
 		card:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)
 		return card
 	end
 
-	local kCard1 = MakeKeybindsCard(0)
-	local kCard2 = MakeKeybindsCard(cardW + CARD_GAP)
-	local kCard3 = MakeKeybindsCard((cardW + CARD_GAP) * 2)
+	local kCard1 = MakeKeybindsCard(0,                          -4)              -- Open
+	local kCard2 = MakeKeybindsCard(keybindsCardW + CARD_GAP,   -4)              -- Disenchant
+	local kCard3 = MakeKeybindsCard(0,                          keybindsRow2Y)   -- Mill
+	local kCard4 = MakeKeybindsCard(keybindsCardW + CARD_GAP,   keybindsRow2Y)   -- Prospect
 
-	-- Keybinds Card 1: One-Key Open. Same vertical rhythm as Tools Card 2
-	-- (Affix Protection): section title, main toggle, sub-toggle, then
-	-- the key-capture row, then the status line.
+	-- ------------------------------------------------------------------
+	-- Card 1: One-Key Open
+	-- ------------------------------------------------------------------
+	-- Title at top, master toggle below, sub-toggle below that (correctly
+	-- offset so it doesn't overlap the parent toggle's hit-row), then a
+	-- key-capture row, then a status line. The card is now ~257px wide
+	-- so everything has horizontal breathing room.
 	local kCard1Title = MakeText(kCard1, 11, C_ACCENT, "OUTLINE")
 	kCard1Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
 	kCard1Title:SetText("One-Key Open")
 
 	local tglOpenEnabled = MakeToggle(kCard1, "Enabled", C_ACCENT,
 		"Wires the next openable item in your bags (clams, coin purses, unlocked junkboxes, eggs, etc.) to the key you bind below. Pressing the key fires /use on that bag slot. Auto-retargets after each open. WoW 3.3.5a requires a real keypress for these calls; no automatic scan can do this for you.")
-	tglOpenEnabled:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
-	tglOpenEnabled:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	tglOpenEnabled:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -22)
+	tglOpenEnabled:SetSize(keybindsCardW - CARD_INNER_PAD_X * 2, 18)
 	self._tglOpenEnabled = tglOpenEnabled
 
+	-- y=-44 puts the sub-toggle CLEANLY below the parent toggle's
+	-- y=-22-to-y=-40 span. The previous offset of -28 collided with the
+	-- parent toggle and rendered the "Enabled" label garbled.
 	local tglOpenIncludeLocked = MakeSubToggle(kCard1, "Include locked-tier", C_DK_RED)
-	tglOpenIncludeLocked:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 22))
-	tglOpenIncludeLocked:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
+	tglOpenIncludeLocked:SetPoint("TOPLEFT", SUBTGL_INDENT, -44)
+	tglOpenIncludeLocked:SetWidth(keybindsCardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglOpenIncludeLocked = tglOpenIncludeLocked
 
-	-- Key capture row, full card width, sits between sub-toggle and status.
 	local openKeyRow = MakeKeyCaptureRow(kCard1, "CLICK AutoDeleteOpenButton:LeftButton",
-		cardW - CARD_INNER_PAD_X * 2)
-	openKeyRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
+		keybindsCardW - CARD_INNER_PAD_X * 2)
+	openKeyRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -64)
 	self._openKeyRow = openKeyRow
 
-	-- Status line at the bottom of the card. Pushed from AutoDelete.lua's
-	-- UpdateOpenButton via panel:_refreshOpenStatus().
 	local openStatus = MakeText(kCard1, 9, C_DIM)
-	openStatus:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 70))
-	openStatus:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 70))
+	openStatus:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -82)
+	openStatus:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -82)
 	openStatus:SetJustifyH("LEFT")
 	openStatus:SetWordWrap(false)
 	openStatus:SetText("")
 	self._openStatus = openStatus
 
-	-- Keybinds Card 2: One-Key Disenchant. Migrated from the Tools tab so
-	-- all secure-button features live together. Layout is dense because we
-	-- want six concerns visible at once (master toggle, bind-state filter,
-	-- quality filter, iLvl filter, key capture, status). Two inline rows
-	-- of small sub-toggles do the bulk of the filter UI; iLvl and key
-	-- share one row split into two columns.
+	-- ------------------------------------------------------------------
+	-- Card 2: One-Key Disenchant
+	-- ------------------------------------------------------------------
+	-- Wider footprint lets all five filter sub-toggles sit on a single
+	-- row, and the iLvl inputs share a row with the key-capture button
+	-- without collision. Layout y-offsets:
+	--   -6    title
+	--   -22   master Enabled toggle (full width)
+	--   -42   bind + quality filter sub-toggles inline
+	--   -62   iLvl inputs + key-capture row inline
+	--   -82   status line
 	local kCard2Title = MakeText(kCard2, 11, C_ACCENT, "OUTLINE")
 	kCard2Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
 	kCard2Title:SetText("One-Key Disenchant")
 
 	local tglDisenchant = MakeToggle(kCard2, "Enabled", C_ACCENT,
 		"Wires the next disenchantable item in your bags to the key you bind below. Pressing the key fires /cast Disenchant followed by /use on the targeted bag slot. Auto-retargets after each cast. Requires the Enchanting profession.")
-	tglDisenchant:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -20)
-	tglDisenchant:SetSize(cardW - CARD_INNER_PAD_X * 2, 18)
+	tglDisenchant:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -22)
+	tglDisenchant:SetSize(keybindsCardW - CARD_INNER_PAD_X * 2, 18)
 	self._tglDisenchant = tglDisenchant
 
-	-- Bind-state filter row: 2 inline sub-toggles. Default BoP on, BoE off
-	-- since most users want to clear soulbound gear without touching BoEs
-	-- that might still go to AH or alts.
-	local bindRowY = -40
+	-- Filter row: BoP + BoE then a gap then Unc + Rare + Epic. No "Bind:"
+	-- or "Quality:" labels because spacing groups them visually and we
+	-- need every horizontal pixel for the toggles themselves.
+	local DE_FILTER_Y = -42
+	local DE_TGL_W = 50  -- per-toggle width
+	local function PlaceFilterToggle(toggle, x)
+		toggle:SetPoint("TOPLEFT", x, DE_FILTER_Y)
+		toggle:SetWidth(DE_TGL_W)
+	end
+
 	local tglDisenchantBoP = MakeSubToggle(kCard2, "BoP", C_DK_RED)
-	tglDisenchantBoP:SetPoint("TOPLEFT", CARD_INNER_PAD_X, bindRowY)
-	tglDisenchantBoP:SetWidth(50)
+	PlaceFilterToggle(tglDisenchantBoP, CARD_INNER_PAD_X)
 	self._tglDisenchantBoP = tglDisenchantBoP
 
 	local tglDisenchantBoE = MakeSubToggle(kCard2, "BoE", C_DK_RED)
-	tglDisenchantBoE:SetPoint("TOPLEFT", CARD_INNER_PAD_X + 55, bindRowY)
-	tglDisenchantBoE:SetWidth(50)
+	PlaceFilterToggle(tglDisenchantBoE, CARD_INNER_PAD_X + DE_TGL_W)
 	self._tglDisenchantBoE = tglDisenchantBoE
 
-	-- Quality filter row: 3 inline sub-toggles. Default Uncommon on (most
-	-- common case), Rare and Epic off (those are usually worth equipping
-	-- or selling instead of disenchanting at low iLvl).
-	local qualityRowY = -56
+	-- Quality block: shifted right by 2*DE_TGL_W (BoP/BoE block) + 16px gap.
+	local QUALITY_X = CARD_INNER_PAD_X + DE_TGL_W * 2 + 16
 	local tglDisenchantUnc = MakeSubToggle(kCard2, "Unc", C_DK_RED)
-	tglDisenchantUnc:SetPoint("TOPLEFT", CARD_INNER_PAD_X, qualityRowY)
-	tglDisenchantUnc:SetWidth(44)
+	PlaceFilterToggle(tglDisenchantUnc, QUALITY_X)
 	self._tglDisenchantUnc = tglDisenchantUnc
 
 	local tglDisenchantRare = MakeSubToggle(kCard2, "Rare", C_DK_RED)
-	tglDisenchantRare:SetPoint("TOPLEFT", CARD_INNER_PAD_X + 48, qualityRowY)
-	tglDisenchantRare:SetWidth(50)
+	PlaceFilterToggle(tglDisenchantRare, QUALITY_X + DE_TGL_W)
 	self._tglDisenchantRare = tglDisenchantRare
 
 	local tglDisenchantEpic = MakeSubToggle(kCard2, "Epic", C_DK_RED)
-	tglDisenchantEpic:SetPoint("TOPLEFT", CARD_INNER_PAD_X + 102, qualityRowY)
-	tglDisenchantEpic:SetWidth(48)
+	PlaceFilterToggle(tglDisenchantEpic, QUALITY_X + DE_TGL_W * 2)
 	self._tglDisenchantEpic = tglDisenchantEpic
 
-	-- iLvl row: two small numeric inputs side by side under a single "iLvl"
-	-- label. Zero in either box means "no override / no cap" — the floor
-	-- falls back to the per-quality mechanical default (5/55/95), the
-	-- ceiling falls back to "unlimited". A tooltip on the row explains both.
-	local ILVL_ROW_Y = -74
+	-- iLvl + Key row: shared y, iLvl on the left, key-capture on the right.
+	-- Wider card gives both controls room to render without clipping.
+	local DE_INPUTS_Y = -62
 	local ilvlRow = CreateFrame("Frame", nil, kCard2)
-	ilvlRow:SetSize(cardW - CARD_INNER_PAD_X * 2, 16)
-	ilvlRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, ILVL_ROW_Y)
+	ilvlRow:SetSize(110, 16)
+	ilvlRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, DE_INPUTS_Y)
 
 	local ilvlLabel = ilvlRow:CreateFontString(nil, "OVERLAY")
 	ilvlLabel:SetFont(FONT, 10, "OUTLINE")
@@ -1652,11 +1673,9 @@ local function BuildUI(self)
 	end)
 	ilvlRow:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-	-- Two small editboxes. Width tuned so both + a dash + the label fit
-	-- inside the iLvl row without crowding the key-capture row beside it.
 	local function MakeIlvlEdit(parent, x)
 		local box = CreateFrame("Frame", nil, parent)
-		box:SetSize(34, 16)
+		box:SetSize(32, 16)
 		box:SetPoint("LEFT", parent, "LEFT", x, 0)
 		ApplyBackdrop(box, C_DROP_BG, C_DROP_BORDER)
 		box:EnableMouse(true)
@@ -1667,7 +1686,6 @@ local function BuildUI(self)
 			GameTooltip:Show()
 		end)
 		box:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
 		local edit = CreateFrame("EditBox", nil, box)
 		edit:SetFont(FONT, 9, "OUTLINE")
 		edit:SetTextColor(unpack(C_TEXT))
@@ -1682,7 +1700,7 @@ local function BuildUI(self)
 		return edit
 	end
 
-	local ilvlMinEdit = MakeIlvlEdit(ilvlRow, 28)
+	local ilvlMinEdit = MakeIlvlEdit(ilvlRow, 26)
 	self._disenchantIlvlMinEdit = ilvlMinEdit
 	ilvlMinEdit:SetScript("OnEditFocusLost", function(s)
 		local val = tonumber(s:GetText()) or 0
@@ -1697,10 +1715,10 @@ local function BuildUI(self)
 	local ilvlDash = ilvlRow:CreateFontString(nil, "OVERLAY")
 	ilvlDash:SetFont(FONT, 10, "OUTLINE")
 	ilvlDash:SetTextColor(unpack(C_DIM))
-	ilvlDash:SetPoint("LEFT", ilvlRow, "LEFT", 64, 0)
+	ilvlDash:SetPoint("LEFT", ilvlRow, "LEFT", 60, 0)
 	ilvlDash:SetText("-")
 
-	local ilvlMaxEdit = MakeIlvlEdit(ilvlRow, 71)
+	local ilvlMaxEdit = MakeIlvlEdit(ilvlRow, 68)
 	self._disenchantIlvlMaxEdit = ilvlMaxEdit
 	ilvlMaxEdit:SetScript("OnEditFocusLost", function(s)
 		local val = tonumber(s:GetText()) or 0
@@ -1712,32 +1730,74 @@ local function BuildUI(self)
 		if self._refreshDisenchantStatus then self:_refreshDisenchantStatus() end
 	end)
 
-	-- Key capture sits to the right of the iLvl inputs on the same row.
-	-- Width fills the remaining card horizontal space.
+	-- Key capture on the right half of the inputs row. Wider card means
+	-- it gets ~135 px which is plenty for displaying "SHIFT-F12"-style
+	-- combinations.
 	local disenchantKeyRow = MakeKeyCaptureRow(
 		kCard2,
 		"CLICK AutoDeleteDisenchantButton:LeftButton",
-		cardW - CARD_INNER_PAD_X * 2 - 110
+		keybindsCardW - CARD_INNER_PAD_X * 2 - 120
 	)
-	disenchantKeyRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X + 108, ILVL_ROW_Y + 1)
+	disenchantKeyRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X + 118, DE_INPUTS_Y)
 	self._disenchantKeyRow = disenchantKeyRow
 
-	-- Status line tucked at the bottom edge. 9pt so it stays under the 92px
-	-- card height even with the dense rows above. SetWordWrap(false) +
-	-- truncation when an item link is long; the full link is reachable via
-	-- hovering the bag slot itself, so truncation here is acceptable.
 	local disenchantStatus = MakeText(kCard2, 9, C_DIM)
-	disenchantStatus:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -90)
-	disenchantStatus:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -90)
+	disenchantStatus:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -82)
+	disenchantStatus:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -82)
 	disenchantStatus:SetJustifyH("LEFT")
 	disenchantStatus:SetWordWrap(false)
 	disenchantStatus:SetText("")
 	self._disenchantStatus = disenchantStatus
 
-	-- Card 3 reserved for the next secure-button feature we add.
-	local kCard3Placeholder = MakeText(kCard3, 11, C_ACCENT, "OUTLINE")
-	kCard3Placeholder:SetPoint("CENTER", kCard3, "CENTER", 0, 0)
-	kCard3Placeholder:SetText("Coming Soon!")
+	-- ------------------------------------------------------------------
+	-- Shared compact-card builder for Mill + Prospect.
+	-- ------------------------------------------------------------------
+	-- Mill (Inscription) and Prospect (Jewelcrafting) have the same
+	-- minimal control set: a master Enabled toggle, a key-capture row,
+	-- and a status line. No filters because every herb is millable and
+	-- every ore is prospectable; the only gates are "do you know the
+	-- spell" and "is the stack 5+ items", both handled by the module.
+	local function BuildSecureCastCard(card, opts)
+		local title = MakeText(card, 11, C_ACCENT, "OUTLINE")
+		title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+		title:SetText(opts.title)
+
+		local tgl = MakeToggle(card, "Enabled", C_ACCENT, opts.tooltip)
+		tgl:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+		tgl:SetSize(keybindsCardW - CARD_INNER_PAD_X * 2, 18)
+
+		local keyRow = MakeKeyCaptureRow(card, opts.bindingCmd,
+			keybindsCardW - CARD_INNER_PAD_X * 2)
+		keyRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -50)
+
+		local status = MakeText(card, 9, C_DIM)
+		status:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -76)
+		status:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -76)
+		status:SetJustifyH("LEFT")
+		status:SetWordWrap(false)
+		status:SetText("")
+		return tgl, keyRow, status
+	end
+
+	-- Card 3: One-Key Mill (Inscription).
+	local tglMill, millKeyRow, millStatus = BuildSecureCastCard(kCard3, {
+		title      = "One-Key Mill",
+		tooltip    = "Wires the next stack of 5+ herbs in your bags to the key you bind below. Pressing the key casts Milling on that stack. Auto-retargets after each cast. Requires the Inscription profession.",
+		bindingCmd = "CLICK AutoDeleteMillButton:LeftButton",
+	})
+	self._tglMill      = tglMill
+	self._millKeyRow   = millKeyRow
+	self._millStatus   = millStatus
+
+	-- Card 4: One-Key Prospect (Jewelcrafting).
+	local tglProspect, prospectKeyRow, prospectStatus = BuildSecureCastCard(kCard4, {
+		title      = "One-Key Prospect",
+		tooltip    = "Wires the next stack of 5+ ore in your bags to the key you bind below. Pressing the key casts Prospecting on that stack. Auto-retargets after each cast. Requires the Jewelcrafting profession.",
+		bindingCmd = "CLICK AutoDeleteProspectButton:LeftButton",
+	})
+	self._tglProspect    = tglProspect
+	self._prospectKeyRow = prospectKeyRow
+	self._prospectStatus = prospectStatus
 	end  -- end of Keybinds-tab `do` block
 
 	-- ========================================================================
@@ -3386,6 +3446,54 @@ local function BuildUI(self)
 		self._openStatus:SetTextColor(r or 0.55, g or 0.55, b or 0.55)
 	end
 
+	-- Keybinds tab Row 2: Mill (Inscription) and Prospect (Jewelcrafting).
+	-- Both are simple single-toggle features so we factor the handler and
+	-- status-refresher pair into a tiny closure-builder. `field` is the
+	-- profile key, `updateFn` is the AutoDelete.lua exported updater, and
+	-- `statusKey` / `getterKey` plug into the per-feature self fields.
+	local function MakeSecureCastWiring(field, updateGlobalName, getterGlobalName, statusFieldKey, refreshSelfKey)
+		local function OnClickHandler(btn)
+			btn._checked = not btn._checked
+			btn:SetChecked(btn._checked)
+			GetActiveProfile(db)[field] = btn._checked
+			if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+			local up = _G[updateGlobalName]
+			if up then up() end
+			if self[refreshSelfKey] then self[refreshSelfKey](self) end
+		end
+		self[refreshSelfKey] = function(s)
+			local widget = s[statusFieldKey]
+			if not widget then return end
+			local getter = _G[getterGlobalName]
+			if not getter then
+				widget:SetText("...")
+				widget:SetTextColor(0.55, 0.55, 0.55)
+				return
+			end
+			local text, r, g, b = getter()
+			widget:SetText(text or "")
+			widget:SetTextColor(r or 0.55, g or 0.55, b or 0.55)
+		end
+		return OnClickHandler
+	end
+
+	if self._tglMill then
+		self._tglMill:SetScript("OnClick", MakeSecureCastWiring(
+			"millEnabled",
+			"AutoDelete_UpdateMillButton",
+			"AutoDelete_GetMillStatus",
+			"_millStatus",
+			"_refreshMillStatus"))
+	end
+	if self._tglProspect then
+		self._tglProspect:SetScript("OnClick", MakeSecureCastWiring(
+			"prospectEnabled",
+			"AutoDelete_UpdateProspectButton",
+			"AutoDelete_GetProspectStatus",
+			"_prospectStatus",
+			"_refreshProspectStatus"))
+	end
+
 	-- Tools tab: Affix Protection toggles. Same RefreshCachedProfile call
 	-- so the delete scanner and sell loop see the new setting on the next
 	-- tick without waiting for a profile reload.
@@ -3727,6 +3835,20 @@ local function BuildUI(self)
 			self._openKeyRow:_refresh()
 		end
 		if self._refreshOpenStatus then self:_refreshOpenStatus() end
+
+		-- Keybinds tab: Mill (Inscription)
+		if self._tglMill then self._tglMill:SetChecked(p.millEnabled) end
+		if self._millKeyRow and self._millKeyRow._refresh then
+			self._millKeyRow:_refresh()
+		end
+		if self._refreshMillStatus then self:_refreshMillStatus() end
+
+		-- Keybinds tab: Prospect (Jewelcrafting)
+		if self._tglProspect then self._tglProspect:SetChecked(p.prospectEnabled) end
+		if self._prospectKeyRow and self._prospectKeyRow._refresh then
+			self._prospectKeyRow:_refresh()
+		end
+		if self._refreshProspectStatus then self:_refreshProspectStatus() end
 
 		-- Tools tab: Affix Protection
 		tglProtectAffixFromDelete:SetChecked(p.protectAffixFromDelete)

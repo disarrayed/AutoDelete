@@ -162,6 +162,16 @@ local DEFAULT_PROFILE = {
 	disenchantIlvlMin  = 0,
 	disenchantIlvlMax  = 0,
 
+	-- One-Key Mill (Inscription). SecureActionButton + macrotext + user
+	-- keypress, same shape as Disenchant. Targets the next stack of 5+
+	-- herbs in bags (the cast requires a stack of 5 to consume). Skill
+	-- check: character must know Milling (spell 51005).
+	millEnabled = false,
+
+	-- One-Key Prospect (Jewelcrafting). Same shape as Mill but for ore.
+	-- Skill check: character must know Prospecting (spell 31252).
+	prospectEnabled = false,
+
 	-- One-Key Open (Tools tab): wires a SecureActionButton to the next
 	-- openable item in bags so the user can clear clams, lockboxes,
 	-- coin purses, eggs, etc. with one keypress. Architecture mirrors
@@ -2924,6 +2934,302 @@ _G.AutoDelete_GetOpenStatus           = GetOpenStatus
 end  -- end of One-Key Open `do` block
 
 -- ============================================================================
+-- One-Key Mill
+-- ============================================================================
+-- SecureActionButton wired to the next stack of 5+ herbs in bags. User
+-- binds a key in the Keybinds tab; pressing it fires `/cast Milling` +
+-- `/use bag slot` for the staged stack. Same hardware-event-required gate
+-- as One-Key Disenchant; same wrap-in-do-block pattern to stay under Lua
+-- 5.1's main-chunk local cap.
+--
+-- Eligibility (IsMillable):
+--   - Character knows Milling spell (spellbook scan)
+--   - Stack of 5+ in a single slot (Milling consumes 5 per cast)
+--   - itemType == "Trade Goods" and itemSubType == "Herb" per GetItemInfo
+--   - Not on the Keep list, not a quest item
+do
+
+local MILL_SPELL_ID = 51005
+local cachedMillName    = nil
+local cachedMillKnown   = false
+
+local function RefreshMillKnown()
+	cachedMillName = cachedMillName or GetSpellInfo(MILL_SPELL_ID)
+	if not cachedMillName then cachedMillKnown = false; return end
+	local i = 1
+	while true do
+		local name = GetSpellName(i, BOOKTYPE_SPELL)
+		if not name then break end
+		if name == cachedMillName then cachedMillKnown = true; return end
+		i = i + 1
+	end
+	cachedMillKnown = false
+end
+
+local function CharacterCanMill() return cachedMillKnown end
+
+local function IsMillable(profile, bag, slot)
+	local link = GetContainerItemLink(bag, slot)
+	if not link then return false end
+	local id = GetItemIDFromLink(link)
+	if not id then return false end
+	if IsQuestItem and IsQuestItem(bag, slot) then return false end
+	-- Stack-of-5 check: Milling fails to cast otherwise.
+	local _, count = GetContainerItemInfo(bag, slot)
+	if not count or count < 5 then return false end
+	local name, _, _, _, _, itemType, itemSubType = GetItemInfo(link)
+	if not name then return false end
+	if IsWhitelisted(profile, id, name) then return false end
+	-- Herb classification via localized strings. TODO: localize for non-enUS.
+	if itemType ~= "Trade Goods" then return false end
+	if itemSubType ~= "Herb" then return false end
+	return true
+end
+
+local function FindMillTarget(profile)
+	if not profile or not profile.millEnabled then return nil end
+	if not CharacterCanMill() then return nil end
+	for bag = 0, NUM_BAG_SLOTS do
+		local slots = GetContainerNumSlots(bag) or 0
+		for slot = 1, slots do
+			if IsMillable(profile, bag, slot) then
+				local link = GetContainerItemLink(bag, slot)
+				local name = GetItemInfo(link) or "?"
+				return bag, slot, link, name
+			end
+		end
+	end
+	return nil
+end
+
+local millButton          = nil
+local millUpdatePending   = false
+local millLastTarget      = nil
+
+local function ApplyMillMacrotext(bag, slot)
+	if not millButton then return end
+	local name = cachedMillName or "Milling"
+	if bag and slot then
+		millButton:SetAttribute("macrotext",
+			"/cast " .. name .. "\n/use " .. bag .. " " .. slot)
+	else
+		millButton:SetAttribute("macrotext", "")
+	end
+end
+
+local function UpdateMillButton()
+	if not millButton then return end
+	local profile = cachedProfile
+	if not profile or not profile.millEnabled or not CharacterCanMill() then
+		millLastTarget = nil
+		if InCombatLockdown and InCombatLockdown() then
+			millUpdatePending = true
+		else
+			ApplyMillMacrotext(nil, nil)
+		end
+		return
+	end
+	if InCombatLockdown and InCombatLockdown() then
+		millUpdatePending = true
+		return
+	end
+	local bag, slot, link, name = FindMillTarget(profile)
+	if bag and slot then
+		millLastTarget = { bag = bag, slot = slot, link = link, name = name }
+	else
+		millLastTarget = nil
+	end
+	ApplyMillMacrotext(bag, slot)
+	local panel = _G.AutoDeleteOptionsPanel
+	if panel and panel.IsShown and panel:IsShown() and panel._refreshMillStatus then
+		panel:_refreshMillStatus()
+	end
+end
+
+local function GetMillStatus()
+	local profile = cachedProfile
+	if not profile or not profile.millEnabled then
+		return "Disabled", 0.55, 0.55, 0.55
+	end
+	if not CharacterCanMill() then
+		return "Requires Inscription", 1.0, 0.3, 0.3
+	end
+	if millLastTarget and millLastTarget.link then
+		return "Next: " .. millLastTarget.link, 0.7, 0.85, 1.0
+	end
+	return "No millable herbs in bags", 0.55, 0.55, 0.55
+end
+
+local function EnsureMillButton()
+	if millButton then return millButton end
+	millButton = CreateFrame("Button", "AutoDeleteMillButton", UIParent,
+		"SecureActionButtonTemplate")
+	millButton:Hide()
+	millButton:RegisterForClicks("AnyDown")
+	millButton:SetAttribute("type", "macro")
+	millButton:SetAttribute("macrotext", "")
+	return millButton
+end
+
+local function FlushDeferredMillUpdate()
+	if not millUpdatePending then return end
+	millUpdatePending = false
+	UpdateMillButton()
+end
+
+_G.AutoDelete_EnsureMillButton        = EnsureMillButton
+_G.AutoDelete_UpdateMillButton        = UpdateMillButton
+_G.AutoDelete_FlushDeferredMillUpdate = FlushDeferredMillUpdate
+_G.AutoDelete_GetMillStatus           = GetMillStatus
+_G.AutoDelete_RefreshMillKnown        = RefreshMillKnown
+
+end  -- end of One-Key Mill `do` block
+
+-- ============================================================================
+-- One-Key Prospect
+-- ============================================================================
+-- Identical architecture to One-Key Mill, but for Jewelcrafting's
+-- Prospecting cast on stacks of 5+ ore. Profession spell ID 31252.
+
+do
+
+local PROSPECT_SPELL_ID = 31252
+local cachedProspectName  = nil
+local cachedProspectKnown = false
+
+local function RefreshProspectKnown()
+	cachedProspectName = cachedProspectName or GetSpellInfo(PROSPECT_SPELL_ID)
+	if not cachedProspectName then cachedProspectKnown = false; return end
+	local i = 1
+	while true do
+		local name = GetSpellName(i, BOOKTYPE_SPELL)
+		if not name then break end
+		if name == cachedProspectName then cachedProspectKnown = true; return end
+		i = i + 1
+	end
+	cachedProspectKnown = false
+end
+
+local function CharacterCanProspect() return cachedProspectKnown end
+
+local function IsProspectable(profile, bag, slot)
+	local link = GetContainerItemLink(bag, slot)
+	if not link then return false end
+	local id = GetItemIDFromLink(link)
+	if not id then return false end
+	if IsQuestItem and IsQuestItem(bag, slot) then return false end
+	local _, count = GetContainerItemInfo(bag, slot)
+	if not count or count < 5 then return false end
+	local name, _, _, _, _, itemType, itemSubType = GetItemInfo(link)
+	if not name then return false end
+	if IsWhitelisted(profile, id, name) then return false end
+	if itemType ~= "Trade Goods" then return false end
+	-- "Metal & Stone" is the localized enUS string for the ore subtype.
+	-- TODO: localize for non-enUS.
+	if itemSubType ~= "Metal & Stone" then return false end
+	return true
+end
+
+local function FindProspectTarget(profile)
+	if not profile or not profile.prospectEnabled then return nil end
+	if not CharacterCanProspect() then return nil end
+	for bag = 0, NUM_BAG_SLOTS do
+		local slots = GetContainerNumSlots(bag) or 0
+		for slot = 1, slots do
+			if IsProspectable(profile, bag, slot) then
+				local link = GetContainerItemLink(bag, slot)
+				local name = GetItemInfo(link) or "?"
+				return bag, slot, link, name
+			end
+		end
+	end
+	return nil
+end
+
+local prospectButton          = nil
+local prospectUpdatePending   = false
+local prospectLastTarget      = nil
+
+local function ApplyProspectMacrotext(bag, slot)
+	if not prospectButton then return end
+	local name = cachedProspectName or "Prospecting"
+	if bag and slot then
+		prospectButton:SetAttribute("macrotext",
+			"/cast " .. name .. "\n/use " .. bag .. " " .. slot)
+	else
+		prospectButton:SetAttribute("macrotext", "")
+	end
+end
+
+local function UpdateProspectButton()
+	if not prospectButton then return end
+	local profile = cachedProfile
+	if not profile or not profile.prospectEnabled or not CharacterCanProspect() then
+		prospectLastTarget = nil
+		if InCombatLockdown and InCombatLockdown() then
+			prospectUpdatePending = true
+		else
+			ApplyProspectMacrotext(nil, nil)
+		end
+		return
+	end
+	if InCombatLockdown and InCombatLockdown() then
+		prospectUpdatePending = true
+		return
+	end
+	local bag, slot, link, name = FindProspectTarget(profile)
+	if bag and slot then
+		prospectLastTarget = { bag = bag, slot = slot, link = link, name = name }
+	else
+		prospectLastTarget = nil
+	end
+	ApplyProspectMacrotext(bag, slot)
+	local panel = _G.AutoDeleteOptionsPanel
+	if panel and panel.IsShown and panel:IsShown() and panel._refreshProspectStatus then
+		panel:_refreshProspectStatus()
+	end
+end
+
+local function GetProspectStatus()
+	local profile = cachedProfile
+	if not profile or not profile.prospectEnabled then
+		return "Disabled", 0.55, 0.55, 0.55
+	end
+	if not CharacterCanProspect() then
+		return "Requires Jewelcrafting", 1.0, 0.3, 0.3
+	end
+	if prospectLastTarget and prospectLastTarget.link then
+		return "Next: " .. prospectLastTarget.link, 0.7, 0.85, 1.0
+	end
+	return "No prospectable ore in bags", 0.55, 0.55, 0.55
+end
+
+local function EnsureProspectButton()
+	if prospectButton then return prospectButton end
+	prospectButton = CreateFrame("Button", "AutoDeleteProspectButton", UIParent,
+		"SecureActionButtonTemplate")
+	prospectButton:Hide()
+	prospectButton:RegisterForClicks("AnyDown")
+	prospectButton:SetAttribute("type", "macro")
+	prospectButton:SetAttribute("macrotext", "")
+	return prospectButton
+end
+
+local function FlushDeferredProspectUpdate()
+	if not prospectUpdatePending then return end
+	prospectUpdatePending = false
+	UpdateProspectButton()
+end
+
+_G.AutoDelete_EnsureProspectButton        = EnsureProspectButton
+_G.AutoDelete_UpdateProspectButton        = UpdateProspectButton
+_G.AutoDelete_FlushDeferredProspectUpdate = FlushDeferredProspectUpdate
+_G.AutoDelete_GetProspectStatus           = GetProspectStatus
+_G.AutoDelete_RefreshProspectKnown        = RefreshProspectKnown
+
+end  -- end of One-Key Prospect `do` block
+
+-- ============================================================================
 -- One-Key Disenchant
 -- ============================================================================
 -- A SecureActionButton whose `macrotext` attribute is rewritten by addon code
@@ -2999,12 +3305,15 @@ local function IsDisenchantable(profile, bag, slot)
 	-- Quest items are never targets (consistent with every other auto-rule).
 	if IsQuestItem and IsQuestItem(bag, slot) then return false end
 	-- Keep list wins over disenchant.
-	local name, _, quality, ilvl, _, _, _, _, _, _, _, classId = GetItemInfo(link)
+	local name, _, quality, ilvl, _, itemType = GetItemInfo(link)
 	if not name then return false end
 	if IsWhitelisted(profile, id, name) then return false end
-	-- Armor (class 2) or Weapon (class 1). GetItemInfo's 12th return is the
-	-- numeric item class on 3.3.5a clients.
-	if classId ~= 1 and classId ~= 2 then return false end
+	-- Armor or Weapon. 3.3.5a's GetItemInfo returns the 6th value as the
+	-- localized itemType string, not a numeric classId (the numeric class
+	-- was added in later expansions and is unreliable on base 3.3.5a).
+	-- TODO: non-English locales need a translation table; for enUS this
+	-- matches the live game strings exactly.
+	if itemType ~= "Armor" and itemType ~= "Weapon" then return false end
 
 	-- Quality gate. Each tier has its own toggle and its own mechanical
 	-- iLvl floor; the profile's disenchantIlvlMin overrides the floor when
@@ -3733,13 +4042,26 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		-- One-Key Open: create the secure button now (PLAYER_LOGIN is the
 		-- earliest safe time for SecureActionButtonTemplate on some private
 		-- servers) and stage the first target. The button has no Bindings.xml
-		-- entry; the options panel installs a binding via SetBindingClick
-		-- when the user picks a key in the in-panel capture row.
+		-- entry; the options panel installs a binding via SetBinding when
+		-- the user picks a key in the in-panel capture row.
 		if _G.AutoDelete_EnsureOpenButton then
 			_G.AutoDelete_EnsureOpenButton()
-			if _G.AutoDelete_UpdateOpenButton then
-				_G.AutoDelete_UpdateOpenButton()
-			end
+			if _G.AutoDelete_UpdateOpenButton then _G.AutoDelete_UpdateOpenButton() end
+		end
+
+		-- One-Key Mill and One-Key Prospect mirror the Open/Disenchant
+		-- pattern: create the secure button, refresh the known-spell cache,
+		-- stage the first target. Each is a no-op if the user hasn't
+		-- toggled the feature on.
+		if _G.AutoDelete_EnsureMillButton then
+			_G.AutoDelete_EnsureMillButton()
+			if _G.AutoDelete_RefreshMillKnown then _G.AutoDelete_RefreshMillKnown() end
+			if _G.AutoDelete_UpdateMillButton then _G.AutoDelete_UpdateMillButton() end
+		end
+		if _G.AutoDelete_EnsureProspectButton then
+			_G.AutoDelete_EnsureProspectButton()
+			if _G.AutoDelete_RefreshProspectKnown then _G.AutoDelete_RefreshProspectKnown() end
+			if _G.AutoDelete_UpdateProspectButton then _G.AutoDelete_UpdateProspectButton() end
 		end
 
 		-- One-time notice: the v3.02 schema migration moved sell rules into
@@ -3873,13 +4195,27 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		if _G.AutoDelete_FlushDeferredOpenUpdate then
 			_G.AutoDelete_FlushDeferredOpenUpdate()
 		end
+		if _G.AutoDelete_FlushDeferredMillUpdate then
+			_G.AutoDelete_FlushDeferredMillUpdate()
+		end
+		if _G.AutoDelete_FlushDeferredProspectUpdate then
+			_G.AutoDelete_FlushDeferredProspectUpdate()
+		end
 		return
 	end
 	if event == "SPELLS_CHANGED" then
 		-- Fires on login and any time the spellbook changes (learn a spell,
-		-- respec, etc). Re-scan to keep the Disenchant-known cache honest.
+		-- respec, etc). Re-scan to keep the per-spell known caches honest.
 		RefreshDisenchantKnown()
 		UpdateDisenchantButton()
+		if _G.AutoDelete_RefreshMillKnown then
+			_G.AutoDelete_RefreshMillKnown()
+			if _G.AutoDelete_UpdateMillButton then _G.AutoDelete_UpdateMillButton() end
+		end
+		if _G.AutoDelete_RefreshProspectKnown then
+			_G.AutoDelete_RefreshProspectKnown()
+			if _G.AutoDelete_UpdateProspectButton then _G.AutoDelete_UpdateProspectButton() end
+		end
 		return
 	end
 	if event == "MERCHANT_SHOW" then
@@ -3943,8 +4279,10 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 	-- defers via InCombatLockdown) and a cheap no-op when its feature is
 	-- off. Running on every bag update keeps the next-target pointer
 	-- current as the player loots, uses, sells, or rearranges items.
-	if UpdateDisenchantButton then UpdateDisenchantButton() end
-	if _G.AutoDelete_UpdateOpenButton then _G.AutoDelete_UpdateOpenButton() end
+	if UpdateDisenchantButton                then UpdateDisenchantButton() end
+	if _G.AutoDelete_UpdateOpenButton        then _G.AutoDelete_UpdateOpenButton() end
+	if _G.AutoDelete_UpdateMillButton        then _G.AutoDelete_UpdateMillButton() end
+	if _G.AutoDelete_UpdateProspectButton    then _G.AutoDelete_UpdateProspectButton() end
 	-- Bag-space warning. Edge-triggered so we print at most once per
 	-- "fell below threshold" event, then re-arm after slots rise above it.
 	-- Defensive nil-check: ComputeTotalFreeSlots is forward-declared and
