@@ -112,7 +112,7 @@ AutoDelete has been re-implemented in part by EbonClearance, which is itself a f
 
 The chocolate box stays. We appreciate the passion. The chocolate would like you to know it is in a safe place.
 
-GitHub timestamps every commit, not us. Dates are public. Knock yourself out.
+Got good ideas? Use 'em anytime. Thanks for the shoutouts!
 
 ### A note on Auto-Open Containers
 
