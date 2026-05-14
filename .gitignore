@@ -12,3 +12,14 @@ Thumbs.db
 
 # WoW SavedVariables — never commit these, they contain per-character data
 *.lua.bak
+
+# Local-only reference material that lives in the parent folder
+# (F:\Claude\Addons\). Never commit copies of these even if someone
+# accidentally drags them into the repo directory.
+wow-addon-conventions.md
+LUA Help/
+WoW API/
+AutoDelete_Architecture.md
+Addon_UI_StyleGuide.md
+CLAUDE.md
+handoff/
