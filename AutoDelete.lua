@@ -1517,6 +1517,93 @@ local function HasAffix(bag, slot)
 	return found
 end
 
+-- Wrapped in `do ... end` so the two helper locals don't bump the main
+-- chunk past Lua 5.1's 200-local cap; only the global export survives
+-- to the outer scope. boeTip and boeTipOwner are upvalues from above.
+do
+
+-- HasAffix variant for items NOT in bags (Delete / Sell list entries the
+-- user added but isn't currently holding). SetHyperlink shows the item
+-- template tooltip, which still gets PE's server-injected @affix@ line
+-- because the marker is on the item record. Cheap one-shot scan.
+local function HasAffixByLink(link)
+	if not link then return false end
+	boeTip:Hide()
+	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
+	boeTip:ClearLines()
+	boeTip:SetHyperlink(link)
+	boeTip:Show()
+	local n = boeTip:NumLines()
+	for i = 1, n do
+		local leftFS  = _G["AutoDelete_BoETipTextLeft"  .. i]
+		local rightFS = _G["AutoDelete_BoETipTextRight" .. i]
+		local leftTxt  = leftFS  and leftFS:GetText()  or nil
+		local rightTxt = rightFS and rightFS:GetText() or nil
+		if leftTxt and string.find(leftTxt, "@affix@", 1, true) then
+			boeTip:Hide()
+			return true
+		end
+		if rightTxt and string.find(rightTxt, "@affix@", 1, true) then
+			boeTip:Hide()
+			return true
+		end
+	end
+	boeTip:Hide()
+	return false
+end
+
+-- Audit the user's Delete + Sell lists for items carrying the @affix@
+-- tooltip marker. Doesn't modify the lists (explicit user-list entries
+-- are user intent); just surfaces a chat summary so the user can review
+-- and decide. Capped at 10 reported items per list so a 400-line list
+-- doesn't spam chat; remainder is summarized by count.
+local function AuditAffixOnLists(profile)
+	if not profile then return end
+	local function collectAffix(listText)
+		local affixed = {}
+		for line in string.gmatch(listText or "", "[^\r\n]+") do
+			local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+			if trimmed ~= "" then
+				local id = tonumber(trimmed:match("item:(%d+)"))
+				if id then
+					local _, link = GetItemInfo("item:" .. id)
+					if link and HasAffixByLink(link) then
+						table.insert(affixed, link)
+					end
+				end
+			end
+		end
+		return affixed
+	end
+
+	local deleteAffixed = collectAffix(profile.listText)
+	local sellAffixed   = collectAffix(profile.sellListText)
+	local total = #deleteAffixed + #sellAffixed
+
+	if total == 0 then
+		print("|cffff8000[AutoDelete]|r Affix audit: no affixed items on your Delete or Sell lists.")
+		return
+	end
+
+	local function summarize(name, affixed)
+		if #affixed == 0 then return end
+		local shown = {}
+		for i = 1, math.min(#affixed, 10) do
+			table.insert(shown, affixed[i])
+		end
+		print(string.format(
+			"|cffff8000[AutoDelete]|r %d affixed item(s) on your %s list: %s%s",
+			#affixed, name, table.concat(shown, " "),
+			(#affixed > 10) and (" (+" .. (#affixed - 10) .. " more)") or ""))
+	end
+	summarize("Delete", deleteAffixed)
+	summarize("Sell",   sellAffixed)
+end
+
+_G.AutoDelete_AuditAffixOnLists = AuditAffixOnLists
+
+end  -- end of audit `do` block
+
 -- ============================================================================
 -- Affix dot indicator on bag slot buttons
 -- ============================================================================

@@ -1946,29 +1946,29 @@ local function BuildUI(self)
 	tglSellGreensGen:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglSellGreensGen = tglSellGreensGen
 
-	-- Tools Card 2: Affix Protection. Same density as Card 1: a small
-	-- section title at top, two main toggles (using shorter labels so
-	-- they fit cardW), and a tight label+input row for the iLvl floor.
+	-- Filters Card 2: Affix Protection. Layout:
+	--   y=-6   title
+	--   y=-24  No Auto-Sell toggle (only one toggle now -- the No Auto-Delete
+	--          one was dropped because Auto-Delete Junk/Common never fire on
+	--          Rare/Epic gear, which is the only quality range affixes
+	--          appear on; the toggle protected nothing in practice)
+	--   y=-46  Min iLvl row (label + input)
+	--   y=-70  Audit Lists button (scans Delete + Sell lists for affixed
+	--          items and prints a chat report)
 	local card2Title = MakeText(tCard2, 11, C_ACCENT, "OUTLINE")
 	card2Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
 	card2Title:SetText("Affix Protection")
 
-	local tglProtectAffixFromDelete = MakeToggle(tCard2, "No Auto-Delete", C_ACCENT,
-		"When checked, items carrying PE's @affix@ tooltip marker skip Auto-Delete. Items below Min iLvl are NOT protected, so low-iLvl affix junk can still be cleared.")
-	tglProtectAffixFromDelete:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
-	tglProtectAffixFromDelete:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglProtectAffixFromDelete = tglProtectAffixFromDelete
-
 	local tglProtectAffixFromSell = MakeToggle(tCard2, "No Auto-Sell", C_ACCENT,
 		"When checked, items carrying PE's @affix@ tooltip marker skip Auto-Sell. Items below Min iLvl are NOT protected, so low-iLvl affix junk can still be sold.")
-	tglProtectAffixFromSell:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
+	tglProtectAffixFromSell:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
 	tglProtectAffixFromSell:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglProtectAffixFromSell = tglProtectAffixFromSell
 
 	-- Min iLvl row: label LEFT, small input RIGHT, same row.
 	local affixFloorRow = CreateFrame("Frame", nil, tCard2)
 	affixFloorRow:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	affixFloorRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -70)
+	affixFloorRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
 
 	local affixFloorLabel = affixFloorRow:CreateFontString(nil, "OVERLAY")
 	affixFloorLabel:SetFont(FONT, 10, "OUTLINE")
@@ -2024,6 +2024,38 @@ local function BuildUI(self)
 	end)
 	self._affixIlvlEdit = affixFloorEdit
 
+	-- Audit button: scans the user's Delete + Sell lists for items that
+	-- carry the @affix@ tooltip marker and prints a chat summary. Doesn't
+	-- modify the lists -- explicit user-list entries are user intent --
+	-- just surfaces "you have N affixed items on your Sell list" so the
+	-- user can review.
+	local auditBtn = CreateFrame("Button", nil, tCard2)
+	auditBtn:SetSize(cardW - CARD_INNER_PAD_X * 2, 18)
+	auditBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -70)
+	ApplyBackdrop(auditBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
+	local auditBtnText = auditBtn:CreateFontString(nil, "OVERLAY")
+	auditBtnText:SetFont(FONT, 10, "OUTLINE")
+	auditBtnText:SetTextColor(unpack(C_TEXT))
+	auditBtnText:SetPoint("CENTER")
+	auditBtnText:SetText("Audit Lists for Affix Items")
+	auditBtn:SetScript("OnEnter", function()
+		ApplyBackdrop(auditBtn, { 0.16, 0.16, 0.16, 1 }, C_ACCENT)
+		GameTooltip:SetOwner(auditBtn, "ANCHOR_TOP")
+		GameTooltip:SetText("Audit Lists", 1, 1, 1)
+		GameTooltip:AddLine("Scans your Delete and Sell lists for items that carry PE's @affix@ tooltip marker. Prints a chat summary with item links. Doesn't change the lists.",
+			C_DIM[1], C_DIM[2], C_DIM[3], true)
+		GameTooltip:Show()
+	end)
+	auditBtn:SetScript("OnLeave", function()
+		ApplyBackdrop(auditBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
+		GameTooltip:Hide()
+	end)
+	auditBtn:SetScript("OnClick", function()
+		if _G.AutoDelete_AuditAffixOnLists then
+			_G.AutoDelete_AuditAffixOnLists(GetActiveProfile(db))
+		end
+	end)
+
 	-- Filters Card 3: Process Bags launcher. Moved here from Tools Card 1
 	-- so the Filters tab's middle card (Affix Protection) reads as the
 	-- focal point and the launcher sits in the trailing slot. Card shows
@@ -2051,13 +2083,15 @@ local function BuildUI(self)
 	launchBtnText:SetTextColor(unpack(C_TEXT))
 	launchBtnText:SetPoint("CENTER")
 	launchBtnText:SetText("Open Panel")
+	-- Subtle hover: slightly-lighter dark fill + accent border. The full-
+	-- accent-fill hover was too loud; this matches the rest of the panel's
+	-- button convention (the list-mode Delete/Sell/Keep tabs use the same
+	-- subtle highlight on hover).
 	launchBtn:SetScript("OnEnter", function()
-		ApplyBackdrop(launchBtn, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.85 }, C_ACCENT)
-		launchBtnText:SetTextColor(0.05, 0.05, 0.05, 1)
+		ApplyBackdrop(launchBtn, { 0.16, 0.16, 0.16, 1 }, C_ACCENT)
 	end)
 	launchBtn:SetScript("OnLeave", function()
 		ApplyBackdrop(launchBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
-		launchBtnText:SetTextColor(unpack(C_TEXT))
 	end)
 	launchBtn:SetScript("OnClick", function()
 		if _G.AutoDelete_ToggleProcessPanel then _G.AutoDelete_ToggleProcessPanel() end
@@ -4047,17 +4081,11 @@ local function BuildUI(self)
 			"_refreshProspectStatus"))
 	end
 
-	-- Tools tab: Affix Protection toggles. Same RefreshCachedProfile call
-	-- so the delete scanner and sell loop see the new setting on the next
-	-- tick without waiting for a profile reload.
-	tglProtectAffixFromDelete:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).protectAffixFromDelete = btn._checked
-		if _G.AutoDelete_RefreshCachedProfile then
-			_G.AutoDelete_RefreshCachedProfile()
-		end
-	end)
+	-- Filters tab: Affix Protection toggles. Same RefreshCachedProfile call
+	-- so the sell loop sees the new setting on the next tick without
+	-- waiting for a profile reload. Only the No Auto-Sell toggle remains;
+	-- the No Auto-Delete one was dropped (auto-delete never fires on
+	-- Rare/Epic gear where affixes appear).
 	tglProtectAffixFromSell:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
@@ -4393,8 +4421,8 @@ local function BuildUI(self)
 		end
 		if self._refreshProspectStatus then self:_refreshProspectStatus() end
 
-		-- Filters tab: Affix Protection (Card 2)
-		tglProtectAffixFromDelete:SetChecked(p.protectAffixFromDelete)
+		-- Filters tab: Affix Protection (Card 2). Only the No Auto-Sell
+		-- toggle remains; No Auto-Delete was dropped.
 		tglProtectAffixFromSell:SetChecked(p.protectAffixFromSell)
 		affixFloorEdit:SetText(tostring(p.affixIlvlMin or 0))
 
