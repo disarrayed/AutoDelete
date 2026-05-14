@@ -2,9 +2,10 @@
 ## Title: |cffff8000AutoDelete|r
 ## Notes: Automatically delete and sell specified items from your bags.
 ## Author: Baenre
-## Version: 3.18.2
+## Version: 3.19
 ## SavedVariables: AutoDeleteDB
 ## SavedVariablesPerCharacter: AutoDeleteStatsDB
 
 AutoDelete.lua
 Options.lua
+Bindings.xml

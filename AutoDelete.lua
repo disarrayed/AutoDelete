@@ -112,17 +112,38 @@ local DEFAULT_PROFILE = {
 	-- ============================================================
 	-- Tools (Tools tab)
 	-- ============================================================
-	-- Auto-Open Containers: opens lootable bag containers (clams, crates,
-	-- mysterious eggs, manna biscuits, lockboxes) automatically when they
-	-- enter the bag. Saves bag space during long farms.
-	autoOpenContainers = false,
-	autoOpenLocked     = false,   -- include lockboxes (need a key/picks)
-	autoOpenSkipCombat = true,    -- skip while in combat to avoid GCD waste
+	-- Affix Protection (Tools tab): skip auto-rules on items that carry the
+	-- PE @affix@ tooltip marker. affixIlvlMin is a floor: items with iLvl
+	-- below this value are NOT protected, even if the toggles are on. This
+	-- lets the user keep high-iLvl affixed gear while still clearing low-
+	-- iLvl affix junk. 0 = no floor (every affixed item is protected).
+	protectAffixFromDelete = false,
+	protectAffixFromSell   = false,
+	affixIlvlMin           = 0,
 
-	-- Sell Threshold: skip selling items worth less than this many gold.
-	-- 0 disables the check. Compares to vendor sell value, so an expensive
-	-- crafted white is protected automatically when this is set.
-	sellThresholdGold  = 0,
+	-- Visual cyan dot in the bottom-left corner of bag slots with affixed
+	-- items. On by default since most users want the visual cue; toggle
+	-- lives on the General tab next to Scan Speed.
+	showAffixDot           = true,
+
+	-- Bag Space (Tools tab):
+	--   bagSpaceWarnEnabled gates the chat warning (one-shot per low cycle).
+	--   bagSpaceWarnThreshold is a single shared threshold: it drives both
+	--   the warning AND the "Summon Goblin Merchant when bags are full"
+	--   feature on the Goblin tab. One value, two consumers, simpler UI.
+	bagSpaceWarnEnabled       = false,
+	bagSpaceWarnThreshold     = 5,
+
+	-- One-Key Disenchant (Tools tab Card 1): a SecureActionButton wired to
+	-- the next disenchantable BoP item in bags. The user binds a key in the
+	-- Key Bindings UI; pressing the key fires `/cast Disenchant` + `/use bag
+	-- slot`. 3.3.5a's protected-function gate is satisfied because the hardware
+	-- keypress (not addon code) is what triggers the macro.
+	--   disenchantEnabled gates the whole feature (off by default; opt-in).
+	--   disenchantRare adds BoP Rare (blue) gear to the eligibility set;
+	--   default off so v1 only auto-targets greens (the common case).
+	disenchantEnabled = false,
+	disenchantRare    = false,
 
 	autoGray         = false,  -- Auto-Delete Junk   (gray quality, any item)
 	autoDeleteCommon = false,  -- Auto-Delete Common (white quality, equippable gear only)
@@ -1041,6 +1062,26 @@ local function IsCosmeticSlot(itemLink)
 	return equipLoc and COSMETIC_SLOTS[equipLoc] or false
 end
 
+-- Forward declaration. IsAffixProtected is assigned its function body later
+-- (after the BoE scan tooltip is set up, since HasAffix needs that frame).
+-- DeleteItems below captures this name as an upvalue; without the forward
+-- declaration the call inside DeleteItems would resolve to a nil global,
+-- because `local function` is not hoisted in Lua.
+local IsAffixProtected
+
+-- Forward declaration for ComputeTotalFreeSlots: it's defined later (near
+-- the companion watcher) but the BAG_UPDATE handler below uses it for the
+-- bag-space warning check. Same hoisting issue as IsAffixProtected above.
+local ComputeTotalFreeSlots
+
+-- Bag-space warning state. Declared here (BEFORE the BAG_UPDATE handler
+-- that reads/writes it) so the handler captures it as an upvalue. Without
+-- this, the handler resolves it as a global, and Lua treats GLOBAL writes
+-- as the SAME storage slot - which combined with the outer-else reset in
+-- the handler caused the flag to flip back to false on stray events,
+-- producing spam.
+local bagSpaceLastBelowState = false
+
 local function DeleteItems()
 	if CursorHasItem() then return end
 	local db = GetDB()
@@ -1125,8 +1166,10 @@ local function DeleteItems()
 
 				-- Execute the delete. Keep list always overrides - even Delete
 				-- list entries can't bypass it (Keep is the safety net of
-				-- last resort).
-				if shouldDelete and not IsWhitelisted(profile, itemId, itemName) then
+				-- last resort). Affix Protection (when toggled on, and item
+				-- meets the iLvl floor) is the second safety net.
+				if shouldDelete and not IsWhitelisted(profile, itemId, itemName)
+					and not IsAffixProtected(profile, bag, slot, itemLink, "delete") then
 					if _G.AutoDelete_DebugSell then
 						local reason = onDeleteList and "DeleteList" or "auto"
 						local questNote = (onDeleteList and isQuestItem) and " [QUEST ITEM, overridden by Delete list]" or ""
@@ -1247,6 +1290,277 @@ local function IsBindOnEquip(bag, slot)
 	end
 	boeTip:Hide()
 	return foundBoE
+end
+
+-- One-Key Disenchant uses this to confirm an item is bound to the player
+-- (BoP) before allowing it to be auto-targeted by the disenchant macro.
+-- 3.3.5a does not expose a direct "is bound to me" API on container slots
+-- (GetContainerItemInfo only returns quality/locked/quantity), so we scan
+-- the tooltip for the localized ITEM_SOULBOUND line. Same scan frame and
+-- defensive Show() pattern as IsBindOnEquip.
+local function IsSoulbound(bag, slot)
+	boeTip:Hide()
+	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
+	boeTip:ClearLines()
+	boeTip:SetBagItem(bag, slot)
+	boeTip:Show()
+	local n = boeTip:NumLines()
+	-- Localized string; falls back to English literal if the global is
+	-- missing for any reason.
+	local soulbound = _G.ITEM_SOULBOUND or "Soulbound"
+	for i = 2, n do
+		local fs = _G["AutoDelete_BoETipTextLeft" .. i]
+		local txt = fs and fs:GetText()
+		if txt and string.find(txt, soulbound, 1, true) then
+			boeTip:Hide()
+			return true
+		end
+	end
+	boeTip:Hide()
+	return false
+end
+
+-- Affix Protection: PE wraps server-set affix tooltip lines with literal
+-- @affix@TEXT@affix@ markers. Reuses the same scan-tooltip pattern as
+-- IsBindOnEquip. Returns true if any tooltip line on the given bag slot
+-- contains the @affix@ marker.
+--
+-- Tooltip-mod compatibility: this uses our custom-named tooltip frame
+-- (AutoDelete_BoETip), not GameTooltip or ItemRefTooltip. ElvUI / TipTac /
+-- PE's own ScanAndRecolorAffixLines hook all target the two standard
+-- named tooltips by reference, so they do NOT modify our scan tooltip's
+-- text. The raw @affix@ markers pass through untouched. PE's own affix
+-- detection uses this exact pattern (extraction.lua: EbonholdAffixScanTooltip)
+-- so if it works for them in any configuration, it works for us too.
+--
+-- Defense in depth: we scan BOTH the left and right text columns and
+-- emit a debug print when /del debug is active so the user can verify
+-- the scan is finding what it should.
+local function HasAffix(bag, slot)
+	boeTip:Hide()
+	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
+	boeTip:ClearLines()
+	boeTip:SetBagItem(bag, slot)
+	boeTip:Show()
+	local n = boeTip:NumLines()
+	local debug = _G.AutoDelete_DebugSell
+	local found = false
+	local foundLine = nil
+
+	for i = 1, n do
+		local leftFS  = _G["AutoDelete_BoETipTextLeft"  .. i]
+		local rightFS = _G["AutoDelete_BoETipTextRight" .. i]
+		local leftTxt  = leftFS  and leftFS:GetText()  or nil
+		local rightTxt = rightFS and rightFS:GetText() or nil
+		if leftTxt and string.find(leftTxt, "@affix@", 1, true) then
+			found = true
+			foundLine = "L[" .. i .. "] " .. leftTxt
+			break
+		end
+		if rightTxt and string.find(rightTxt, "@affix@", 1, true) then
+			found = true
+			foundLine = "R[" .. i .. "] " .. rightTxt
+			break
+		end
+	end
+
+	if debug then
+		print(string.format(
+			"|cffff8000[AutoDelete DEBUG]|r HasAffix bag=%d slot=%d lines=%d found=%s%s",
+			bag, slot, n, tostring(found),
+			foundLine and (" | " .. foundLine) or ""))
+	end
+
+	boeTip:Hide()
+	return found
+end
+
+-- ============================================================================
+-- Affix dot indicator on bag slot buttons
+-- ============================================================================
+-- Small purple dot (~8x8) in the bottom-left of every bag slot that
+-- contains an affixed item. Color matches PE's affix purple #B048F8 so
+-- the dot reads as the same thing the user sees on the tooltip.
+--
+-- Cache by item LINK so we don't run a tooltip scan every time
+-- ContainerFrame_Update fires (which is often). When an item moves
+-- between slots its link is unchanged, so we get a cache hit. When the
+-- slot empties or holds a different item, the new link triggers a fresh
+-- HasAffix scan.
+local affixLinkCache = {}
+
+local function ClassifyAffixByLink(link, bag, slot)
+	if not link then return false end
+	local cached = affixLinkCache[link]
+	if cached ~= nil then return cached end
+	local has = HasAffix(bag, slot)
+	affixLinkCache[link] = has
+	return has
+end
+
+-- Affix dot color #00E5FF (electric cyan). Chosen for maximum visibility
+-- against both the dark bag UI chrome and the typically-warm color palette
+-- of WoW item icons. Distinct from every WoW item-quality color so it
+-- can't be confused with a rarity border.
+local AFFIX_DOT_R = 0x00 / 255
+local AFFIX_DOT_G = 0xE5 / 255
+local AFFIX_DOT_B = 0xFF / 255
+local AFFIX_DOT_SIZE = 12
+-- Backing ring (slightly larger, solid black). Sits underneath the cyan
+-- dot so the dot reads cleanly against light item icons AND the backing
+-- itself reads against dark icons. Two-layer contrast = visible on any
+-- background.
+local AFFIX_DOT_BACKING_SIZE = 16
+-- Custom dot texture shipped with the addon. 32x32 RGBA TGA with a white
+-- anti-aliased filled circle on transparent background. Tinting via
+-- SetVertexColor produces a clean colored dot. Used instead of a Blizzard
+-- built-in because Interface\Common\Indicator-* is post-3.3.5 and doesn't
+-- exist on PE clients.
+local AFFIX_DOT_TEXTURE = "Interface\\AddOns\\AutoDelete\\textures\\dot.tga"
+
+local function SetButtonAffixDot(button, hasAffix)
+	if not button then return end
+	-- Respect user preference. When the dot is toggled off, treat every
+	-- slot as "no affix" so any previously-drawn dot/backing gets hidden.
+	if cachedProfile and cachedProfile.showAffixDot == false then
+		hasAffix = false
+	end
+	local dot = button._autoDeleteAffixDot
+	local back = button._autoDeleteAffixBacking
+	if hasAffix then
+		-- Backing first (lower sublevel = drawn underneath the cyan dot).
+		if not back then
+			back = button:CreateTexture(nil, "OVERLAY", nil, 1)
+			back:SetTexture(AFFIX_DOT_TEXTURE)
+			back:SetSize(AFFIX_DOT_BACKING_SIZE, AFFIX_DOT_BACKING_SIZE)
+			back:SetPoint("BOTTOMLEFT", 0, 0)
+			back:SetVertexColor(0, 0, 0, 1)
+			button._autoDeleteAffixBacking = back
+		end
+		back:Show()
+		-- Cyan dot on top.
+		if not dot then
+			dot = button:CreateTexture(nil, "OVERLAY", nil, 2)
+			dot:SetTexture(AFFIX_DOT_TEXTURE)
+			dot:SetSize(AFFIX_DOT_SIZE, AFFIX_DOT_SIZE)
+			dot:SetPoint("BOTTOMLEFT", 2, 2)
+			dot:SetVertexColor(AFFIX_DOT_R, AFFIX_DOT_G, AFFIX_DOT_B, 1)
+			button._autoDeleteAffixDot = dot
+		end
+		dot:Show()
+	else
+		if dot then dot:Hide() end
+		if back then back:Hide() end
+	end
+end
+
+local function UpdateAffixDotForFrame(frame)
+	if not frame then return end
+	local name = frame:GetName()
+	if not name then return end
+	local bag = frame:GetID()
+	local size = frame.size or 0
+	-- ContainerFrame slot buttons are reverse-indexed in their names
+	-- (button "Item1" is the LAST slot visually).
+	for slot = 1, size do
+		local button = _G[name .. "Item" .. (size - slot + 1)]
+		local link = GetContainerItemLink(bag, slot)
+		SetButtonAffixDot(button, ClassifyAffixByLink(link, bag, slot))
+	end
+end
+
+-- Install hook so dots refresh whenever Blizzard updates a bag frame.
+-- hooksecurefunc preserves any other addon's hook on this function.
+if ContainerFrame_Update then
+	hooksecurefunc("ContainerFrame_Update", UpdateAffixDotForFrame)
+end
+
+-- Exposed so Options.lua can force an immediate refresh when the user
+-- toggles the affix-dot setting (otherwise dots persist until the next
+-- natural bag event). Walks visible default Blizzard bag frames AND
+-- pokes ElvUI's bag refresh if loaded.
+_G.AutoDelete_RefreshAffixDots = function()
+	for i = 1, (NUM_CONTAINER_FRAMES or 12) do
+		local frame = _G["ContainerFrame" .. i]
+		if frame and frame:IsShown() then
+			UpdateAffixDotForFrame(frame)
+		end
+	end
+	pcall(function()
+		if not _G.ElvUI then return end
+		local E = _G.ElvUI[1]
+		if not E or not E.GetModule then return end
+		local B = E:GetModule("Bags")
+		if B and B.UpdateAllBagSlots then B:UpdateAllBagSlots() end
+	end)
+end
+
+-- ElvUI bag dot support. ElvUI replaces the Blizzard bag frames with its
+-- own buttons (named "<frameName>Bag<bagID>Slot<slotID>" but kept inside
+-- the B module's `B.BagFrames` table). Hooking `B:UpdateSlot` is the
+-- cleanest entry point: ElvUI calls it for every slot whenever a bag
+-- button needs to refresh (item moved, count changed, bag re-laid-out).
+-- Has to be called AFTER ElvUI has loaded, so we invoke it from the
+-- post-login AfterDelay block alongside CreateElvUIBagButton.
+local function InstallElvUIAffixDotHook()
+	-- Bail-out chain (any failure = silently skip ElvUI integration,
+	-- default Blizzard bag dots still work via the ContainerFrame_Update
+	-- hook installed above):
+	--   (1) ElvUI not loaded at all
+	--   (2) ElvUI loaded but malformed (no E or no GetModule)
+	--   (3) Bags module missing / API changed (no UpdateSlot)
+	-- The whole body is also wrapped in pcall so any unexpected error
+	-- during hook install is swallowed without breaking AutoDelete.
+	pcall(function()
+		if not _G.ElvUI then return end                          -- (1)
+		local E = _G.ElvUI[1]
+		if not E or type(E) ~= "table" or not E.GetModule then return end  -- (2)
+		local ok, B = pcall(E.GetModule, E, "Bags")
+		if not ok or not B or not B.UpdateSlot then return end   -- (3)
+
+		hooksecurefunc(B, "UpdateSlot", function(self, frame, bagID, slotID)
+			if not frame or not frame.Bags then return end
+			local bagFrame = frame.Bags[bagID]
+			if not bagFrame then return end
+			local slot = bagFrame[slotID]
+			if not slot then return end
+			-- Bank/reagent slots have bagID outside the 0..4 player-bag range;
+			-- skip those (auto-rules don't act on bank contents anyway).
+			if bagID < 0 or bagID > 4 then return end
+			local link = GetContainerItemLink(bagID, slotID)
+			SetButtonAffixDot(slot, ClassifyAffixByLink(link, bagID, slotID))
+		end)
+
+		-- Trigger an initial refresh so dots appear immediately on already-
+		-- visible bags without waiting for the next bag event.
+		if B.UpdateAllBagSlots then
+			pcall(B.UpdateAllBagSlots, B)
+		end
+	end)
+end
+
+-- Combined check used by the delete scanner and the sell loop. Returns true
+-- if the item should be protected from the given action ("delete" or "sell")
+-- because:
+--   1. The user has the matching protect-affix toggle on, AND
+--   2. The item's iLvl is at or above affixIlvlMin (0 = no floor), AND
+--   3. The item actually carries the @affix@ marker.
+-- Assigned (not `local function`) because the name was forward-declared
+-- above DeleteItems so the scanner can capture it as an upvalue.
+IsAffixProtected = function(profile, bag, slot, itemLink, action)
+	if action == "delete" then
+		if not profile.protectAffixFromDelete then return false end
+	elseif action == "sell" then
+		if not profile.protectAffixFromSell then return false end
+	else
+		return false
+	end
+	local threshold = tonumber(profile.affixIlvlMin) or 0
+	if threshold > 0 then
+		local _, _, _, ilvl = GetItemInfo(itemLink)
+		if not ilvl or ilvl < threshold then return false end
+	end
+	return HasAffix(bag, slot)
 end
 
 -- Merchant name tracking for Greedy Scavenger summon
@@ -1904,9 +2218,12 @@ local function SellItems(silent)
 					local itemId = GetItemIDFromLink(itemLink)
 
 					-- Step 1: Keep list short-circuits the whole chain.
+					-- Step 1b: Affix Protection (when toggled on, and item meets
+					-- the iLvl floor) also short-circuits before any sell rule.
 					local isOnKeepList = IsWhitelisted(profile, itemId, name)
+					local isAffixProtected = IsAffixProtected(profile, bag, slot, itemLink, "sell")
 
-					if not isOnKeepList then
+					if not isOnKeepList and not isAffixProtected then
 
 						-- Step 2: Explicit Sell list entry.
 						if itemId and sellIDs[itemId] then
@@ -1966,27 +2283,6 @@ local function SellItems(silent)
 								end
 							end
 						end  -- close: if not shouldSell and not isQuestItem
-					end
-
-					if shouldSell then
-						-- Sell Threshold gate (Tools tab). Skip selling items
-						-- worth less than profile.sellThresholdGold gold per
-						-- unit. The check uses the unit vendor price (not the
-						-- stack total), so an expensive crafted white in a
-						-- stack of 1 is protected the same way as a single.
-						-- Threshold of 0 disables the check.
-						local thresholdGold = tonumber(profile.sellThresholdGold) or 0
-						if thresholdGold > 0 and vendorPrice and vendorPrice > 0 then
-							local thresholdCopper = thresholdGold * 10000
-							if vendorPrice < thresholdCopper then
-								shouldSell = false
-								if _G.AutoDelete_DebugSell then
-									print(string.format(
-										"|cffff8000[AutoDelete DEBUG]|r SKIPPED (threshold): %s | unitPrice=%dc | thresholdCopper=%dc",
-										tostring(name), vendorPrice, thresholdCopper))
-								end
-							end
-						end
 					end
 
 					if shouldSell then
@@ -2357,125 +2653,208 @@ local function HandleEquipmentChanged(slot)
 end
 
 -- ============================================================================
--- Auto-Open Containers (settings.autoOpenContainers)
+-- One-Key Disenchant
 -- ============================================================================
--- Walks the bags after every BAG_UPDATE and opens any openable container
--- found. The known list is an allow-list of item IDs that are safe to open
--- on PE (clams, crates, eggs, biscuits, lockboxes when allowed). This avoids
--- false positives that would happen if we tried to detect "openable" by
--- item class alone, since the API doesn't expose a direct "is openable" flag.
+-- A SecureActionButton whose `macrotext` attribute is rewritten by addon code
+-- between key presses to point at the next disenchantable BoP item in bags.
+-- The user assigns a key in Key Bindings -> AutoDelete; pressing the key fires
+-- `/cast Disenchant` followed by `/use <bag> <slot>` from a hardware-event path,
+-- which is the only way to cast Disenchant on a bag item without tripping
+-- 3.3.5a's protected-function gate.
 --
--- Per-item throttle: we record the time we last tried each item id and skip
--- it for OPEN_RETRY_WINDOW seconds. The reopen window catches edge cases
--- where the server rejects the first call (full bags, etc).
-local AUTO_OPEN_ITEM_IDS = {
-	-- Clams (drop fresh water clam meat / pearls)
-	[5523]  = true,   -- Small Barnacled Clam
-	[5524]  = true,   -- Thick-shelled Clam
-	[7973]  = true,   -- Big-mouth Clam
-	[15874] = true,   -- Soft-shelled Clam
-	[24476] = true,   -- Jaggal Clam
-	[36781] = true,   -- Darkwater Clam
-	-- Mysterious crates and chests
-	[34835] = true,   -- Mysterious Egg (Oracles)
-	[44606] = true,   -- Cracked Egg (Oracles, opens to a vanity reward set)
-	[39878] = true,   -- Mysterious Egg
-	-- Crates from fishing daily and similar
-	[33454] = true,   -- Mr. Pinchy
-	-- Northrend openables
-	[44663] = true,   -- Nurtured Penguin Egg
-	-- Manna biscuit container
-	[34062] = true,   -- Bag of Fishing Treasures
-	[45328] = true,   -- Bag of Fishing Treasures (Northrend)
-	[62799] = true,   -- Reinforced Crate
-	-- Containers with random valuable drops (keep small, expand on user request)
-	[11938] = true,   -- Heavy Crate
-	[16885] = true,   -- Battered Junkbox
-	[4633]  = true,   -- Heavy Iron-Bound Chest
-	[4634]  = true,   -- Iron-Bound Chest
-	[4636]  = true,   -- Strong Iron-Bound Chest
-	[4637]  = true,   -- Solid Chest
-	[4638]  = true,   -- Reinforced Steel Lockbox
-	[5760]  = true,   -- Mossy Footlocker
-	[5759]  = true,   -- Sturdy Locked Chest
-	[6712]  = true,   -- Practice Locked Chest
-	[16882] = true,   -- Battered Junkbox
-	[16883] = true,   -- Worn Junkbox
-	[16884] = true,   -- Sturdy Junkbox
-	[29569] = true,   -- Strong Junkbox
-	[43622] = true,   -- Iceforged Junkbox (WotLK)
-	[43575] = true,   -- Reinforced Junkbox
-	[63349] = true,   -- Flame-Scarred Junkbox
-}
+-- Combat safety: SetAttribute on a secure button is forbidden in combat (taint),
+-- so updates are queued during combat and flushed on PLAYER_REGEN_ENABLED.
+-- The user can still press the button mid-combat; it just casts whatever target
+-- was wired before combat started.
+--
+-- Eligibility (IsDisenchantable):
+--   - Character knows the Disenchant spell (spellbook scan)
+--   - Item is Armor (class 2) or Weapon (class 1) per GetItemInfo
+--   - Quality is Uncommon (2), or Rare (3) if disenchantRare toggle is on
+--   - Item is Soulbound (tooltip scan)
+--   - Item is NOT on the Keep list, NOT a quest item
 
--- Locked containers are a subset; the autoOpenLocked toggle gates these.
--- These are the same lockboxes/chests as above that need a key or rogue.
-local AUTO_OPEN_LOCKED_IDS = {
-	[4633]  = true, [4634]  = true, [4636]  = true, [4637]  = true,
-	[4638]  = true, [5759]  = true, [5760]  = true, [6712]  = true,
-	[16882] = true, [16883] = true, [16884] = true, [16885] = true,
-	[29569] = true, [43575] = true, [43622] = true, [63349] = true,
-}
+-- Spell ID 13262 = Disenchant. Cached localized name resolved on first use
+-- so the spellbook scan is locale-correct without hardcoding "Disenchant".
+local DISENCHANT_SPELL_ID = 13262
+local cachedDisenchantName = nil
+local cachedDisenchantKnown = false
 
--- Per-item retry throttle so a stuck item doesn't get hammered every tick.
-local autoOpenLastTry = {}
-local OPEN_RETRY_WINDOW = 3.0   -- seconds
+-- Walks the player's spellbook looking for the Disenchant spell. Cached
+-- result is read by every UI refresh and every bag scan, so the cost of
+-- the walk is paid only when SPELLS_CHANGED fires.
+local function RefreshDisenchantKnown()
+	cachedDisenchantName = cachedDisenchantName or GetSpellInfo(DISENCHANT_SPELL_ID)
+	if not cachedDisenchantName then
+		cachedDisenchantKnown = false
+		return
+	end
+	-- BOOKTYPE_SPELL is "spell"; iterate until GetSpellName returns nil.
+	local i = 1
+	while true do
+		local name = GetSpellName(i, BOOKTYPE_SPELL)
+		if not name then break end
+		if name == cachedDisenchantName then
+			cachedDisenchantKnown = true
+			return
+		end
+		i = i + 1
+	end
+	cachedDisenchantKnown = false
+end
 
-local function AutoOpenScanBags()
-	if not cachedProfile or not cachedProfile.autoOpenContainers then return end
-	if cachedProfile.autoOpenSkipCombat
-		and UnitAffectingCombat and UnitAffectingCombat("player") then return end
-	if SpellIsTargeting and SpellIsTargeting() then return end
+-- Public-ish accessors (used by the Options UI refresh code and the scan).
+local function CharacterCanDisenchant() return cachedDisenchantKnown end
 
-	-- CRITICAL multi-guard: never run at or just after a vendor.
-	-- UseContainerItem at a merchant SELLS the item instead of opening it.
-	-- We use four overlapping checks so any single failure path still bails:
-	--   1. merchantOpen flag      - set on MERCHANT_SHOW, cleared 1.5s after
-	--                               MERCHANT_CLOSED. Catches the post-close
-	--                               window where trailing BAG_UPDATEs can fire.
-	--   2. MerchantFrame:IsShown  - live check, in case the flag missed.
-	--   3. autoDeleteSelling      - addon's own sell loop is in flight.
-	--   4. CursorHasItem          - player is mid drag/drop, never call use.
-	if merchantOpen then return end
-	if MerchantFrame and MerchantFrame:IsShown() then return end
-	if autoDeleteSelling then return end
-	if CursorHasItem and CursorHasItem() then return end
+-- iLvl floors for Disenchant. Items below the floor for their quality
+-- cannot be disenchanted on the live 3.3.5a client; targeting them just
+-- wastes a keypress. Numbers are conservative (Blizzard's published values).
+local DE_UNCOMMON_FLOOR = 5
+local DE_RARE_FLOOR     = 55
+-- Upper bounds left open; the spell handles "above max" by refusing to cast.
 
-	local profile = cachedProfile
+-- Returns true if (bag, slot) holds an item that the disenchant macro
+-- should target, given the current profile. Caller is responsible for
+-- the disenchantEnabled gate and the CharacterCanDisenchant check.
+local function IsDisenchantable(profile, bag, slot)
+	local link = GetContainerItemLink(bag, slot)
+	if not link then return false end
+	local id = GetItemIDFromLink(link)
+	if not id then return false end
+	-- Quest items are never targets (consistent with every other auto-rule).
+	if IsQuestItem and IsQuestItem(bag, slot) then return false end
+	-- Keep list wins over disenchant.
+	local name, _, quality, ilvl, _, _, _, _, _, _, _, classId = GetItemInfo(link)
+	if not name then return false end
+	if IsWhitelisted(profile, id, name) then return false end
+	-- Armor (class 2) or Weapon (class 1). GetItemInfo's 12th return is the
+	-- numeric item class on 3.3.5a clients.
+	if classId ~= 1 and classId ~= 2 then return false end
+	-- Quality + iLvl gates.
+	if quality == 2 then
+		if (ilvl or 0) < DE_UNCOMMON_FLOOR then return false end
+	elseif quality == 3 then
+		if not profile.disenchantRare then return false end
+		if (ilvl or 0) < DE_RARE_FLOOR then return false end
+	else
+		return false
+	end
+	-- Must be soulbound. Tooltip scan is the only path in 3.3.5a.
+	if not IsSoulbound(bag, slot) then return false end
+	return true
+end
 
-	local now = GetTime()
+-- Scans bags for the next disenchant target. Returns (bag, slot, link, name)
+-- or nil. Priority is lowest iLvl first so the user clears trash before they
+-- chew through anything close to a usable item; ties broken by bag/slot
+-- order for determinism. O(slot count * tooltip scan); only runs out of combat
+-- on BAG_UPDATE_DELAYED, so the cost is bounded.
+local function FindDisenchantTarget(profile)
+	if not profile or not profile.disenchantEnabled then return nil end
+	if not CharacterCanDisenchant() then return nil end
+	local bestBag, bestSlot, bestLink, bestName, bestIlvl = nil, nil, nil, nil, nil
 	for bag = 0, NUM_BAG_SLOTS do
-		local slots = GetContainerNumSlots(bag)
-		for slot = 1, slots do
-			local link = GetContainerItemLink(bag, slot)
-			if link then
-				local id = GetItemIDFromLink(link)
-				if id and AUTO_OPEN_ITEM_IDS[id] then
-					-- Defense in depth: skip Keep-list items. Even though
-					-- the merchant guard above is the primary safety net,
-					-- Keep is the user's explicit "do not touch" list and
-					-- should win over auto-open just like it wins over
-					-- auto-sell and auto-delete.
-					local nameForKeep = GetItemInfo(link)
-					if not IsWhitelisted(profile, id, nameForKeep) then
-						local isLocked = AUTO_OPEN_LOCKED_IDS[id]
-						if (not isLocked) or cachedProfile.autoOpenLocked then
-							local lastTry = autoOpenLastTry[id .. "_" .. bag .. "_" .. slot]
-							if not lastTry or (now - lastTry) >= OPEN_RETRY_WINDOW then
-								autoOpenLastTry[id .. "_" .. bag .. "_" .. slot] = now
-								UseContainerItem(bag, slot)
-								-- Only open one per scan to avoid stacking
-								-- multiple Open windows on top of each other
-								-- when the player has many of the same container.
-								return
-							end
-						end
-					end
+		local count = GetContainerNumSlots(bag) or 0
+		for slot = 1, count do
+			if IsDisenchantable(profile, bag, slot) then
+				local link = GetContainerItemLink(bag, slot)
+				local name, _, _, ilvl = GetItemInfo(link)
+				ilvl = ilvl or 0
+				if not bestIlvl or ilvl < bestIlvl then
+					bestBag, bestSlot, bestLink, bestName, bestIlvl = bag, slot, link, name, ilvl
 				end
 			end
 		end
 	end
+	return bestBag, bestSlot, bestLink, bestName
 end
+
+-- Created at PLAYER_LOGIN below. Public for the OnEnter tooltip in Options.
+local disenchantButton = nil
+local disenchantUpdatePending = false   -- true if we deferred a combat update
+local disenchantLastTarget = nil        -- table: {bag, slot, link, name} or nil
+
+-- Writes the macrotext attribute. MUST be out of combat (caller's job to
+-- check). Empty macrotext on no-target so the keypress no-ops cleanly rather
+-- than firing a stale `/use` against the wrong bag slot after the user looted
+-- something into the previously targeted position.
+local function ApplyDisenchantMacrotext(bag, slot)
+	if not disenchantButton then return end
+	local name = cachedDisenchantName or "Disenchant"
+	if bag and slot then
+		disenchantButton:SetAttribute(
+			"macrotext",
+			"/cast " .. name .. "\n/use " .. bag .. " " .. slot
+		)
+	else
+		disenchantButton:SetAttribute("macrotext", "")
+	end
+end
+
+-- Rescans bags and wires the button. Combat-safe: defers if in combat,
+-- flushes on PLAYER_REGEN_ENABLED. Cheap when the feature is off (single
+-- bool check, no scan).
+local function UpdateDisenchantButton()
+	if not disenchantButton then return end
+	local profile = cachedProfile
+	if not profile or not profile.disenchantEnabled or not CharacterCanDisenchant() then
+		disenchantLastTarget = nil
+		if InCombatLockdown and InCombatLockdown() then
+			disenchantUpdatePending = true
+		else
+			ApplyDisenchantMacrotext(nil, nil)
+		end
+		return
+	end
+	if InCombatLockdown and InCombatLockdown() then
+		disenchantUpdatePending = true
+		return
+	end
+	local bag, slot, link, name = FindDisenchantTarget(profile)
+	if bag and slot then
+		disenchantLastTarget = { bag = bag, slot = slot, link = link, name = name }
+	else
+		disenchantLastTarget = nil
+	end
+	ApplyDisenchantMacrotext(bag, slot)
+	-- If the options panel is open, push the new "Next: ..." text to its
+	-- status line. Single-direction call (addon -> UI); the panel does not
+	-- need to know about us. Defensive: skip if the panel hasn't built yet
+	-- or doesn't expose the refresher.
+	local panel = _G.AutoDeleteOptionsPanel
+	if panel and panel.IsShown and panel:IsShown() and panel._refreshDisenchantStatus then
+		panel:_refreshDisenchantStatus()
+	end
+end
+
+-- Status string for the Options UI. Returns short text + a color triple.
+-- Pure presentation helper; safe to call any time.
+local function GetDisenchantStatus()
+	local profile = cachedProfile
+	if not profile or not profile.disenchantEnabled then
+		return "Disabled", 0.55, 0.55, 0.55
+	end
+	if not CharacterCanDisenchant() then
+		return "Requires Enchanting", 1.0, 0.3, 0.3
+	end
+	if disenchantLastTarget and disenchantLastTarget.link then
+		return "Next: " .. disenchantLastTarget.link, 0.7, 0.85, 1.0
+	end
+	return "No eligible items in bags", 0.55, 0.55, 0.55
+end
+
+-- Export the accessors the Options UI needs. Single global namespace,
+-- matches the pattern used by _G.AutoDelete_RefreshCachedProfile.
+_G.AutoDelete_GetDisenchantStatus = GetDisenchantStatus
+_G.AutoDelete_UpdateDisenchantButton = UpdateDisenchantButton
+
+-- Display strings for the Key Bindings UI. The header groups our bindings
+-- under "AutoDelete" in the Blizzard Key Bindings menu; the per-binding
+-- name shows up as the human-readable row. Bindings.xml references the
+-- CLICK target by its lower-level name; these globals are what the user
+-- actually sees.
+_G.BINDING_HEADER_AUTODELETE = "AutoDelete"
+_G["BINDING_NAME_CLICK AutoDeleteDisenchantButton:LeftButton"] = "Disenchant next BoP item"
 
 local scanner = CreateFrame("Frame")
 scanner:RegisterEvent("ADDON_LOADED")
@@ -2485,6 +2864,8 @@ scanner:RegisterEvent("BAG_UPDATE_DELAYED")
 scanner:RegisterEvent("MERCHANT_SHOW")
 scanner:RegisterEvent("MERCHANT_CLOSED")
 scanner:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+scanner:RegisterEvent("PLAYER_REGEN_ENABLED")    -- flush deferred disenchant updates
+scanner:RegisterEvent("SPELLS_CHANGED")          -- re-check Disenchant known status
 
 -- ============================================================================
 -- Welcome Popup
@@ -3019,6 +3400,26 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		RefreshCachedProfile()
 		print("|cffff8000[AutoDelete]|r loaded. Type |cff00ff00/del|r to configure.")
 
+		-- One-Key Disenchant: create the SecureActionButton once. Name MUST
+		-- match the CLICK target in Bindings.xml so the Key Bindings UI can
+		-- attach a keypress to it. Created here rather than at file load
+		-- because SecureActionButtonTemplate is only safe to instantiate
+		-- after PLAYER_LOGIN (some servers reject earlier creation paths).
+		if not disenchantButton then
+			disenchantButton = CreateFrame(
+				"Button",
+				"AutoDeleteDisenchantButton",
+				UIParent,
+				"SecureActionButtonTemplate"
+			)
+			disenchantButton:Hide()  -- invisible; only the bound key matters
+			disenchantButton:RegisterForClicks("AnyDown")
+			disenchantButton:SetAttribute("type", "macro")
+			disenchantButton:SetAttribute("macrotext", "")
+		end
+		RefreshDisenchantKnown()
+		UpdateDisenchantButton()
+
 		-- One-time notice: the v3.02 schema migration moved sell rules into
 		-- per-category sections. EnsureProfileFields sets this flag when it
 		-- migrates a profile from the old schema.
@@ -3100,6 +3501,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 
 		AfterDelay(2, function()
 			CreateElvUIBagButton()
+			-- Hook ElvUI's per-slot update so affix dots also appear on the
+			-- ElvUI bag UI, not just default Blizzard bags.
+			InstallElvUIAffixDotHook()
 			-- Show the welcome popup unless the user clicked
 			-- "Don't show this again" on a previous login.
 			if not (_G.AutoDeleteDB and _G.AutoDeleteDB.welcomeDismissed) then
@@ -3133,6 +3537,23 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 				end
 			end
 		end)
+		return
+	end
+	if event == "PLAYER_REGEN_ENABLED" then
+		-- Combat just ended. Flush any deferred disenchant-button update
+		-- that was blocked by InCombatLockdown. Safe no-op when the flag
+		-- wasn't set or when the feature is off.
+		if disenchantUpdatePending then
+			disenchantUpdatePending = false
+			UpdateDisenchantButton()
+		end
+		return
+	end
+	if event == "SPELLS_CHANGED" then
+		-- Fires on login and any time the spellbook changes (learn a spell,
+		-- respec, etc). Re-scan to keep the Disenchant-known cache honest.
+		RefreshDisenchantKnown()
+		UpdateDisenchantButton()
 		return
 	end
 	if event == "MERCHANT_SHOW" then
@@ -3192,9 +3613,33 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 	-- BAG_UPDATE / BAG_UPDATE_DELAYED
 	RefreshCachedProfile()
 	RequestScan()
-	-- Auto-open containers runs alongside the regular scan. Self-gated on
-	-- the autoOpenContainers toggle, so this is a cheap no-op when off.
-	AutoOpenScanBags()
+	-- Rewire the one-key disenchant button. Combat-safe: self-defers via
+	-- InCombatLockdown when needed and is a cheap no-op when the feature
+	-- is off. Runs on every bag update so the next-target pointer is
+	-- always current (looted item, used item, gear swap).
+	if UpdateDisenchantButton then UpdateDisenchantButton() end
+	-- Bag-space warning. Edge-triggered so we print at most once per
+	-- "fell below threshold" event, then re-arm after slots rise above it.
+	-- Defensive nil-check: ComputeTotalFreeSlots is forward-declared and
+	-- assigned later in the file. If for any reason the assignment hasn't
+	-- happened yet (e.g. early event firing before file load completes),
+	-- silently skip rather than throw a nil-call.
+	if cachedProfile and cachedProfile.bagSpaceWarnEnabled and ComputeTotalFreeSlots then
+		local free = ComputeTotalFreeSlots()
+		local threshold = tonumber(cachedProfile.bagSpaceWarnThreshold) or 5
+		if free <= threshold then
+			if not bagSpaceLastBelowState then
+				print(string.format(
+					"|cffff8000[AutoDelete]|r: Bag space low (%d free slot%s remaining).",
+					free, free == 1 and "" or "s"))
+				bagSpaceLastBelowState = true
+			end
+		else
+			bagSpaceLastBelowState = false
+		end
+	else
+		bagSpaceLastBelowState = false
+	end
 end)
 
 scanner:SetScript("OnUpdate", function(self, elapsed)
@@ -3248,10 +3693,25 @@ local dismissedDueToMount = nil
 local bagsFullArmed       = true   -- true = next 'near full' will fire
 local bagsFullSince       = nil    -- GetTime() when bags first became near-full; reset when a slot frees
 
--- Bag-full auto-summon threshold. The Goblin Merchant fires when free slots
--- drop to or below this value. Set to 3 so the merchant arrives before bags
--- are completely full, leaving room for additional drops while vendoring.
+-- Bag-full auto-summon threshold fallback. The Goblin Merchant fires when
+-- free slots drop to or below this value. Default 3 so the merchant arrives
+-- before bags are completely full, leaving room for additional drops while
+-- vendoring. The actual threshold is now user-configurable via the Tools
+-- tab (profile.goblinMerchantBagThreshold); this constant only acts as a
+-- safety fallback when the profile field is missing or non-numeric.
 local BAGS_NEAR_FULL_THRESHOLD = 3
+
+-- Per-profile read of the bag-space threshold. One value drives both the
+-- chat warning AND the Goblin Merchant summon trigger. Returns the user-
+-- configured value if set, otherwise BAGS_NEAR_FULL_THRESHOLD.
+local function GetGoblinBagThreshold(p)
+	return tonumber(p and p.bagSpaceWarnThreshold) or BAGS_NEAR_FULL_THRESHOLD
+end
+
+-- (bagSpaceLastBelowState is declared near the top of the file as a
+-- forward-accessible local so the BAG_UPDATE handler captures it as an
+-- upvalue. Do NOT re-declare here with `local`; that would shadow the
+-- top-of-file local and break the edge-triggered chat warning.)
 
 -- Bag-full auto-summon debounce window. Bags must stay at or below the
 -- threshold continuously for this many seconds before the Goblin Merchant is
@@ -3333,7 +3793,9 @@ local function IsPlayerMountedOrFlying()
 	return false
 end
 
-local function ComputeTotalFreeSlots()
+-- Assigned (not `local function`) because the name was forward-declared
+-- above DeleteItems so the BAG_UPDATE handler can capture it as an upvalue.
+ComputeTotalFreeSlots = function()
 	local free = 0
 	for bag = 0, 4 do
 		local f = GetContainerNumFreeSlots and GetContainerNumFreeSlots(bag) or 0
@@ -3489,7 +3951,7 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 			elseif (pollNow - lastSummonAt) < USER_DISMISS_WINDOW then
 				userDismissUntil = pollNow + USER_DISMISS_GRACE
 				activeTracked = nil
-			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= BAGS_NEAR_FULL_THRESHOLD and combatOk then
+			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= GetGoblinBagThreshold(p) and combatOk then
 				SummonGoblinMerchant()
 				-- Re-arm the bag-full timer state since we just resummoned.
 				bagsFullArmed = false
@@ -3499,7 +3961,7 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 				-- Merchant despawned while bags are still near-full (zoned, died,
 				-- etc.). Re-arm so the periodic bag-full check can fire a
 				-- fresh summon on the next BAGS_FULL_DELAY tick.
-				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= BAGS_NEAR_FULL_THRESHOLD then
+				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= GetGoblinBagThreshold(p) then
 					bagsFullArmed = true
 					bagsFullSince = nil
 				end
@@ -3510,7 +3972,7 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 	-- (3) Bag-full auto-summon. See BAGS_FULL_DELAY above for debounce rationale.
 	if p.summonMerchantWhenBagsFull then
 		local free = ComputeTotalFreeSlots()
-		if free <= BAGS_NEAR_FULL_THRESHOLD then
+		if free <= GetGoblinBagThreshold(p) then
 			if bagsFullArmed and combatOk then
 				-- Start the timer if it isn't already running.
 				if not bagsFullSince then
@@ -3640,7 +4102,7 @@ companionEventFrame:SetScript("OnEvent", function(_, event)
 			if (now - lastSummonAt) < USER_DISMISS_WINDOW then
 				userDismissUntil = now + USER_DISMISS_GRACE
 				activeTracked = nil
-			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= BAGS_NEAR_FULL_THRESHOLD and combatOk then
+			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= GetGoblinBagThreshold(p) and combatOk then
 				SummonGoblinMerchant()
 				bagsFullArmed = false
 				bagsFullSince = nil
@@ -3648,7 +4110,7 @@ companionEventFrame:SetScript("OnEvent", function(_, event)
 				activeTracked = nil
 				-- Keep bag-full re-arm semantics consistent with the polling tick:
 				-- merchant despawned while bags still near-full -> re-arm.
-				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= BAGS_NEAR_FULL_THRESHOLD then
+				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= GetGoblinBagThreshold(p) then
 					bagsFullArmed = true
 					bagsFullSince = nil
 				end

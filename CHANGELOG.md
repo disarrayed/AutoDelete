@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.19] - 2026-05-13
+
+### Added
+
+- One-Key Disenchant. Bind a key in Key Bindings → AutoDelete to disenchant the next BoP item in your bags. Optional toggle to include Rare (blue). Requires the Enchanting profession.
+
+### Removed
+
+- **Auto-Open Containers** — pulled before ship. WoW 3.3.5a treats `UseContainerItem` as a protected function for a wide class of items: clams, junkboxes, lockboxes, items with cast-on-use effects, books, quest-starting items, anything requiring a target. When any addon calls `UseContainerItem` from a bag scan or event handler (instead of a real player click or keypress), the client fires `ADDON_ACTION_BLOCKED` and silently no-ops. This is not a server quirk and not specific to any one addon — every addon that auto-fires `UseContainerItem` hits the same wall. The documented Blizzard workaround is a secure button clicked via a user-bound keybind or macro, which is a manual action rather than automatic. May revisit as a keybind-driven opener in a future release.
+
 ## [3.18] - 2026-05-02
 
 ### Added

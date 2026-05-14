@@ -4,7 +4,7 @@
 
 WoW 3.3.5a inventory manager for Project Ebonhold. Mark items to **Delete**, **Sell**, or **Keep**. Every automatic feature is opt-in.
 
-![version](https://img.shields.io/badge/version-v3.18-ff8000?style=for-the-badge) ![downloads](https://img.shields.io/github/downloads/disarrayed/AutoDelete/total?style=for-the-badge&color=ff8000) ![platform](https://img.shields.io/badge/PROJECT%20EBONHOLD-3.3.5a-e6cc80?style=for-the-badge)
+![version](https://img.shields.io/badge/version-v3.19-ff8000?style=for-the-badge) ![downloads](https://img.shields.io/github/downloads/disarrayed/AutoDelete/total?style=for-the-badge&color=ff8000) ![platform](https://img.shields.io/badge/PROJECT%20EBONHOLD-3.3.5a-e6cc80?style=for-the-badge)
 
 [**Download**](https://github.com/disarrayed/AutoDelete/releases/latest) · [**Source**](https://github.com/disarrayed/AutoDelete)
 
@@ -58,6 +58,12 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 - Mount-aware dismiss and re-summon
 - Stuck detection via loot-event tracking
 
+**One-Key Disenchant** (Tools tab)
+- Bind a key in Key Bindings → AutoDelete → "Disenchant next BoP item"
+- Each press casts Disenchant on the next eligible BoP item in your bags
+- Optional toggle to include Rare (blue) gear
+- Status line shows the next target, or "Requires Enchanting" if the character can't disenchant
+
 **Quality of life**
 - Bags stay open when the vendor closes
 - Auto-repair with optional guild bank fallback
@@ -89,6 +95,15 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 
 ---
 
+## 🙏 Credits
+
+Feature ideas suggested by the community.
+
+- **Affix Protection** (Tools tab) — suggested by Biboup! [SBTL] on 5/13/26 at 4:23 PM:
+  > Would it be possible to have an option to not delete items with affix or that's hard to do ?
+
+---
+
 ## 📜 Influence
 
 AutoDelete started February 5, 2026. EbonholdStuff by Badutski2 (GitHub repo created February 13, 2026, last commit February 17) is another addon in the same niche. Both use the same Blizzard 3.3.5a API surface; some ideas crossed over. The code is original, written from scratch, with no shared snippets.
@@ -98,6 +113,14 @@ AutoDelete has been re-implemented in part by EbonClearance, which is itself a f
 The chocolate box stays. We appreciate the passion. The chocolate would like you to know it is in a safe place.
 
 GitHub timestamps every commit, not us. Dates are public. Knock yourself out.
+
+### A note on Auto-Open Containers
+
+An attempt to auto-open lootable containers (clams, crates, mysterious eggs, etc.) on bag update shipped in development but was removed before the public release.
+
+WoW 3.3.5a flags `UseContainerItem` as a protected function for many container types. When called from an addon scan or event handler — rather than from a real player click or keypress — the client rejects the call and fires `ADDON_ACTION_BLOCKED`. This is documented Blizzard behavior, not a server modification, and it affects every addon that attempts the same approach. The supported workaround is a secure button bound to a user keybind or macro, which is a manual interaction rather than a true automatic open.
+
+We may revisit this as a keybind-driven feature in a future release. Until then, containers that don't respond to automatic opens must be right-clicked manually.
 
 ---
 
