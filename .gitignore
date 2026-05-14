@@ -17,8 +17,8 @@ Thumbs.db
 # (F:\Claude\Addons\). Never commit copies of these even if someone
 # accidentally drags them into the repo directory.
 wow-addon-conventions.md
-LUA Help/
-WoW API/
+lua-reference/
+wow-api/
 AutoDelete_Architecture.md
 Addon_UI_StyleGuide.md
 CLAUDE.md
