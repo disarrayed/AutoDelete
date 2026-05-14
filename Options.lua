@@ -138,6 +138,69 @@ local function MakeToggle(parent, label, color, tooltip, tooltipTitle)
 	return row
 end
 
+-- Small helper for sub-toggles: smaller box (12x12), 9pt text, no description.
+-- Promoted to file scope so the Disenchant Filters popup (built at file load
+-- time, before BuildUI runs) can call it. BuildUI's own callers resolve to
+-- this same upvalue.
+local function MakeSubToggle(parent, label, color)
+	local row = CreateFrame("Button", nil, parent)
+	row:SetSize(120, 16)
+
+	local box = CreateFrame("Frame", nil, row)
+	box:SetSize(12, 12)
+	box:SetPoint("LEFT", 0, 0)
+	ApplyBackdrop(box, { 0.04, 0.04, 0.04, 1 }, { 0.33, 0.33, 0.33, 1 })
+
+	local indicator = box:CreateTexture(nil, "OVERLAY")
+	indicator:SetTexture("Interface\\AddOns\\AutoDelete\\textures\\checkmark.tga")
+	indicator:SetPoint("CENTER", box, "CENTER", 0, 0)
+	indicator:SetSize(12, 12)
+	indicator:SetVertexColor(1, 1, 1, 1)
+	indicator:Hide()
+
+	local text = row:CreateFontString(nil, "OVERLAY")
+	text:SetFont(FONT, 9, "OUTLINE")
+	text:SetTextColor(unpack(C_DIM))
+	text:SetPoint("LEFT", box, "RIGHT", 6, 0)
+	text:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+	text:SetJustifyH("LEFT")
+	text:SetWordWrap(true)
+	text:SetText(label)
+
+	row._checked = false
+	local activeColor = color or C_ACCENT
+
+	local function UpdateVisual()
+		if row._checked then
+			local lighter = {
+				math.min(activeColor[1] + 0.10, 1),
+				math.min(activeColor[2] + 0.10, 1),
+				math.min(activeColor[3] + 0.10, 1),
+				1,
+			}
+			ApplyBackdrop(box, activeColor, lighter)
+			indicator:Show()
+			text:SetTextColor(unpack(C_TEXT))
+		else
+			ApplyBackdrop(box, { 0.04, 0.04, 0.04, 1 }, { 0.33, 0.33, 0.33, 1 })
+			indicator:Hide()
+			text:SetTextColor(unpack(C_DIM))
+		end
+	end
+
+	function row:SetChecked(val)
+		row._checked = val and true or false
+		UpdateVisual()
+	end
+	function row:GetChecked() return row._checked end
+	row:SetScript("OnClick", function()
+		row._checked = not row._checked
+		UpdateVisual()
+	end)
+
+	return row
+end
+
 -- PEADAR-style custom dropdown
 local function MakeDropdown(parent, width, options, onChange)
 	local dd = CreateFrame("Frame", nil, parent)
@@ -1718,66 +1781,8 @@ local function BuildUI(self)
 	-- ========================================================================
 	local goblinPage = tabPages.goblin
 
-	-- Small helper for sub-toggles: smaller box (14x14), 9pt text, no description.
-	-- Used for the "Use Guild Bank money" / "After sell" / "After close vendor" rows.
-	local function MakeSubToggle(parent, label, color)
-		local row = CreateFrame("Button", nil, parent)
-		row:SetSize(120, 16)
-
-		local box = CreateFrame("Frame", nil, row)
-		box:SetSize(12, 12)
-		box:SetPoint("LEFT", 0, 0)
-		ApplyBackdrop(box, { 0.04, 0.04, 0.04, 1 }, { 0.33, 0.33, 0.33, 1 })
-
-		local indicator = box:CreateTexture(nil, "OVERLAY")
-		indicator:SetTexture("Interface\\AddOns\\AutoDelete\\textures\\checkmark.tga")
-		indicator:SetPoint("CENTER", box, "CENTER", 0, 0)
-		indicator:SetSize(12, 12)
-		indicator:SetVertexColor(1, 1, 1, 1)
-		indicator:Hide()
-
-		local text = row:CreateFontString(nil, "OVERLAY")
-		text:SetFont(FONT, 9, "OUTLINE")
-		text:SetTextColor(unpack(C_DIM))
-		text:SetPoint("LEFT", box, "RIGHT", 6, 0)
-		text:SetPoint("RIGHT", row, "RIGHT", -2, 0)
-		text:SetJustifyH("LEFT")
-		text:SetWordWrap(true)
-		text:SetText(label)
-
-		row._checked = false
-		local activeColor = color or C_ACCENT
-
-		local function UpdateVisual()
-			if row._checked then
-				local lighter = {
-					math.min(activeColor[1] + 0.10, 1),
-					math.min(activeColor[2] + 0.10, 1),
-					math.min(activeColor[3] + 0.10, 1),
-					1,
-				}
-				ApplyBackdrop(box, activeColor, lighter)
-				indicator:Show()
-				text:SetTextColor(unpack(C_TEXT))
-			else
-				ApplyBackdrop(box, { 0.04, 0.04, 0.04, 1 }, { 0.33, 0.33, 0.33, 1 })
-				indicator:Hide()
-				text:SetTextColor(unpack(C_DIM))
-			end
-		end
-
-		function row:SetChecked(val)
-			row._checked = val and true or false
-			UpdateVisual()
-		end
-		function row:GetChecked() return row._checked end
-		row:SetScript("OnClick", function()
-			row._checked = not row._checked
-			UpdateVisual()
-		end)
-
-		return row
-	end
+	-- MakeSubToggle was promoted to file scope (see top of file). BuildUI's
+	-- callers below resolve to that upvalue.
 
 	local function MakeGoblinCard(xOff)
 		local card = CreateFrame("Frame", nil, goblinPage)
