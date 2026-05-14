@@ -749,10 +749,19 @@ local function ParseRawViewText(text)
 	return table.concat(lines, "\n") .. (#lines > 0 and "\n" or "")
 end
 
-local function SortEntries(entries)
-	table.sort(entries, function(a, b)
-		return Normalize(GetDisplayForEntry(a)) < Normalize(GetDisplayForEntry(b))
-	end)
+-- Sort entries by display name. Default is ascending (A->Z); pass true
+-- for descending (Z->A). Used by the column header click-to-sort and the
+-- regular alphabetic refresh path.
+local function SortEntries(entries, descending)
+	if descending then
+		table.sort(entries, function(a, b)
+			return Normalize(GetDisplayForEntry(a)) > Normalize(GetDisplayForEntry(b))
+		end)
+	else
+		table.sort(entries, function(a, b)
+			return Normalize(GetDisplayForEntry(a)) < Normalize(GetDisplayForEntry(b))
+		end)
+	end
 end
 
 -- ============================================================================
@@ -895,10 +904,10 @@ local function BuildUI(self)
 	tabContent:SetPoint("TOPLEFT", tabStrip, "BOTTOMLEFT", 0, -TAB_STRIP_GAP)
 	tabContent:SetPoint("TOPRIGHT", tabStrip, "BOTTOMRIGHT", 0, -TAB_STRIP_GAP)
 
-	-- Create 5 tab content pages (frames parented to tabContent, filling it)
+	-- Create 6 tab content pages (frames parented to tabContent, filling it)
 	local tabPages = {}
-	local TAB_KEYS = { "general", "goblin", "autoinv", "tracking", "profiles" }
-	local TAB_LABELS = { "General", "Goblin", "AutoInv", "Tracking", "Profiles" }
+	local TAB_KEYS = { "general", "goblin", "tools", "autoinv", "tracking", "profiles" }
+	local TAB_LABELS = { "General", "Goblin", "Tools", "AutoInv", "Tracking", "Profiles" }
 	for i, key in ipairs(TAB_KEYS) do
 		local page = CreateFrame("Frame", nil, tabContent)
 		page:SetAllPoints(tabContent)
@@ -1076,6 +1085,13 @@ local function BuildUI(self)
 	speedHelp:SetJustifyH("LEFT")
 	speedHelp:SetText("How often bags are scanned.")
 
+	-- Toggle: show the affix dot indicator on bag slots. On by default.
+	local tglShowAffixDot = MakeToggle(scanSpeedCard, "Show affix dot", C_ACCENT,
+		"Display a small cyan dot in the bottom-left corner of bag slots that contain items with PE's @affix@ tooltip marker. Works on default Blizzard bags and on ElvUI bags.")
+	tglShowAffixDot:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 60))
+	tglShowAffixDot:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglShowAffixDot = tglShowAffixDot
+
 	-- ========================================================================
 	-- GOBLIN TAB: 3 cards (Auto-Repair, Summon Scavenger, Hide Greedy Spam)
 	-- Same card dimensions as General tab (3 cards, 2 gaps inside genContentW).
@@ -1213,6 +1229,164 @@ local function BuildUI(self)
 		"Summons the Goblin Merchant when bags are full.",
 		cardW - CARD_INNER_PAD_X * 2 - 26)
 	self._tglSummonMerchant = tglSummonMerchant
+
+	-- ========================================================================
+	-- TOOLS TAB: utility features.
+	-- Card 1: reserved (placeholder; next feature lands here)
+	-- Card 2: Affix Protection (skip auto-rules on @affix@ items above iLvl floor)
+	-- Card 3: Bag Space (warn + summon-merchant threshold)
+	-- ========================================================================
+	local toolsPage = tabPages.tools
+
+	local function MakeToolsCard(xOff)
+		local card = CreateFrame("Frame", nil, toolsPage)
+		card:SetSize(cardW, cardH)
+		card:SetPoint("TOPLEFT", xOff, -4)
+		card:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
+		card:SetBackdropColor(0.04, 0.04, 0.04, 1)
+		card:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)
+		return card
+	end
+
+	local tCard1 = MakeToolsCard(0)
+	local tCard2 = MakeToolsCard(cardW + CARD_GAP)
+	local tCard3 = MakeToolsCard((cardW + CARD_GAP) * 2)
+
+	-- Tools Card 1: reserved slot. Holds layout while the next feature is
+	-- designed. Renders a centered, dimmed placeholder so the empty card
+	-- reads as intentional rather than broken.
+	local card1Placeholder = MakeText(tCard1, 11, C_ACCENT, "OUTLINE")
+	card1Placeholder:SetPoint("CENTER", tCard1, "CENTER", 0, 0)
+	card1Placeholder:SetText("Coming Soon!")
+
+	-- Tools Card 2: Affix Protection. Same density as Card 1: a small
+	-- section title at top, two main toggles (using shorter labels so
+	-- they fit cardW), and a tight label+input row for the iLvl floor.
+	local card2Title = MakeText(tCard2, 11, C_ACCENT, "OUTLINE")
+	card2Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+	card2Title:SetText("Affix Protection")
+
+	local tglProtectAffixFromDelete = MakeToggle(tCard2, "No Auto-Delete", C_ACCENT,
+		"When checked, items carrying PE's @affix@ tooltip marker skip Auto-Delete. Items below Min iLvl are NOT protected, so low-iLvl affix junk can still be cleared.")
+	tglProtectAffixFromDelete:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+	tglProtectAffixFromDelete:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglProtectAffixFromDelete = tglProtectAffixFromDelete
+
+	local tglProtectAffixFromSell = MakeToggle(tCard2, "No Auto-Sell", C_ACCENT,
+		"When checked, items carrying PE's @affix@ tooltip marker skip Auto-Sell. Items below Min iLvl are NOT protected, so low-iLvl affix junk can still be sold.")
+	tglProtectAffixFromSell:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
+	tglProtectAffixFromSell:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglProtectAffixFromSell = tglProtectAffixFromSell
+
+	-- Min iLvl row: label LEFT, small input RIGHT, same row.
+	local affixFloorRow = CreateFrame("Frame", nil, tCard2)
+	affixFloorRow:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	affixFloorRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -70)
+
+	local affixFloorLabel = affixFloorRow:CreateFontString(nil, "OVERLAY")
+	affixFloorLabel:SetFont(FONT, 10, "OUTLINE")
+	affixFloorLabel:SetTextColor(unpack(C_DIM))
+	affixFloorLabel:SetPoint("LEFT", affixFloorRow, "LEFT", 0, 0)
+	affixFloorLabel:SetText("Min iLvl:")
+
+	-- Tooltip hook on the row so hovering either the label or empty area
+	-- explains what the value does. Same text mirrored on the input box
+	-- below so hovering the editbox surface also shows the tip.
+	local AFFIX_FLOOR_TOOLTIP_TITLE = "Min iLvl"
+	local AFFIX_FLOOR_TOOLTIP_BODY  = "Affixed items at or above this iLvl are protected by the toggles above. Items below this iLvl are NOT protected and can still be auto-deleted or auto-sold by normal rules. Set to 0 to protect every affixed item regardless of iLvl."
+	affixFloorRow:EnableMouse(true)
+	affixFloorRow:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText(AFFIX_FLOOR_TOOLTIP_TITLE, 1, 1, 1)
+		GameTooltip:AddLine(AFFIX_FLOOR_TOOLTIP_BODY, C_DIM[1], C_DIM[2], C_DIM[3], true)
+		GameTooltip:Show()
+	end)
+	affixFloorRow:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+	local affixFloorBox = CreateFrame("Frame", nil, affixFloorRow)
+	affixFloorBox:SetSize(44, 20)
+	affixFloorBox:SetPoint("RIGHT", affixFloorRow, "RIGHT", 0, 0)
+	ApplyBackdrop(affixFloorBox, C_DROP_BG, C_DROP_BORDER)
+	affixFloorBox:EnableMouse(true)
+	affixFloorBox:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText(AFFIX_FLOOR_TOOLTIP_TITLE, 1, 1, 1)
+		GameTooltip:AddLine(AFFIX_FLOOR_TOOLTIP_BODY, C_DIM[1], C_DIM[2], C_DIM[3], true)
+		GameTooltip:Show()
+	end)
+	affixFloorBox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+	local affixFloorEdit = CreateFrame("EditBox", nil, affixFloorBox)
+	affixFloorEdit:SetFont(FONT, 10, "OUTLINE")
+	affixFloorEdit:SetTextColor(unpack(C_TEXT))
+	affixFloorEdit:SetAutoFocus(false)
+	affixFloorEdit:SetNumeric(true)
+	affixFloorEdit:SetMaxLetters(4)
+	affixFloorEdit:SetPoint("TOPLEFT", 4, -1)
+	affixFloorEdit:SetPoint("BOTTOMRIGHT", -4, 1)
+	affixFloorEdit:SetJustifyH("CENTER")
+	affixFloorEdit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
+	affixFloorEdit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
+	affixFloorEdit:SetScript("OnEditFocusLost", function(s)
+		local val = tonumber(s:GetText()) or 0
+		if val < 0 then val = 0 end
+		s:SetText(tostring(val))
+		local p = GetActiveProfile(db)
+		p.affixIlvlMin = val
+		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+	end)
+	self._affixIlvlEdit = affixFloorEdit
+
+	-- Tools Card 3: Bag Space. Section title at top, warning toggle next,
+	-- then two tight label+input rows: warn threshold and summon threshold.
+	-- Same vertical rhythm as Card 2 so the tab flows visually.
+	local card3Title = MakeText(tCard3, 11, C_ACCENT, "OUTLINE")
+	card3Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+	card3Title:SetText("Bag Space")
+
+	local tglBagSpaceWarn = MakeToggle(tCard3, "Bag warning", C_ACCENT,
+		"Prints a chat warning the first time free bag slots drop to or below the Warn threshold below. Re-arms once slots rise back above the threshold.")
+	tglBagSpaceWarn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+	tglBagSpaceWarn:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglBagSpaceWarn = tglBagSpaceWarn
+
+	-- Single threshold row: drives BOTH the chat warning AND the Goblin
+	-- Merchant bag-full summon trigger. One value, simpler UI.
+	local thresholdRow = CreateFrame("Frame", nil, tCard3)
+	thresholdRow:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	thresholdRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -48)
+
+	local thresholdLabel = thresholdRow:CreateFontString(nil, "OVERLAY")
+	thresholdLabel:SetFont(FONT, 10, "OUTLINE")
+	thresholdLabel:SetTextColor(unpack(C_DIM))
+	thresholdLabel:SetPoint("LEFT", thresholdRow, "LEFT", 0, 0)
+	thresholdLabel:SetText("Free slots:")
+
+	local thresholdBox = CreateFrame("Frame", nil, thresholdRow)
+	thresholdBox:SetSize(44, 20)
+	thresholdBox:SetPoint("RIGHT", thresholdRow, "RIGHT", 0, 0)
+	ApplyBackdrop(thresholdBox, C_DROP_BG, C_DROP_BORDER)
+
+	local thresholdEdit = CreateFrame("EditBox", nil, thresholdBox)
+	thresholdEdit:SetFont(FONT, 10, "OUTLINE")
+	thresholdEdit:SetTextColor(unpack(C_TEXT))
+	thresholdEdit:SetAutoFocus(false)
+	thresholdEdit:SetNumeric(true)
+	thresholdEdit:SetMaxLetters(3)
+	thresholdEdit:SetPoint("TOPLEFT", 4, -1)
+	thresholdEdit:SetPoint("BOTTOMRIGHT", -4, 1)
+	thresholdEdit:SetJustifyH("CENTER")
+	thresholdEdit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
+	thresholdEdit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
+	thresholdEdit:SetScript("OnEditFocusLost", function(s)
+		local val = tonumber(s:GetText()) or 5
+		if val < 0 then val = 0 end
+		s:SetText(tostring(val))
+		local p = GetActiveProfile(db)
+		p.bagSpaceWarnThreshold = val
+		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+	end)
+	self._bagSpaceWarnEdit = thresholdEdit
 
 	-- ========================================================================
 	-- AUTOINV TAB: 3 cards (Enable+Keywords, Loot Rules, Party Management)
@@ -1403,11 +1577,28 @@ local function BuildUI(self)
 			resetText:SetTextColor(unpack(C_DIM))
 		end)
 		resetBtn:SetScript("OnClick", function()
-			if _G.AutoDelete_Stats and _G.AutoDelete_Stats.Reset then
-				_G.AutoDelete_Stats.Reset()
-				print("|cffff8000[AutoDelete]|r: Stats reset.")
-				if self.RefreshTrackingStats then self:RefreshTrackingStats() end
+			-- Confirmation popup. Stats reset is destructive and irreversible
+			-- so a single click shouldn't fire it. Uses Blizzard's StaticPopup
+			-- system, registered once on first click.
+			if not StaticPopupDialogs["AUTODELETE_RESET_STATS"] then
+				StaticPopupDialogs["AUTODELETE_RESET_STATS"] = {
+					text = "Reset all AutoDelete stats?\n\nLifetime and session counters will be cleared. This cannot be undone.",
+					button1 = "Reset",
+					button2 = "Cancel",
+					OnAccept = function()
+						if _G.AutoDelete_Stats and _G.AutoDelete_Stats.Reset then
+							_G.AutoDelete_Stats.Reset()
+							print("|cffff8000[AutoDelete]|r: Stats reset.")
+							if self.RefreshTrackingStats then self:RefreshTrackingStats() end
+						end
+					end,
+					timeout = 0,
+					whileDead = true,
+					hideOnEscape = true,
+					preferredIndex = 3,
+				}
 			end
+			StaticPopup_Show("AUTODELETE_RESET_STATS")
 		end)
 	end
 
@@ -1949,6 +2140,10 @@ local function BuildUI(self)
 	-- ========================================================================
 	local scanCardH = 34                                                   -- fits 26-tall buttons + 4px pad top/bot
 	local scanBox = MakeSection(self, "Scan Options", yOff, 1)
+	-- Hide the outer section border so it doesn't double up with the inner
+	-- scanRightCard's border below. The inner card is the visible frame.
+	scanBox:SetBackdropBorderColor(0, 0, 0, 0)
+	scanBox:SetBackdropColor(0, 0, 0, 0)
 
 	-- Full-width inner card: holds Delete/Sell/Keep tab buttons.
 	-- Anchored flush to section edges (1px) so the buttons read as edge-aligned
@@ -2017,7 +2212,12 @@ local function BuildUI(self)
 	-- SECTION 4: Search & Manage (search row + item list)
 	-- Takes the remaining vertical space inside the panel.
 	-- ========================================================================
-	local bottomPad = 15
+	-- Bottom padding from manageBox to frame edge. Tightened so the empty
+	-- space below the pagination row reads as similar in size to the side
+	-- margins. Account for the ~7px ALREADY consumed inside manageBox
+	-- (1px border + 6px gap below pagination); 8 below that lands the
+	-- visible bottom gap at ~15, matching the 15px side margin.
+	local bottomPad = 8
 	local frameH = self:GetHeight() or 800
 	local manageH = frameH - 28 - math.abs(yOff) - bottomPad
 	if manageH < 220 then manageH = 220 end
@@ -2152,15 +2352,40 @@ local function BuildUI(self)
 	end)
 
 	-- "Item Name" column header above the list (CSS: list-header, h=40, bg #101010)
-	local itemNameHeader = CreateFrame("Frame", nil, manageBox)
-	itemNameHeader:SetPoint("TOPLEFT", 6, -40)
-	itemNameHeader:SetPoint("TOPRIGHT", -6, -40)
+	-- Click to toggle ascending/descending sort. Arrow indicator next to the
+	-- label shows current direction.
+	-- Anchors match listBox (1px inset) and border style matches listBox so
+	-- the header reads as the top section of the same bordered container.
+	-- Header keeps a slightly lighter bg than listBox to signal "this is the
+	-- column header" without breaking the unified border.
+	local itemNameHeader = CreateFrame("Button", nil, manageBox)
+	itemNameHeader:SetPoint("TOPLEFT", 1, -40)
+	itemNameHeader:SetPoint("TOPRIGHT", -1, -40)
 	itemNameHeader:SetHeight(22)
-	itemNameHeader:SetBackdrop({ bgFile = WHITE8x8 })
-	itemNameHeader:SetBackdropColor(0.063, 0.063, 0.063, 1)  -- #101010
+	itemNameHeader:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
+	itemNameHeader:SetBackdropColor(0.063, 0.063, 0.063, 1)  -- #101010 (slightly lighter than listBox)
+	itemNameHeader:SetBackdropBorderColor(0.15, 0.15, 0.15, 1)  -- #262626, matches listBox
 	local itemNameLabel = MakeText(itemNameHeader, 10, C_TEXT, "OUTLINE")
 	itemNameLabel:SetPoint("LEFT", 10, 0)
 	itemNameLabel:SetText("Item Name")
+
+	local sortArrow = MakeText(itemNameHeader, 9, C_DIM, "OUTLINE")
+	sortArrow:SetPoint("LEFT", itemNameLabel, "RIGHT", 6, 0)
+	sortArrow:SetText("v")  -- v = descending visual; we start ascending so default text rotates
+	self._sortDescending = false
+
+	itemNameHeader:SetScript("OnEnter", function()
+		itemNameHeader:SetBackdropColor(0.10, 0.10, 0.10, 1)
+	end)
+	itemNameHeader:SetScript("OnLeave", function()
+		itemNameHeader:SetBackdropColor(0.063, 0.063, 0.063, 1)
+	end)
+	itemNameHeader:SetScript("OnClick", function()
+		self._sortDescending = not self._sortDescending
+		sortArrow:SetText(self._sortDescending and "^" or "v")
+		if self.Refresh then self:Refresh() end
+	end)
+	self._sortArrow = sortArrow
 
 
 	-- ========================================================================
@@ -2267,8 +2492,131 @@ local function BuildUI(self)
 		row.text:SetPoint("RIGHT", row.remove, "LEFT", -4, 0)
 		row.text:SetWordWrap(false)
 
+		-- Right-click context menu. Provides quick "move to other list" actions
+		-- and remove. Left-click is reserved (not currently used) so the row
+		-- registers for both button kinds. The menu is a single shared frame
+		-- created lazily on first right-click; see EnsureRowContextMenu.
+		row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+		row:SetScript("OnClick", function(self, button)
+			if button == "RightButton" and self.entry then
+				if _G.AutoDelete_ShowRowContextMenu then
+					_G.AutoDelete_ShowRowContextMenu(self, self.entry)
+				end
+			end
+		end)
+
 		self._rows[i] = row
 	end
+
+	-- Build (lazily) and show the row context menu near a row. Single frame
+	-- shared across all rows. Each click rebuilds the items based on the
+	-- current list mode so "Move to" only shows the OTHER lists, not the
+	-- current one. Items are routed through the same Add/Remove paths the
+	-- buttons use, so list-conflict checks and statistics stay consistent.
+	local rowMenu
+	local function EnsureRowContextMenu()
+		if rowMenu then return rowMenu end
+		rowMenu = CreateFrame("Frame", "AutoDelete_RowContextMenu", UIParent)
+		rowMenu:SetFrameStrata("FULLSCREEN_DIALOG")
+		rowMenu:SetFrameLevel(200)
+		rowMenu:EnableMouse(true)
+		rowMenu:SetClampedToScreen(true)
+		ApplyBackdrop(rowMenu, C_BG, { 0.30, 0.30, 0.30, 1 })
+		rowMenu:Hide()
+		rowMenu._items = {}
+		rowMenu:SetScript("OnHide", function() if rowMenu._closer then rowMenu._closer:Hide() end end)
+		-- Click-elsewhere closer (full-screen invisible button, behind the menu)
+		local closer = CreateFrame("Button", nil, UIParent)
+		closer:SetAllPoints(UIParent)
+		closer:SetFrameStrata("FULLSCREEN_DIALOG")
+		closer:SetFrameLevel(199)
+		closer:RegisterForClicks("AnyDown")
+		closer:SetScript("OnClick", function() rowMenu:Hide() end)
+		closer:Hide()
+		rowMenu._closer = closer
+		return rowMenu
+	end
+
+	local function ShowRowContextMenu(row, entry)
+		local menu = EnsureRowContextMenu()
+		menu:ClearAllPoints()
+		-- Anchor at the mouse cursor. GetCursorPosition returns screen-pixel
+		-- coordinates; divide by UIParent's effective scale so we land at the
+		-- correct UI-coordinate position. A small (8, -2) offset keeps the
+		-- cursor just inside the top-left of the menu instead of dead on the
+		-- border, so the first row isn't hovered the instant the menu opens.
+		local mx, my = GetCursorPosition()
+		local scale = UIParent:GetEffectiveScale()
+		menu:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", (mx / scale) - 8, (my / scale) + 2)
+		-- Build the action list based on current list mode
+		local mode = self._listMode or "delete"
+		local actions = {}
+		if mode ~= "delete"    then table.insert(actions, { label = "Move to Delete", target = "listText" }) end
+		if mode ~= "sell"      then table.insert(actions, { label = "Move to Sell",   target = "sellListText" }) end
+		if mode ~= "whitelist" then table.insert(actions, { label = "Move to Keep",   target = "whitelistText" }) end
+		table.insert(actions, { label = "Remove", target = nil })
+
+		-- Tear down old item buttons
+		for _, btn in ipairs(menu._items) do btn:Hide() end
+		menu._items = {}
+
+		local rowH = 22
+		local W = 160
+		menu:SetSize(W, rowH * #actions + 4)
+		local menuLevel = menu:GetFrameLevel()
+		for i, action in ipairs(actions) do
+			local btn = CreateFrame("Button", nil, menu)
+			btn:SetSize(W - 4, rowH)
+			btn:SetPoint("TOPLEFT", 2, -2 - (i - 1) * rowH)
+			-- Explicitly raise above the menu's backdrop so the button frame
+			-- and its fontstring render on top, not under, the menu chrome.
+			btn:SetFrameLevel(menuLevel + 1)
+			-- Visible 1px border (dim mid-gray) so each row is clearly delimited
+			-- and not invisible against the menu's near-black bg.
+			ApplyBackdrop(btn, C_ROW_ODD, { 0.25, 0.25, 0.25, 1 })
+			local txt = btn:CreateFontString(nil, "OVERLAY")
+			txt:SetFont(FONT, 11, "OUTLINE")
+			txt:SetTextColor(unpack(C_TEXT))
+			txt:SetJustifyH("LEFT")
+			txt:SetPoint("LEFT", 8, 0)
+			txt:SetPoint("RIGHT", -8, 0)
+			txt:SetText(action.label)
+			btn:SetScript("OnEnter", function()
+				ApplyBackdrop(btn, C_ROW_HOVER, { 0.40, 0.40, 0.40, 1 })
+				txt:SetTextColor(1, 1, 1, 1)
+			end)
+			btn:SetScript("OnLeave", function()
+				ApplyBackdrop(btn, C_ROW_ODD, { 0.25, 0.25, 0.25, 1 })
+				txt:SetTextColor(unpack(C_TEXT))
+			end)
+			btn:SetScript("OnClick", function()
+				menu:Hide()
+				if entry.kind ~= "id" then return end
+				local id = entry.id
+				if action.target then
+					-- Move = remove from current + add to target
+					local currentKey = GetActiveListKey()
+					if _G.AutoDelete_RemoveItemFromList then
+						_G.AutoDelete_RemoveItemFromList(currentKey, id)
+					end
+					if _G.AutoDelete_AddItemToList then
+						_G.AutoDelete_AddItemToList(action.target, id)
+					end
+				else
+					-- Remove only
+					local currentKey = GetActiveListKey()
+					if _G.AutoDelete_RemoveItemFromList then
+						_G.AutoDelete_RemoveItemFromList(currentKey, id)
+					end
+				end
+				if self.Refresh then self:Refresh() end
+			end)
+			table.insert(menu._items, btn)
+		end
+		menu:Show()
+		menu._closer:Show()
+	end
+	_G.AutoDelete_ShowRowContextMenu = ShowRowContextMenu
 
 	-- ========================================================================
 	-- Pagination UI (below listBox, inside manageBox)
@@ -2605,6 +2953,51 @@ local function BuildUI(self)
 		GetActiveProfile(db).autoInviteConvertToRaid = btn._checked
 	end)
 
+	-- Tools tab: Affix Protection toggles. Same RefreshCachedProfile call
+	-- so the delete scanner and sell loop see the new setting on the next
+	-- tick without waiting for a profile reload.
+	tglProtectAffixFromDelete:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		GetActiveProfile(db).protectAffixFromDelete = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+	end)
+	tglProtectAffixFromSell:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		GetActiveProfile(db).protectAffixFromSell = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+	end)
+
+	-- General tab: Show affix dot toggle (sits next to Scan Speed). Forces
+	-- an immediate dot refresh so the visual state matches the toggle
+	-- without waiting for a natural bag event.
+	tglShowAffixDot:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		GetActiveProfile(db).showAffixDot = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+		if _G.AutoDelete_RefreshAffixDots then
+			_G.AutoDelete_RefreshAffixDots()
+		end
+	end)
+
+	-- Tools tab: Bag Space Warning toggle.
+	tglBagSpaceWarn:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		GetActiveProfile(db).bagSpaceWarnEnabled = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+	end)
+
 	-- Returns the display-friendly name of a list key for chat output.
 	local function ListLabelForKey(key)
 		if key == "listText" then return "Delete" end
@@ -2869,6 +3262,15 @@ local function BuildUI(self)
 		tglEnable:SetChecked(p.enabled)
 		tglAutoAddEquipped:SetChecked(p.autoAddEquipped)
 
+		-- Tools tab: Affix Protection
+		tglProtectAffixFromDelete:SetChecked(p.protectAffixFromDelete)
+		tglProtectAffixFromSell:SetChecked(p.protectAffixFromSell)
+		affixFloorEdit:SetText(tostring(p.affixIlvlMin or 0))
+
+		-- Tools tab: Bag Space (single threshold drives both warn + summon)
+		tglBagSpaceWarn:SetChecked(p.bagSpaceWarnEnabled)
+		thresholdEdit:SetText(tostring(p.bagSpaceWarnThreshold or 5))
+
 		-- BoE Armor card
 		boeArmor.enable:SetChecked(p.boeArmorEnabled)
 		boeArmor.rare:SetChecked(p.boeArmorRare)
@@ -2911,6 +3313,7 @@ local function BuildUI(self)
 		lootDD:SetValue(p.autoInviteLootRule or "freeforall")
 		tglConvertRaid:SetChecked(p.autoInviteConvertToRaid)
 		speedDD:SetValue((p.scanInterval and p.scanInterval >= 0.5) and p.scanInterval or 0.5)
+		tglShowAffixDot:SetChecked(p.showAffixDot ~= false)  -- default true if nil
 		UpdateTabColors()
 
 		-- Also refresh tracking stats if the Tracking tab is currently shown.
@@ -2927,7 +3330,7 @@ local function BuildUI(self)
 			for _, entry in ipairs(self._entries) do
 				if entry.kind == "id" then GetItemInfo("item:" .. entry.id) end
 			end
-			SortEntries(self._entries)
+			SortEntries(self._entries, self._sortDescending)
 			self._filtered = {}
 			local f = Normalize(self._filterText or "")
 			for _, e in ipairs(self._entries) do

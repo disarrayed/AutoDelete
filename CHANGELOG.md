@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.19] - 2026-05-13
+
+### Added
+
+- Tools tab in the settings panel.
+- Affix Protection. Skip Auto-Delete and Auto-Sell on items carrying PE's @affix@ tooltip marker. Optional iLvl floor so low-iLvl affix junk can still be cleared. Idea from Discord user Biboup! on 5/13/26 at 4:23 PM.
+- Cyan dot on bag slots holding affixed items. Toggle on the General tab.
+- Bag Space warning + Goblin Merchant summon use a single shared threshold.
+- Sortable columns in the list views.
+- Confirmation popup before resetting stats.
+
+### Removed
+
+- **Auto-Open Containers** — pulled before ship. WoW 3.3.5a treats `UseContainerItem` as a protected function for a wide class of items: clams, junkboxes, lockboxes, items with cast-on-use effects, books, quest-starting items, anything requiring a target. When any addon calls `UseContainerItem` from a bag scan or event handler (instead of a real player click or keypress), the client fires `ADDON_ACTION_BLOCKED` and silently no-ops. This is not a server quirk and not specific to any one addon — every addon that auto-fires `UseContainerItem` hits the same wall. The documented Blizzard workaround is a secure button clicked via a user-bound keybind or macro, which is a manual action rather than automatic. May revisit as a keybind-driven opener in a future release.
+
 ## [3.18] - 2026-05-02
 
 ### Added
@@ -68,27 +83,18 @@ All notable changes to this project will be documented in this file.
 - **Enter clears focus on single-line text fields.** The Search & Manage search box now drops focus when you press Enter, so subsequent keypresses go to the game (or chat) instead of the field. The Auto-Invite keyword box already had this; it's now consistent across the addon.
 - **Clear (x) button on single-line text fields.** Click the x in the Search & Manage box to clear the filter. Click it on the Auto-Invite keyword box to reset to the default `inv,invite`.
 - **Search now works on the Raw view.** Type in the search box while Raw is open and the editor narrows to matching lines. The editor becomes read-only while filtered (text dims) so you can't accidentally type into a hidden-line view. Clearing the search restores the full editable text. Edits made before searching are preserved.
+- **Cross-list conflict detector** runs once at login. If any item appears on more than one list (Delete + Sell, Delete + Keep, or Sell + Keep), a yellow chat warning prints with `/del clean` as the resolution path. The add-time conflict check already prevents new ones; this catches legacy entries from imports, manual text edits, or older saves.
+
+### Changed
+
+- **Delete and Sell lists now override quest item protection.** Previously, items reporting `itemType == "Quest"` were hard-exempt from every rule including the user's explicit lists. Now an item on the Delete list deletes, and an item on the Sell list sells, regardless of quest type. Keep list still wins over both. Auto-rules (Junk/Common/Greens/BoE Armor/BoP/BoE Weapons) continue to respect quest item protection.
 
 ### Fixed
 
 - **Right-click on usable bag items (Hearthstone, potions, mounts, scrolls, food) now works.** Earlier versions globally replaced `UseContainerItem`, which poisoned WoW 3.3.5's secure-action call path and silently rejected use of any castable item. Switched to `hooksecurefunc` with a bag-snapshot mechanism so manual sell tracking still works at vendors without breaking item use.
 - **Shift-click of a chat item link no longer double-prints.** A single click was firing both `ChatEdit_InsertLink` and `HandleModifiedItemClick` paths, producing two "added to keep list" or "already in the list" messages. Added a 0.5-second per-item dedupe.
 
-## [3.15] - 2026-04-25
-
-### Added
-
-- **Shift-click any item link to add it to the Keep list.** Works in chat, AtlasLoot, whispers, tooltips, anywhere a link appears. If a text box has keyboard focus (chat input, search box, mail subject, etc.), WoW's default insert-link behavior takes priority and the addon does nothing - so existing workflows aren't disrupted. Items already on Delete or Sell are refused with a chat message (cross-list conflict protection still applies).
-
-## [3.14] - 2026-04-25
-
-### Changed
-
-- **Delete and Sell lists now override quest item protection.** Previously, items reporting `itemType == "Quest"` were hard-exempt from every rule including the user's explicit lists. Now an item on the Delete list deletes, and an item on the Sell list sells, regardless of quest type. Keep list still wins over both. Auto-rules (Junk/Common/Greens/BoE Armor/BoP/BoE Weapons) continue to respect quest item protection.
-
-### Added
-
-- **Cross-list conflict detector** runs once at login. If any item appears on more than one list (Delete + Sell, Delete + Keep, or Sell + Keep), a yellow chat warning prints with `/del clean` as the resolution path. The add-time conflict check already prevents new ones; this catches legacy entries from imports, manual text edits, or older saves.
+> **Versions 3.14 and 3.15 do not exist.** They were skipped during development; their planned content shipped as part of v3.16. Anyone citing "AutoDelete v3.14" or "v3.15" in source comments or related projects should update the reference to v3.16.
 
 ## [3.13] - 2026-04-25
 
@@ -175,3 +181,160 @@ Initial release of the v3.10 line. Major feature set and rework consolidated fro
 
 - WoW 3.3.5a (Wrath of the Lich King)
 - Tested on Project Ebonhold with PE-ElvUI fork
+
+## [2.9] - 2026-04-22
+
+Final private build before the v3.10 public release. End of the v2 testing line.
+
+## [2.0] - 2026-02-15
+
+Private testing line for what became v3. Distributed only to friends in the Project Ebonhold Discord. Never tagged, never publicly released, no formal changelog kept during this period. Internal iteration during these weeks informed the v3.x architecture.
+
+## [1.7.0] - 2026-02-08
+
+### Fixed
+
+- Major performance fix: OnUpdate no longer calls GetDB/GetActiveProfile every frame. Profile is cached and refreshed only on events.
+- Raw list editor completely rebuilt. Removed UIPanelScrollFrameTemplate that was eating mouse clicks, replaced with direct scroll frame that properly passes input to the edit box.
+- Click anywhere in the raw editor area to focus it
+- Mouse wheel scrolling and cursor-follow scrolling work properly
+- Removed SellGreenGear from OnUpdate loop (MERCHANT_SHOW handles it)
+
+## [1.6.2] - 2026-02-08
+
+### Fixed
+
+- Raw list editor no longer gets replaced while editing. GET_ITEM_INFO_RECEIVED and auto-gray scans no longer touch the raw editor when it's open.
+- Raw editor stays fully interactive (clickable, pasteable, editable) at all times
+
+## [1.6.1] - 2026-02-08
+
+### Fixed
+
+- Pasting into the raw list editor now properly saves and updates the item list
+- Raw editor no longer requires manual typing to register changes. Paste, import, and replace all work.
+
+### Changed
+
+- Duplicate items are automatically stripped when parsing the raw list
+- Programmatic text updates no longer trigger false saves (prevents data corruption loops)
+
+## [1.6.0] - 2026-02-08
+
+### Added
+
+- Continuous auto-sell while a vendor is open. Items from the sell list and green gear are sold on every scan tick, not just on vendor open.
+- Auto-sell uses the same scan speed as auto-delete
+- Silent mode when nothing to sell (no chat spam during continuous scans)
+
+## [1.5.0] - 2026-02-08
+
+### Added
+
+- Sell List. Drag-and-drop items to auto-sell at vendors, works identically to the delete list.
+- Delete List / Sell List toggle tabs above the search box to switch between lists
+- ElvUI sell button now accepts drag-and-drop to add items to the sell list
+- Auto-sell triggers on MERCHANT_SHOW. Sells green gear and sell-list items when opening a vendor.
+- `sellListText` added to per-character profile data
+
+## [1.4.0] - 2026-02-08
+
+### Added
+
+- Sell Green Gear button on ElvUI bag frame (coin icon, next to the AutoDelete button)
+- Sells all green (uncommon) quality armor and weapons to the current vendor
+- Chat output shows how many items sold and total gold earned
+- Tooltip warns if you're not at a vendor
+- `/sellgreens` slash command for non-ElvUI users
+
+## [1.3.0] - 2026-02-08
+
+### Added
+
+- Configurable scan speed with radio-style options: 0.75s, 10s, 30s, 2m, 5m, 10m
+- Auto-delete pauses while dragging an item, preventing interference with drag-and-drop
+
+### Changed
+
+- Replaced remove buttons with compact red X icons that no longer overlap the scrollbar
+- Improved vertical spacing between Scan Speed, Search, and item list sections
+
+### Fixed
+
+- Dragging items no longer gets interrupted by the auto-delete scanner
+
+## [1.2.1] - 2026-02-06
+
+### Fixed
+
+- Auto-delete no longer fires while dragging an item, which was preventing drag-and-drop from working properly
+- Gray item scanner also pauses when cursor is holding an item
+
+## [1.2.0] - 2026-02-06
+
+### Added
+
+- Auto-add gray (junk) items checkbox. Automatically adds quality-0 items to the deletion list on loot.
+- ElvUI bag button is now a drop target. Drag items onto it to add them to the list.
+- Right-click ElvUI bag button to open settings
+- List box itself now accepts drag-and-drop (removed separate drop zone)
+- Empty state hint text when list is empty: "Drag items here to add to deletion list"
+- Each list row also accepts drag-and-drop
+- Profile dropdown skinned with thin ElvUI-style border
+- Search box restyled with thin border and dark background (no more default InputBoxTemplate)
+
+### Changed
+
+- All UI borders changed from thick Blizzard tooltip borders to thin 1px ElvUI-style borders (`Interface\Buttons\WHITE8X8`)
+- ElvUI bag button changed from click-to-open to drop-target with red highlight on hover
+- Drop zone removed in favor of list box accepting drops directly
+
+### Fixed
+
+- Backdrop colors unified across all UI elements for consistent look
+
+## [1.1.0] - 2026-02-06
+
+### Added
+
+- Auto-add gray items feature (checkbox + scanning logic)
+- ElvUI bag button that opens settings panel
+- `autoGray` field added to profile data
+
+### Changed
+
+- All UI borders updated to thin 1px style using `Interface\Buttons\WHITE8X8`
+
+## [1.0.1] - 2026-02-05
+
+### Added
+
+- Item icons next to names with proper caching via GET_ITEM_INFO_RECEIVED
+- Empty state message when list is empty
+
+### Changed
+
+- List itself accepts drag-and-drop (removed separate drop zone in earlier iteration)
+
+### Fixed
+
+- UI sizing to fit properly in interface panel (360x180 list)
+- Raw list now shows item IDs with name comments (`item:12345 # Item Name`)
+- Removed combat lockdown restriction. Items delete during combat.
+
+## [1.0.0] - 2026-02-05
+
+First public mention: https://discord.com/channels/1429854156444794884/1467578986878996491/1470000027043889154
+
+### Added
+
+- Initial release
+- Core auto-deletion engine with throttled bag scanning (0.75s between scans)
+- Drag and drop interface for adding items
+- Visual item list with icons, names, and remove buttons
+- Profile system with per-character deletion lists
+- Search filter for finding items in the list
+- Raw list view for advanced editing
+- Slash commands: `/del` and `/autodelete`
+- SavedVariables database with migration support
+- Periodic scanning every 2 seconds when enabled
