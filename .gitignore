@@ -16,7 +16,7 @@ Thumbs.db
 # Local-only reference material that lives in the parent folder
 # (F:\Claude\Addons\). Never commit copies of these even if someone
 # accidentally drags them into the repo directory.
-wow-addon-conventions.md
+addon-conventions.md
 lua-reference/
 wow-api/
 AutoDelete_Architecture.md
