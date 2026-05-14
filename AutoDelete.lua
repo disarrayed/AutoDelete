@@ -1130,6 +1130,71 @@ local function RemoveSellableFromDeleteList()
 end
 
 -- Exposed API for Options.lua.
+-- Scan all three lists (Delete + Sell + Keep) and remove any entry whose
+-- item's GetItemInfo 7th return (localized itemSubType) matches the target.
+-- Used by the "Remove Patterns by Profession" UI to prune recipes/patterns/
+-- plans/schematics/formulas/designs/techniques/manuals from the user's lists.
+-- Plain-name entries (no item:ID) are preserved -- we can't identify them
+-- without a bag scan and the user typed them deliberately. Uncached items
+-- are also preserved and reported in the summary.
+local function RemovePatternsBySubtype(targetSubtype)
+	local db = GetDB()
+	local profile = GetActiveProfile(db)
+	if not profile then return false, "no active profile" end
+	if not targetSubtype or targetSubtype == "" then
+		return false, "no subtype specified"
+	end
+
+	local uncachedCount = 0
+
+	local function CleanList(listText)
+		local kept = {}
+		local removed = 0
+		for line in string.gmatch(listText or "", "[^\r\n]+") do
+			local trimmed = Trim(line)
+			local keep = true
+			if trimmed ~= "" and not string.match(trimmed, "^#") then
+				local id = tonumber(string.match(trimmed, "^item:(%d+)"))
+				if id then
+					-- 7th return = localized itemSubType ("Pattern", "Recipe",
+					-- "Plans", "Schematic", "Formula", "Design", "Technique",
+					-- "Manual"). On non-enUS clients the strings differ; the
+					-- caller must pass the locale-correct token. TODO localize.
+					local name, _, _, _, _, _, itemSubType = GetItemInfo("item:" .. id)
+					if name then
+						if itemSubType == targetSubtype then
+							keep = false
+							removed = removed + 1
+						end
+					else
+						uncachedCount = uncachedCount + 1
+					end
+				end
+			end
+			if keep then table.insert(kept, trimmed) end
+		end
+		local rebuilt = table.concat(kept, "\n")
+		if #kept > 0 then rebuilt = rebuilt .. "\n" end
+		return rebuilt, removed
+	end
+
+	local newDelete, delRemoved  = CleanList(profile.listText)
+	local newSell,   sellRemoved = CleanList(profile.sellListText)
+	local newKeep,   keepRemoved = CleanList(profile.whitelistText)
+	profile.listText      = newDelete
+	profile.sellListText  = newSell
+	profile.whitelistText = newKeep
+
+	if RefreshCachedProfile then RefreshCachedProfile() end
+	return true, {
+		subtype       = targetSubtype,
+		deleteRemoved = delRemoved,
+		sellRemoved   = sellRemoved,
+		keepRemoved   = keepRemoved,
+		uncached      = uncachedCount,
+	}
+end
+
 _G.AutoDelete_Profiles = {
 	GetOtherCharacters = GetOtherCharacterNames,
 	GetAllCharacters = GetAllCharacterNames,
@@ -1140,6 +1205,7 @@ _G.AutoDelete_Profiles = {
 	ClearList = ClearListOnCurrent,
 	RemoveJunk = RemoveJunkFromLists,
 	RemoveSellableFromDelete = RemoveSellableFromDeleteList,
+	RemovePatternsBySubtype = RemovePatternsBySubtype,
 }
 
 -- ============================================================================

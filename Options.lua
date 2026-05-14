@@ -2939,6 +2939,44 @@ local function BuildUI(self)
 			}
 		end
 
+		-- Remove-patterns popup: scans all three lists (Delete + Sell + Keep)
+		-- for items whose itemSubType matches the chosen profession token
+		-- (passed via popup.data). One popup serves all eight profession
+		-- options on the sub-window; popup.data carries the localized
+		-- subtype string ("Pattern", "Recipe", "Plans", etc.) and a
+		-- display label for the prompt text.
+		if not StaticPopupDialogs["AUTODELETE_PROFILE_REMOVE_PATTERNS"] then
+			StaticPopupDialogs["AUTODELETE_PROFILE_REMOVE_PATTERNS"] = {
+				text = "Remove all %s items from your Delete, Sell, and Keep lists? This cannot be undone.",
+				button1 = "Remove", button2 = "Cancel",
+				OnAccept = function(popup)
+					local payload = popup.data
+					if type(payload) ~= "table" or not payload.subtype then return end
+					if not _G.AutoDelete_Profiles or not _G.AutoDelete_Profiles.RemovePatternsBySubtype then return end
+					local ok, result = _G.AutoDelete_Profiles.RemovePatternsBySubtype(payload.subtype)
+					if ok then
+						print(string.format(
+							"|cffff8000[AutoDelete]|r: Removed %s (Delete: %d, Sell: %d, Keep: %d).",
+							payload.label or payload.subtype,
+							result.deleteRemoved or 0,
+							result.sellRemoved or 0,
+							result.keepRemoved or 0))
+						if (result.uncached or 0) > 0 then
+							print(string.format(
+								"  |cff999999%d entry(ies) skipped (item data not cached). Open the item or reload to refresh the cache.|r",
+								result.uncached))
+						end
+						if _G.AutoDeleteOptionsPanel and _G.AutoDeleteOptionsPanel.Refresh then
+							_G.AutoDeleteOptionsPanel:Refresh()
+						end
+					else
+						print("|cffff4444[AutoDelete]|r: Remove patterns failed (" .. tostring(result) .. ").")
+					end
+				end,
+				timeout = 0, whileDead = true, hideOnEscape = true, preferredIndex = 3,
+			}
+		end
+
 		-- Remove-sellable popup: scans the Delete list only and removes any
 		-- entry whose item has a vendor sell price > 0. Helps prune items
 		-- that shouldn't be outright deleted because they have value.
@@ -4964,12 +5002,12 @@ local function BuildClearListWindow()
 	--   Card:          y=-32 to y=-(body_H - 50)
 	--   Footer:        50px (Cancel at BOTTOMRIGHT -15, 15 = 24 tall + 15 bottom pad + 11 top pad)
 	--
-	-- Card needs to fit 6 buttons (26 tall) with 4px gaps, plus 8px top pad
-	-- and some bottom pad. Required card height = 8 + 6*26 + 5*4 + bottom_pad.
-	-- With bottom_pad=10 that's 194. Working backwards:
-	--   card_H = body_H - 32 - 50  →  body_H = card_H + 82 = 276
-	--   frame_H = body_H + 24     →  300
-	local W, H = 340, 300
+	-- Card needs to fit 7 buttons (26 tall) with 4px gaps, plus 8px top pad
+	-- and some bottom pad. Required card height = 8 + 7*26 + 6*4 + bottom_pad.
+	-- With bottom_pad=10 that's 224. Working backwards:
+	--   card_H = body_H - 32 - 50  →  body_H = card_H + 82 = 306
+	--   frame_H = body_H + 24     →  330
+	local W, H = 340, 330
 	local f, body = BuildPopupSkeleton("AutoDeleteClearListPickerFrame",
 		"Clear List", W, H)
 	clearFrame = f
@@ -4998,6 +5036,11 @@ local function BuildClearListWindow()
 		{ value = "Junk",     label = "Remove junk items",               color = { 0.55, 0.55, 0.55, 1 } },
 		-- Remove Sellable: scans Delete only, removes items with vendor value.
 		{ value = "Sellable", label = "Remove items with vendor value",  color = { 0.95, 0.80, 0.20, 1 } },
+		-- Remove Patterns: opens a sub-window listing each profession-style
+		-- subtype (Pattern / Recipe / Plans / Schematic / Formula / Design /
+		-- Technique / Manual). Ellipsis on the label signals "opens another
+		-- window" rather than a single confirm.
+		{ value = "Patterns", label = "Remove recipes & patterns...",    color = { 0.45, 0.85, 0.55, 1 } },
 	}
 
 	for i, opt in ipairs(options) do
@@ -5020,6 +5063,15 @@ local function BuildClearListWindow()
 		end)
 		b:SetScript("OnClick", function()
 			clearFrame:Hide()
+			-- "Patterns" routes to a sub-window (sibling, not confirm) so
+			-- the user can pick which profession's items to remove. Every
+			-- other option fires a confirm StaticPopup directly.
+			if opt.value == "Patterns" then
+				if _G.AutoDelete_ShowRemovePatternsPicker then
+					_G.AutoDelete_ShowRemovePatternsPicker()
+				end
+				return
+			end
 			local dlg
 			if opt.value == "All" then
 				dlg = StaticPopup_Show("AUTODELETE_PROFILE_CLEAR_ALL")
@@ -5042,4 +5094,97 @@ end
 _G.AutoDelete_ShowClearListPicker = function()
 	BuildClearListWindow()
 	clearFrame:Show()
+end
+
+-- ============================================================================
+-- Remove Patterns by Profession Window
+-- ============================================================================
+-- Sub-window opened from the Clear List window's "Remove recipes & patterns..."
+-- option. Lists each profession's craft-item subtype (Pattern / Recipe / Plans
+-- / Schematic / Formula / Design / Technique / Manual). Clicking a row fires
+-- the shared AUTODELETE_PROFILE_REMOVE_PATTERNS confirm popup with the chosen
+-- subtype in popup.data; the OnAccept handler walks all three lists and
+-- removes matching entries.
+
+local removePatternsFrame
+
+-- 8 profession buttons + chrome math:
+--   card_H = 8 (top pad) + 8 * 26 (buttons) + 7 * 4 (gaps) + 10 (bottom pad) = 254
+--   body_H = card_H + 32 (subtitle) + 50 (footer) = 336
+--   frame_H = body_H + 24 (title bar) = 360
+local PROFESSIONS_LIST = {
+	-- Subtype string matches GetItemInfo()'s 7th return on 3.3.5a enUS.
+	-- TODO: localize -- subtype strings differ on non-enUS clients.
+	{ subtype = "Pattern",   label = "Patterns (Tailoring + Leatherworking)" },
+	{ subtype = "Recipe",    label = "Recipes (Cooking + Alchemy)" },
+	{ subtype = "Plans",     label = "Plans (Blacksmithing)" },
+	{ subtype = "Schematic", label = "Schematics (Engineering)" },
+	{ subtype = "Formula",   label = "Formulas (Enchanting)" },
+	{ subtype = "Design",    label = "Designs (Jewelcrafting)" },
+	{ subtype = "Technique", label = "Techniques (Inscription)" },
+	{ subtype = "Manual",    label = "Manuals (First Aid)" },
+}
+
+local function BuildRemovePatternsWindow()
+	if removePatternsFrame then return end
+
+	local W, H = 360, 360
+	local f, body = BuildPopupSkeleton("AutoDeleteRemovePatternsFrame",
+		"Remove Patterns by Profession", W, H)
+	removePatternsFrame = f
+
+	-- Instruction text
+	local sub = MakeText(body, 10, C_TEXT, "OUTLINE", "LEFT")
+	sub:SetPoint("TOPLEFT", 15, -10)
+	sub:SetPoint("TOPRIGHT", -15, -10)
+	sub:SetHeight(16)
+	sub:SetText("Pick which crafting items to scrub from your lists:")
+
+	-- Card for the 8 buttons
+	local card = CreateFrame("Frame", nil, body)
+	card:SetPoint("TOPLEFT", 15, -32)
+	card:SetPoint("BOTTOMRIGHT", -15, 50)
+	ApplyBackdrop(card, { 14/255, 14/255, 14/255, 1 }, C_BORDER)
+
+	local BTN_W, BTN_H = 310, 26
+	local BTN_GAP = 4
+	local PROF_COLOR = { 0.45, 0.85, 0.55, 1 }  -- match the launcher option color
+
+	for i, prof in ipairs(PROFESSIONS_LIST) do
+		local b = CreateFrame("Button", nil, card)
+		b:SetSize(BTN_W, BTN_H)
+		b:SetPoint("TOP", 0, -8 - ((i - 1) * (BTN_H + BTN_GAP)))
+		ApplyBackdrop(b, C_ROW_ODD, C_BORDER)
+		local txt = MakeText(b, 11, C_TEXT, "OUTLINE")
+		txt:SetPoint("CENTER")
+		txt:SetText(prof.label)
+		b:SetScript("OnEnter", function(btn)
+			btn:SetBackdropColor(PROF_COLOR[1], PROF_COLOR[2], PROF_COLOR[3], 0.3)
+			btn:SetBackdropBorderColor(PROF_COLOR[1], PROF_COLOR[2], PROF_COLOR[3], 1)
+			txt:SetTextColor(1, 1, 1)
+		end)
+		b:SetScript("OnLeave", function(btn)
+			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+			txt:SetTextColor(unpack(C_TEXT))
+		end)
+		b:SetScript("OnClick", function()
+			removePatternsFrame:Hide()
+			-- Confirm popup gets a payload table with both the subtype to
+			-- match and a friendlier label for the prompt text. %s in the
+			-- popup text expects a single string -- we use the label.
+			local dlg = StaticPopup_Show("AUTODELETE_PROFILE_REMOVE_PATTERNS", prof.label)
+			if dlg then
+				dlg.data = { subtype = prof.subtype, label = prof.label }
+			end
+		end)
+	end
+
+	-- Cancel button in footer
+	local cancelBtn = MakeDialogButton(body, "Cancel", function() removePatternsFrame:Hide() end)
+	cancelBtn:SetPoint("BOTTOMRIGHT", -15, 15)
+end
+
+_G.AutoDelete_ShowRemovePatternsPicker = function()
+	BuildRemovePatternsWindow()
+	removePatternsFrame:Show()
 end
