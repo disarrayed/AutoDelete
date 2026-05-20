@@ -1257,7 +1257,16 @@ local ComputeTotalFreeSlots
 -- as the SAME storage slot - which combined with the outer-else reset in
 -- the handler caused the flag to flip back to false on stray events,
 -- producing spam.
-local bagSpaceLastBelowState = false
+--
+-- v3.20: repurposed from a rising-edge bool to a cooldown timestamp. The
+-- original "print on cross-below, re-arm on cross-above" design spammed
+-- when bags oscillated around the threshold (loot fills bags -> AutoDelete
+-- drains below threshold -> next loot crosses again, repeat). The
+-- timestamp enforces a hard cooldown: print at most once per 60 seconds
+-- regardless of how many threshold crossings happen. Reusing the same
+-- file-local slot rather than adding a new one keeps us under Lua 5.1's
+-- 200-local cap on the main chunk. (Renamed for clarity; same slot.)
+local bagSpaceLastWarnAt = 0
 
 local function DeleteItems()
 	if CursorHasItem() then return end
@@ -1432,7 +1441,45 @@ boeTipOwner:Hide()  -- never visible; just an owner anchor
 local boeTip = CreateFrame("GameTooltip", "AutoDelete_BoETip", UIParent, "GameTooltipTemplate")
 boeTip:SetClampedToScreen(false)
 
+-- ============================================================================
+-- Tooltip-result cache (Phase D)
+-- ============================================================================
+-- Tooltip scans are the single most expensive thing the addon does on every
+-- BAG_UPDATE: each Is*/HasAffix call does ClearLines + SetBagItem + Show +
+-- NumLines + N GetText calls + Hide. With four scan types and ~50 bag slots,
+-- a full re-scan touches 200+ tooltip operations per BAG_UPDATE.
+--
+-- Items don't change tooltip text mid-session except for:
+--   * Equipping/unequipping a BoE -> becomes Soulbound (handled below)
+--   * Picking a Battered Junkbox -> Locked clears (NOT cached, see below)
+--
+-- itemLink is a stable per-instance identifier on 3.3.5a (uniqueID is
+-- persistent across moves), so it's a safe cache key. itemID alone is not
+-- safe because PE attaches per-instance @affix@ data to specific item
+-- instances of the same template.
+--
+-- Cleared on /reload (table is recreated on file load). Soulbound entries
+-- additionally cleared on PLAYER_EQUIPMENT_CHANGED so equipping a BoE
+-- doesn't leave a stale "not soulbound" result. Locked is NOT cached
+-- because key-lock state can change without an event we hook.
+-- Exposed as _G.AutoDelete_TooltipCache (not file-local) so we don't
+-- bump the main chunk past Lua 5.1's 200-local cap.
+_G.AutoDelete_TooltipCache = _G.AutoDelete_TooltipCache or {
+	affix     = {},
+	boe       = {},
+	soulbound = {},
+}
+
 local function IsBindOnEquip(bag, slot)
+	-- Phase D cache: BoE state is intrinsic to the item template and never
+	-- changes for the same instance. Skip the cache when debug is on so the
+	-- user always sees a fresh tooltip dump.
+	local link = GetContainerItemLink(bag, slot)
+	local debug = _G.AutoDelete_DebugSell
+	if link and not debug then
+		local cached = _G.AutoDelete_TooltipCache.boe[link]
+		if cached ~= nil then return cached end
+	end
 	boeTip:Hide()
 	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
 	boeTip:ClearLines()
@@ -1443,7 +1490,6 @@ local function IsBindOnEquip(bag, slot)
 	local n = boeTip:NumLines()
 
 	local foundBoE = false
-	local debug = _G.AutoDelete_DebugSell
 	local lines = debug and {} or nil
 	for i = 2, n do
 		local text = _G["AutoDelete_BoETipTextLeft" .. i]
@@ -1456,6 +1502,7 @@ local function IsBindOnEquip(bag, slot)
 				foundBoE = true
 				if not debug then
 					boeTip:Hide()
+					if link then _G.AutoDelete_TooltipCache.boe[link] = true end
 					return true
 				end
 			end
@@ -1466,6 +1513,7 @@ local function IsBindOnEquip(bag, slot)
 		for _, l in ipairs(lines) do print(l) end
 	end
 	boeTip:Hide()
+	if link and not debug then _G.AutoDelete_TooltipCache.boe[link] = foundBoE end
 	return foundBoE
 end
 
@@ -1507,6 +1555,14 @@ end
 -- the tooltip for the localized ITEM_SOULBOUND line. Same scan frame and
 -- defensive Show() pattern as IsBindOnEquip.
 local function IsSoulbound(bag, slot)
+	-- Phase D cache: Soulbound transitions are one-way (BoE -> Soulbound on
+	-- equip). Cache is invalidated wholesale on PLAYER_EQUIPMENT_CHANGED so
+	-- a freshly-equipped BoE can't return a stale "not soulbound" hit.
+	local link = GetContainerItemLink(bag, slot)
+	if link then
+		local cached = _G.AutoDelete_TooltipCache.soulbound[link]
+		if cached ~= nil then return cached end
+	end
 	boeTip:Hide()
 	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
 	boeTip:ClearLines()
@@ -1521,10 +1577,12 @@ local function IsSoulbound(bag, slot)
 		local txt = fs and fs:GetText()
 		if txt and string.find(txt, ITEM_SOULBOUND, 1, true) then
 			boeTip:Hide()
+			if link then _G.AutoDelete_TooltipCache.soulbound[link] = true end
 			return true
 		end
 	end
 	boeTip:Hide()
+	if link then _G.AutoDelete_TooltipCache.soulbound[link] = false end
 	return false
 end
 
@@ -1545,13 +1603,22 @@ end
 -- emit a debug print when /del debug is active so the user can verify
 -- the scan is finding what it should.
 local function HasAffix(bag, slot)
+	-- Phase D cache: @affix@ marker is server-attached to a specific item
+	-- instance and never changes mid-session. itemLink is a stable per-
+	-- instance key. Skip cache when debug is on so every call dumps fresh
+	-- tooltip lines.
+	local debug = _G.AutoDelete_DebugSell
+	local link = GetContainerItemLink(bag, slot)
+	if link and not debug then
+		local cached = _G.AutoDelete_TooltipCache.affix[link]
+		if cached ~= nil then return cached end
+	end
 	boeTip:Hide()
 	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
 	boeTip:ClearLines()
 	boeTip:SetBagItem(bag, slot)
 	boeTip:Show()
 	local n = boeTip:NumLines()
-	local debug = _G.AutoDelete_DebugSell
 	local found = false
 	local foundLine = nil
 
@@ -1580,6 +1647,7 @@ local function HasAffix(bag, slot)
 	end
 
 	boeTip:Hide()
+	if link and not debug then _G.AutoDelete_TooltipCache.affix[link] = found end
 	return found
 end
 
@@ -1594,6 +1662,11 @@ do
 -- because the marker is on the item record. Cheap one-shot scan.
 local function HasAffixByLink(link)
 	if not link then return false end
+	-- Phase D cache: same store as the bag-slot variant. Tooltip text
+	-- for a given itemLink is identical whether fetched via SetBagItem
+	-- or SetHyperlink, so the answers share a key space.
+	local cached = _G.AutoDelete_TooltipCache.affix[link]
+	if cached ~= nil then return cached end
 	boeTip:Hide()
 	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
 	boeTip:ClearLines()
@@ -1607,14 +1680,17 @@ local function HasAffixByLink(link)
 		local rightTxt = rightFS and rightFS:GetText() or nil
 		if leftTxt and string.find(leftTxt, "@affix@", 1, true) then
 			boeTip:Hide()
+			_G.AutoDelete_TooltipCache.affix[link] = true
 			return true
 		end
 		if rightTxt and string.find(rightTxt, "@affix@", 1, true) then
 			boeTip:Hide()
+			_G.AutoDelete_TooltipCache.affix[link] = true
 			return true
 		end
 	end
 	boeTip:Hide()
+	_G.AutoDelete_TooltipCache.affix[link] = false
 	return false
 end
 
@@ -3095,6 +3171,10 @@ local function UpdateOpenButton()
 	if not openButton then return end
 	local profile = cachedProfile
 	if not profile or not profile.autoOpenEnabled then
+		-- Cheap idempotent short-circuit: if we've already cleared the
+		-- target, the macrotext is empty too -- no SetAttribute call
+		-- needed. This is the hot path for users with the feature off.
+		if openLastTarget == nil and not openUpdatePending then return end
 		openLastTarget = nil
 		if InCombatLockdown and InCombatLockdown() then
 			openUpdatePending = true
@@ -3257,6 +3337,8 @@ local function UpdateMillButton()
 	if not millButton then return end
 	local profile = cachedProfile
 	if not profile or not profile.millEnabled or not CharacterCanMill() then
+		-- Cheap idempotent short-circuit (see UpdateOpenButton for rationale).
+		if millLastTarget == nil and not millUpdatePending then return end
 		millLastTarget = nil
 		if InCombatLockdown and InCombatLockdown() then
 			millUpdatePending = true
@@ -3402,6 +3484,8 @@ local function UpdateProspectButton()
 	if not prospectButton then return end
 	local profile = cachedProfile
 	if not profile or not profile.prospectEnabled or not CharacterCanProspect() then
+		-- Cheap idempotent short-circuit (see UpdateOpenButton for rationale).
+		if prospectLastTarget == nil and not prospectUpdatePending then return end
 		prospectLastTarget = nil
 		if InCombatLockdown and InCombatLockdown() then
 			prospectUpdatePending = true
@@ -3652,6 +3736,8 @@ local function UpdateDisenchantButton()
 	if not disenchantButton then return end
 	local profile = cachedProfile
 	if not profile or not profile.disenchantEnabled or not CharacterCanDisenchant() then
+		-- Cheap idempotent short-circuit (see UpdateOpenButton for rationale).
+		if disenchantLastTarget == nil and not disenchantUpdatePending then return end
 		disenchantLastTarget = nil
 		if InCombatLockdown and InCombatLockdown() then
 			disenchantUpdatePending = true
@@ -3870,6 +3956,44 @@ scanner:RegisterEvent("MERCHANT_CLOSED")
 scanner:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 scanner:RegisterEvent("PLAYER_REGEN_ENABLED")    -- flush deferred disenchant updates
 scanner:RegisterEvent("SPELLS_CHANGED")          -- re-check Disenchant known status
+scanner:RegisterEvent("LOOT_OPENED")             -- bracket bag-scan work during loot bursts
+scanner:RegisterEvent("LOOT_CLOSED")             -- run deferred scan once when burst ends
+
+-- ============================================================================
+-- BAG_UPDATE burst bracketing
+-- ============================================================================
+-- Pet AOE looting fires 5+ BAG_UPDATE events in under 100ms. Vendor sell
+-- loops do the same. Each event used to run the full heavy chain (4 secure-
+-- button rewires + Process panel refresh), compounding into visible lag.
+--
+-- This bracket defers the chain while a "known burst" is in progress:
+--   - merchantOpen flag is set on MERCHANT_SHOW, cleared MERCHANT_CLOSED+grace
+--   - lootBurstOpen flag is set on LOOT_OPENED, cleared LOOT_CLOSED
+-- During a burst, BAG_UPDATE marks pendingBagUpdate=true and returns
+-- immediately. When the LAST bracket closes, the deferred chain runs ONCE.
+-- This is cheaper than any debounce because the work doesn't run at all
+-- during the burst -- it runs once at the end. Pattern lifted from AdiBags
+-- (which uses the same approach for AUCTION_MULTISELL / EQUIPMENT_SWAP).
+--
+-- Exported as _G.AutoDelete_BurstState rather than a file-local: the main
+-- chunk's local count is already brushing Lua 5.1's 200-cap, so we route
+-- through a global table instead of adding new file-scope locals.
+-- The OnEvent handler reads/writes via _G.AutoDelete_BurstState.* and the
+-- RunChain field gets assigned to point at the heavy-chain function once
+-- it's defined at the bottom of the event-handler block.
+_G.AutoDelete_BurstState = {
+	lootBurstOpen    = false,
+	pendingBagUpdate = false,
+	RunChain         = nil,
+	-- Phase C: throttle for unbracketed bursts (mailbox take-all, quest
+	-- chain turn-ins, etc). Leading edge runs immediately; further
+	-- BAG_UPDATEs within DEBOUNCE_INTERVAL schedule a single trailing
+	-- run. Trailing fires from the scanner OnUpdate. This bounds RunChain
+	-- to at most 2 invocations per 120ms regardless of burst rate.
+	lastRunAt         = 0,
+	scheduledRunAt    = 0,
+	DEBOUNCE_INTERVAL = 0.12,
+}
 
 -- ============================================================================
 -- Welcome Popup
@@ -4385,10 +4509,77 @@ end
 -- PLAYER_LOGIN        -> print loaded notice, install MerchantFrame.Hide
 --                        wrappers, schedule the post-login ElvUI button
 --                        creation + welcome popup (2s delay)
--- BAG_UPDATE          -> request a delete-scan
--- BAG_UPDATE_DELAYED  -> request a delete-scan
+-- BAG_UPDATE          -> request a delete-scan (bracketed during bursts)
+-- BAG_UPDATE_DELAYED  -> request a delete-scan (Wrath: rarely fires; harmless)
+-- LOOT_OPENED         -> open loot-burst bracket (defer bag-scan work)
+-- LOOT_CLOSED         -> close loot-burst bracket; flush deferred chain
 -- MERCHANT_SHOW       -> sample inventory worth, then auto-repair + auto-sell
 -- MERCHANT_CLOSED     -> print sell summary, fire after-close summon if armed
+
+-- RunChain: the "heavy" bag-update post-work, hoisted out of OnEvent so
+-- the bracket can defer and replay it once per burst instead of once per
+-- BAG_UPDATE. Wrapped in `do ... end` to avoid adding a file-local (we're
+-- right at Lua 5.1's 200-cap on the main chunk). The closure captures
+-- file-locals (cachedProfile, bagSpaceLastWarnAt, etc.) as upvalues,
+-- and the function is exposed via _G.AutoDelete_BurstState.RunChain so
+-- LOOT_CLOSED / MERCHANT_CLOSED grace callback / BAG_UPDATE can all call
+-- the same code path.
+do
+	_G.AutoDelete_BurstState.RunChain = function()
+		-- Stamp completion time so the Phase C throttle treats this as
+		-- the most recent run regardless of which path invoked us
+		-- (BAG_UPDATE inline, LOOT_CLOSED flush, MERCHANT grace flush,
+		-- or OnUpdate trailing).
+		_G.AutoDelete_BurstState.lastRunAt      = GetTime()
+		_G.AutoDelete_BurstState.scheduledRunAt = 0
+		RefreshCachedProfile()
+		RequestScan()
+		-- Rewire the secure-action buttons. Each module is combat-safe (self-
+		-- defers via InCombatLockdown) and a cheap no-op when its feature is
+		-- off. Running on every bag update keeps the next-target pointer
+		-- current as the player loots, uses, sells, or rearranges items.
+		if UpdateDisenchantButton                then UpdateDisenchantButton() end
+		if _G.AutoDelete_UpdateOpenButton        then _G.AutoDelete_UpdateOpenButton() end
+		if _G.AutoDelete_UpdateMillButton        then _G.AutoDelete_UpdateMillButton() end
+		if _G.AutoDelete_UpdateProspectButton    then _G.AutoDelete_UpdateProspectButton() end
+
+		-- Refresh the Process Bags panel if it's open. RefreshProcessPanel
+		-- itself early-returns when the panel is hidden, so this is cheap.
+		-- Also update the Tools Card 1 count line on the settings panel if
+		-- the user has it open.
+		if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+		local optPanel = _G.AutoDeleteOptionsPanel
+		if optPanel and optPanel.IsShown and optPanel:IsShown() and optPanel._refreshProcessCount then
+			optPanel:_refreshProcessCount()
+		end
+		-- Bag-space warning. Cooldown-gated so we print at most once per
+		-- 60s while below threshold. The old rising-edge design spammed
+		-- when bags oscillated around the threshold during active loot+
+		-- delete (loot fills -> AutoDelete clears past threshold -> next
+		-- loot crosses again -> print). The timestamp absorbs that.
+		-- Defensive nil-check: ComputeTotalFreeSlots is forward-declared
+		-- and assigned later in the file. If for any reason the assignment
+		-- hasn't happened yet (e.g. early event firing before file load
+		-- completes), silently skip rather than throw a nil-call.
+		if cachedProfile and cachedProfile.bagSpaceWarnEnabled and ComputeTotalFreeSlots then
+			local free = ComputeTotalFreeSlots()
+			local threshold = tonumber(cachedProfile.bagSpaceWarnThreshold) or 5
+			if free <= threshold then
+				local now = GetTime()
+				-- 60s cooldown between warnings. Tunable here if it ever
+				-- turns out 60 is too long/short for typical play.
+				if now - bagSpaceLastWarnAt >= 60 then
+					bagSpaceLastWarnAt = now
+					print(string.format(
+						"|cffff8000[AutoDelete]|r: Bag space low (%d free slot%s remaining).",
+						free, free == 1 and "" or "s"))
+				end
+			end
+			-- Note: no else-branch resetting the timestamp. The cooldown
+			-- only matters while below threshold; rising above is a no-op.
+		end
+	end
+end
 
 scanner:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
@@ -4397,6 +4588,12 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		return
 	end
 	if event == "PLAYER_EQUIPMENT_CHANGED" then
+		-- Equipping a BoE flips it to Soulbound -- invalidate the soulbound
+		-- tooltip cache so any subsequent IsSoulbound() rescans. Cheap: just
+		-- replace the sub-table, GC handles the old entries.
+		if _G.AutoDelete_TooltipCache then
+			_G.AutoDelete_TooltipCache.soulbound = {}
+		end
 		HandleEquipmentChanged(arg1)
 		return
 	end
@@ -4632,12 +4829,42 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		end
 		return
 	end
+	if event == "LOOT_OPENED" then
+		-- Open the loot burst bracket. Pet AOE loot fires 5+ BAG_UPDATEs in
+		-- <100ms; deferring their tail work until LOOT_CLOSED replaces N runs
+		-- with 1 run.
+		_G.AutoDelete_BurstState.lootBurstOpen = true
+		return
+	end
+	if event == "LOOT_CLOSED" then
+		-- Close the loot bracket. If any BAG_UPDATE arrived during the burst,
+		-- flush the deferred chain now (unless merchantOpen also has a
+		-- bracket open, in which case wait for MERCHANT_CLOSED to flush).
+		_G.AutoDelete_BurstState.lootBurstOpen = false
+		if _G.AutoDelete_BurstState.pendingBagUpdate and not merchantOpen then
+			_G.AutoDelete_BurstState.pendingBagUpdate = false
+			if _G.AutoDelete_BurstState.RunChain then
+				_G.AutoDelete_BurstState.RunChain()
+			end
+		end
+		return
+	end
 	if event == "MERCHANT_CLOSED" then
 		-- Defer the unblock so any BAG_UPDATE events fired in the immediate
 		-- aftermath of closing the merchant (sell loop tail, manual sells
 		-- still being processed by the server) don't trigger auto-open on
-		-- the now-just-emptied slot.
-		AfterDelay(MERCHANT_CLOSE_GRACE, function() merchantOpen = false end)
+		-- the now-just-emptied slot. When the grace expires, also flush any
+		-- BAG_UPDATEs that arrived while the merchant bracket was open.
+		AfterDelay(MERCHANT_CLOSE_GRACE, function()
+			merchantOpen = false
+			if _G.AutoDelete_BurstState.pendingBagUpdate
+				and not _G.AutoDelete_BurstState.lootBurstOpen then
+				_G.AutoDelete_BurstState.pendingBagUpdate = false
+				if _G.AutoDelete_BurstState.RunChain then
+					_G.AutoDelete_BurstState.RunChain()
+				end
+			end
+		end)
 		if sellSessionCount > 0 then
 			print("|cffff8000[AutoDelete]|r: Sold " .. sellSessionCount .. " item(s) for " .. FormatMoney(sellSessionCopper))
 			sellSessionCount = 0
@@ -4661,53 +4888,40 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		return
 	end
 	-- BAG_UPDATE / BAG_UPDATE_DELAYED
-	RefreshCachedProfile()
-	RequestScan()
-	-- Rewire the secure-action buttons. Each module is combat-safe (self-
-	-- defers via InCombatLockdown) and a cheap no-op when its feature is
-	-- off. Running on every bag update keeps the next-target pointer
-	-- current as the player loots, uses, sells, or rearranges items.
-	if UpdateDisenchantButton                then UpdateDisenchantButton() end
-	if _G.AutoDelete_UpdateOpenButton        then _G.AutoDelete_UpdateOpenButton() end
-	if _G.AutoDelete_UpdateMillButton        then _G.AutoDelete_UpdateMillButton() end
-	if _G.AutoDelete_UpdateProspectButton    then _G.AutoDelete_UpdateProspectButton() end
-
-	-- Refresh the Process Bags panel if it's open. RefreshProcessPanel
-	-- itself early-returns when the panel is hidden, so this is cheap.
-	-- Also update the Tools Card 1 count line on the settings panel if
-	-- the user has it open.
-	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
-	local optPanel = _G.AutoDeleteOptionsPanel
-	if optPanel and optPanel.IsShown and optPanel:IsShown() and optPanel._refreshProcessCount then
-		optPanel:_refreshProcessCount()
+	-- During a known burst (loot frame open, merchant open or in grace
+	-- window), mark a pending flag and return. The bracket close will
+	-- replay RunChain() exactly once. This converts the 5+ BAG_UPDATEs
+	-- from pet AOE loot into a single tail invocation.
+	local bs = _G.AutoDelete_BurstState
+	if bs.lootBurstOpen or merchantOpen then
+		bs.pendingBagUpdate = true
+		return
 	end
-	-- Bag-space warning. Edge-triggered so we print at most once per
-	-- "fell below threshold" event, then re-arm after slots rise above it.
-	-- Defensive nil-check: ComputeTotalFreeSlots is forward-declared and
-	-- assigned later in the file. If for any reason the assignment hasn't
-	-- happened yet (e.g. early event firing before file load completes),
-	-- silently skip rather than throw a nil-call.
-	if cachedProfile and cachedProfile.bagSpaceWarnEnabled and ComputeTotalFreeSlots then
-		local free = ComputeTotalFreeSlots()
-		local threshold = tonumber(cachedProfile.bagSpaceWarnThreshold) or 5
-		if free <= threshold then
-			if not bagSpaceLastBelowState then
-				print(string.format(
-					"|cffff8000[AutoDelete]|r: Bag space low (%d free slot%s remaining).",
-					free, free == 1 and "" or "s"))
-				bagSpaceLastBelowState = true
-			end
-		else
-			bagSpaceLastBelowState = false
-		end
+	-- Phase C throttle: leading-edge fire if we've cooled off, else
+	-- schedule a single trailing run from the OnUpdate handler. Covers
+	-- unbracketed bursts (mailbox take-all, quest chain rewards, etc).
+	local now = GetTime()
+	if now - bs.lastRunAt >= bs.DEBOUNCE_INTERVAL then
+		bs.lastRunAt      = now
+		bs.scheduledRunAt = 0
+		if bs.RunChain then bs.RunChain() end
 	else
-		bagSpaceLastBelowState = false
+		bs.scheduledRunAt = bs.lastRunAt + bs.DEBOUNCE_INTERVAL
 	end
 end)
 
 scanner:SetScript("OnUpdate", function(self, elapsed)
-	if not cachedProfile or not cachedProfile.enabled then return end
 	local now = GetTime()
+	-- Phase C trailing flush: fire RunChain for any BAG_UPDATEs that were
+	-- coalesced during the debounce window. Runs even when the addon is
+	-- "disabled" because button rewires and panel refreshes must reflect
+	-- bag state regardless of master toggle.
+	local bs = _G.AutoDelete_BurstState
+	if bs.scheduledRunAt > 0 and now >= bs.scheduledRunAt
+		and not bs.lootBurstOpen and not merchantOpen then
+		if bs.RunChain then bs.RunChain() end
+	end
+	if not cachedProfile or not cachedProfile.enabled then return end
 	if now >= nextPeriodicAt then
 		nextPeriodicAt = now + periodicInterval
 		scanRequested = true
@@ -4771,10 +4985,10 @@ local function GetGoblinBagThreshold(p)
 	return tonumber(p and p.bagSpaceWarnThreshold) or BAGS_NEAR_FULL_THRESHOLD
 end
 
--- (bagSpaceLastBelowState is declared near the top of the file as a
+-- (bagSpaceLastWarnAt is declared near the top of the file as a
 -- forward-accessible local so the BAG_UPDATE handler captures it as an
 -- upvalue. Do NOT re-declare here with `local`; that would shadow the
--- top-of-file local and break the edge-triggered chat warning.)
+-- top-of-file local and break the cooldown-gated chat warning.)
 
 -- Bag-full auto-summon debounce window. Bags must stay at or below the
 -- threshold continuously for this many seconds before the Goblin Merchant is
