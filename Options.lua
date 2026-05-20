@@ -18,10 +18,19 @@ local C_BORDER    = { 0.16, 0.16, 0.16, 1 }   -- #2a2a2a outer frame border per 
 local C_TITLE     = { 1.00, 0.50, 0.00, 1 }  -- #ff8000 WoW legendary orange
 local C_TEXT      = { 0.85, 0.85, 0.85, 1 }   -- #D9D9D9
 local C_DIM       = { 0.45, 0.45, 0.45, 1 }   -- #737373
-local C_HOVER     = { 0.122, 0.435, 0.659, 1 }   -- mage blue #1F6FA8
-local C_RED       = { 0.75, 0.22, 0.22, 1 }
-local C_GREEN     = { 0.20, 0.75, 0.20, 1 }
-local C_ACCENT    = { 1.00, 0.50, 0.00, 1 }   -- #ff8000 WoW legendary orange
+local C_HOVER     = { 0.122, 0.435, 0.659, 1 }   -- mage blue #1F6FA8 (alias: C_BLUE)
+-- =========================================================================
+-- Semantic action palette (HARD RULE: only THREE colors for button hover)
+-- =========================================================================
+--   C_GREEN  -> additive / approve / go / positive   (Add, Copy, Import, Apply, Save, Confirm)
+--   C_RED    -> destructive / decline / remove       (Delete, Remove, Clear, Cancel)
+--   C_BLUE   -> change / update / reward / transform (Open Panel, Edit, Refresh, Audit, Toggle filters)
+-- C_ACCENT (legendary orange) is for window CHROME only (title bars, frame
+-- titles, accent borders). Never use it for a button hover.
+local C_RED       = { 0.75, 0.22, 0.22, 1 }   -- destructive
+local C_GREEN     = { 0.20, 0.75, 0.20, 1 }   -- additive
+local C_BLUE      = C_HOVER                   -- transformational; alias to keep one source
+local C_ACCENT    = { 1.00, 0.50, 0.00, 1 }   -- #ff8000 WoW legendary orange (CHROME ONLY)
 local C_DK_RED    = { 0.77, 0.12, 0.23, 1 }   -- #C41E3A WoW Death Knight class color
 -- Exact WoW item quality colors (used for rarity toggles)
 local C_Q_POOR     = { 0.62, 0.62, 0.62, 1 }   -- #9d9d9d (Junk)
@@ -546,6 +555,78 @@ local function MakeSection(parent, title, yOff, height, leftMargin, rightMargin)
 	return box, titleFS
 end
 
+-- ============================================================================
+-- Canonical button helpers (HARD RULE: every button must go through one
+-- of these two helpers; see Addon_UI_StyleGuide.md §4 "Buttons: the two
+-- canonical helpers"). Defined here BEFORE BuildUI so BuildUI's tab
+-- builders can capture them as upvalues. Other top-level builders below
+-- (BuildClearListWindow, etc.) also capture from this same scope.
+-- ============================================================================
+
+-- MakeDialogButton: neutral footer button. Apply / Cancel / OK / Close.
+-- Default 90x24, blue hover (C_ROW_HOVER), white text on hover. Use this
+-- when the action has no semantic weight, or when it is one of a small
+-- group of equivalent footer choices.
+local function MakeDialogButton(parent, label, onClick)
+	local btn = CreateFrame("Button", nil, parent)
+	btn:SetSize(90, 24)
+	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+	local txt = MakeText(btn, 11, C_TEXT, "OUTLINE")
+	txt:SetPoint("CENTER")
+	txt:SetText(label)
+	btn._text = txt
+	btn:SetScript("OnEnter", function(b)
+		ApplyBackdrop(b, C_ROW_HOVER, C_BORDER)
+		txt:SetTextColor(1, 1, 1)
+	end)
+	btn:SetScript("OnLeave", function(b)
+		ApplyBackdrop(b, C_ROW_ODD, C_BORDER)
+		txt:SetTextColor(unpack(C_TEXT))
+	end)
+	btn:SetScript("OnClick", onClick)
+	return btn
+end
+
+-- MakeActionButton: semantic action button. Variable width, 26 tall by
+-- default. On hover the backdrop fills with the semantic color at 0.3
+-- alpha and the border switches to the full semantic color. Text becomes
+-- pure white on hover. The Clear List window is the canonical reference.
+--
+-- HARD RULE: only THREE semantic colors. Pick by the action class:
+--   C_GREEN  -> additive / approve / go / positive
+--              (Add, Copy, Import, Apply, Save, Confirm)
+--   C_RED    -> destructive / decline / remove
+--              (Delete, Remove, Clear, Cancel)
+--   C_BLUE   -> change / update / reward / transform
+--              (Open Panel, Edit, Refresh, Audit, Toggle filters)
+--
+-- Do NOT use C_ACCENT (legendary orange) for button hovers. That color
+-- is reserved for window CHROME (title bars, frame titles, accent borders).
+-- The hover color itself is a clarity cue for non-technical users: green
+-- means "this adds something," red means "this removes something," blue
+-- means "this changes or opens something."
+local function MakeActionButton(parent, label, semanticColor, onClick, width, height)
+	local btn = CreateFrame("Button", nil, parent)
+	btn:SetSize(width or 290, height or 26)
+	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+	local txt = MakeText(btn, 11, C_TEXT, "OUTLINE")
+	txt:SetPoint("CENTER")
+	txt:SetText(label)
+	btn._text = txt
+	local color = semanticColor or C_ACCENT
+	btn:SetScript("OnEnter", function(b)
+		b:SetBackdropColor(color[1], color[2], color[3], 0.3)
+		b:SetBackdropBorderColor(color[1], color[2], color[3], 1)
+		txt:SetTextColor(1, 1, 1)
+	end)
+	btn:SetScript("OnLeave", function(b)
+		ApplyBackdrop(b, C_ROW_ODD, C_BORDER)
+		txt:SetTextColor(unpack(C_TEXT))
+	end)
+	if onClick then btn:SetScript("OnClick", onClick) end
+	return btn
+end
+
 -- AddToggleDescription: attaches a dim multi-line description below a toggle.
 -- Positioned indented under the toggle's text label (not the box).
 local function AddToggleDescription(toggle, description, maxWidth)
@@ -916,29 +997,31 @@ local PROCESS_VISIBLE_ROWS = math.floor(PROCESS_SCROLL_H / PROCESS_ROW_H)
 -- exposed so /framestack and other diagnostic tools find it.
 local panel = CreateFrame("Frame", "AutoDeleteProcessPanel", UIParent)
 panel:SetSize(PROCESS_PANEL_W, PROCESS_PANEL_H)
-panel:SetFrameStrata("MEDIUM")
+-- FULLSCREEN_DIALOG so the panel floats ABOVE the main settings panel
+-- (which lives on DIALOG). Previously this was MEDIUM, which put the
+-- panel BEHIND the settings panel when both were open -- user clicked
+-- the Process Bags launcher and saw nothing happen because the window
+-- opened underneath the settings frame.
+panel:SetFrameStrata("FULLSCREEN_DIALOG")
 panel:SetFrameLevel(50)
 panel:SetMovable(true)
 panel:EnableMouse(true)
 panel:SetClampedToScreen(true)
 panel:Hide()
 
--- Backdrop matches the main settings panel: dark fill, mid-grey border.
-panel:SetBackdrop({
-	bgFile   = WHITE8x8,
-	edgeFile = WHITE8x8,
-	edgeSize = 1,
-})
-panel:SetBackdropColor(0.04, 0.04, 0.04, 0.96)
-panel:SetBackdropBorderColor(unpack(C_ACCENT))
+-- Visual style matches the main settings panel (dark body, dark gray
+-- border, dark title bar with orange text). Previously this used raw
+-- SetBackdrop calls with an orange-filled title bar + orange border,
+-- which read as a different window family than the rest of the addon.
+ApplyBackdrop(panel, C_BG, C_BORDER)
 
--- Title bar: clickable drag handle, accent strip across the top edge.
+-- Title bar: clickable drag handle, same dark-with-accent-border look
+-- as the main panel's title bar.
 local titleBar = CreateFrame("Frame", nil, panel)
 titleBar:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, 0)
 titleBar:SetPoint("TOPRIGHT", panel, "TOPRIGHT", 0, 0)
 titleBar:SetHeight(24)
-titleBar:SetBackdrop({ bgFile = WHITE8x8 })
-titleBar:SetBackdropColor(C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.85)
+ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
 titleBar:EnableMouse(true)
 titleBar:RegisterForDrag("LeftButton")
 titleBar:SetScript("OnDragStart", function() panel:StartMoving() end)
@@ -953,23 +1036,20 @@ titleBar:SetScript("OnDragStop", function()
 	}
 end)
 
-local titleText = titleBar:CreateFontString(nil, "OVERLAY")
-titleText:SetFont(FONT, 12, "OUTLINE")
-titleText:SetTextColor(0.05, 0.05, 0.05, 1)
+local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
 titleText:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
 titleText:SetText("Process Bags")
 
--- Close X in the title bar's right corner.
+-- Close X in the title bar's right corner. Dim by default, red on
+-- hover -- matches the main settings panel's close button exactly.
 local closeX = CreateFrame("Button", nil, titleBar)
-closeX:SetSize(20, 20)
-closeX:SetPoint("RIGHT", titleBar, "RIGHT", -4, 0)
-local closeXText = closeX:CreateFontString(nil, "OVERLAY")
-closeXText:SetFont(FONT, 14, "OUTLINE")
+closeX:SetSize(24, 24)
+closeX:SetPoint("TOPRIGHT", titleBar, "TOPRIGHT", 0, 0)
+local closeXText = MakeText(closeX, 14, C_DIM, "OUTLINE")
 closeXText:SetText("x")
-closeXText:SetTextColor(0.05, 0.05, 0.05, 1)
 closeXText:SetPoint("CENTER")
-closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.2, 0.2, 1) end)
-closeX:SetScript("OnLeave", function() closeXText:SetTextColor(0.05, 0.05, 0.05, 1) end)
+closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.3, 0.3) end)
+closeX:SetScript("OnLeave", function() closeXText:SetTextColor(unpack(C_DIM)) end)
 closeX:SetScript("OnClick", function() panel:Hide() end)
 
 -- Column header row directly under the title bar.
@@ -1026,32 +1106,32 @@ footerCount:SetTextColor(unpack(C_DIM))
 footerCount:SetPoint("LEFT", footer, "LEFT", 10, 0)
 footerCount:SetText("")  -- populated by RefreshProcessPanel in B.3
 
-local clearBtn = CreateFrame("Button", nil, footer)
-clearBtn:SetSize(100, 20)
+-- Clear Ignored: canonical MakeActionButton (semantic destructive red).
+-- Resets the per-character ignore list, undoing prior right-click-off
+-- decisions. Treated as destructive because it loses user choices.
+-- Same width and height as the Filters-tab card buttons so footers
+-- read uniformly across the addon.
+local clearBtn = MakeActionButton(footer, "Clear Ignored", C_RED, function()
+	if _G.AutoDelete_ClearProcessIgnored then _G.AutoDelete_ClearProcessIgnored() end
+	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+end, 110, 22)
 clearBtn:SetPoint("RIGHT", footer, "RIGHT", -8, 0)
-ApplyBackdrop(clearBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
-local clearBtnText = clearBtn:CreateFontString(nil, "OVERLAY")
-clearBtnText:SetFont(FONT, 10, "OUTLINE")
-clearBtnText:SetTextColor(unpack(C_TEXT))
-clearBtnText:SetPoint("CENTER")
-clearBtnText:SetText("Clear Ignored")
-clearBtn:SetScript("OnEnter", function()
-	ApplyBackdrop(clearBtn, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.85 }, C_ACCENT)
-	clearBtnText:SetTextColor(0.05, 0.05, 0.05, 1)
-	GameTooltip:SetOwner(clearBtn, "ANCHOR_TOP")
+-- Tooltip on hover (the MakeActionButton hover styling stays; we just
+-- layer the tooltip on top so the user sees the explanation).
+clearBtn:SetScript("OnEnter", function(btn)
+	btn:SetBackdropColor(C_RED[1], C_RED[2], C_RED[3], 0.3)
+	btn:SetBackdropBorderColor(C_RED[1], C_RED[2], C_RED[3], 1)
+	btn._text:SetTextColor(1, 1, 1)
+	GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 	GameTooltip:SetText("Clear Ignored", 1, 1, 1)
 	GameTooltip:AddLine("Reset the per-character ignore list. Items you've right-clicked off this list will reappear if they're still in your bags.",
 		C_DIM[1], C_DIM[2], C_DIM[3], true)
 	GameTooltip:Show()
 end)
-clearBtn:SetScript("OnLeave", function()
-	ApplyBackdrop(clearBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
-	clearBtnText:SetTextColor(unpack(C_TEXT))
+clearBtn:SetScript("OnLeave", function(btn)
+	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+	btn._text:SetTextColor(unpack(C_TEXT))
 	GameTooltip:Hide()
-end)
-clearBtn:SetScript("OnClick", function()
-	if _G.AutoDelete_ClearProcessIgnored then _G.AutoDelete_ClearProcessIgnored() end
-	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
 end)
 
 -- Position restoration on first Show. Reads saved per-character coords;
@@ -2027,36 +2107,47 @@ local function BuildUI(self)
 	end)
 	self._affixIlvlEdit = affixFloorEdit
 
+	-- Standard card row geometry (uniformity rule). Every card on the
+	-- Filters tab uses these positions so widgets line up across cards
+	-- regardless of how full each card is. Card title sits at y=-6;
+	-- three content rows at the y-anchors below; 4px bottom pad in
+	-- cardH=92. Matches the Quality Filters (Card 1) toggle pattern.
+	local CARD_ROW_H   = 20
+	local CARD_ROW1_Y  = -24
+	local CARD_ROW2_Y  = -46
+	local CARD_ROW3_Y  = -68
+
 	-- Audit button: scans the user's Delete + Sell lists for items that
 	-- carry the @affix@ tooltip marker and prints a chat summary. Doesn't
 	-- modify the lists -- explicit user-list entries are user intent --
 	-- just surfaces "you have N affixed items on your Sell list" so the
-	-- user can review.
-	local auditBtn = CreateFrame("Button", nil, tCard2)
-	auditBtn:SetSize(cardW - CARD_INNER_PAD_X * 2, 18)
-	auditBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -70)
-	ApplyBackdrop(auditBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
-	local auditBtnText = auditBtn:CreateFontString(nil, "OVERLAY")
-	auditBtnText:SetFont(FONT, 10, "OUTLINE")
-	auditBtnText:SetTextColor(unpack(C_TEXT))
-	auditBtnText:SetPoint("CENTER")
-	auditBtnText:SetText("Audit Lists for Affix Items")
-	auditBtn:SetScript("OnEnter", function()
-		ApplyBackdrop(auditBtn, { 0.16, 0.16, 0.16, 1 }, C_ACCENT)
-		GameTooltip:SetOwner(auditBtn, "ANCHOR_TOP")
+	-- user can review. Sits in the standard ROW 3 slot, identical
+	-- position and size to Card 3's Open Panel button so the two cards
+	-- read as a uniform row. C_BLUE (change/transform class) per the
+	-- 3-color semantic palette: this button reports/transforms a view of
+	-- the user's lists, it does not add or remove entries.
+	local auditBtn = MakeActionButton(tCard2, "Audit Lists for Affix Items", C_BLUE, function()
+		if _G.AutoDelete_AuditAffixOnLists then
+			_G.AutoDelete_AuditAffixOnLists(GetActiveProfile(db))
+		end
+	end, cardW - CARD_INNER_PAD_X * 2, CARD_ROW_H)
+	auditBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, CARD_ROW3_Y)
+	auditBtn:SetScript("OnEnter", function(btn)
+		-- Hover backdrop comes from MakeActionButton (C_BLUE tint).
+		-- Layer the tooltip on top so the user sees the explanation.
+		btn:SetBackdropColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.3)
+		btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
+		btn._text:SetTextColor(1, 1, 1)
+		GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 		GameTooltip:SetText("Audit Lists", 1, 1, 1)
 		GameTooltip:AddLine("Scans your Delete and Sell lists for items that carry PE's @affix@ tooltip marker. Prints a chat summary with item links. Doesn't change the lists.",
 			C_DIM[1], C_DIM[2], C_DIM[3], true)
 		GameTooltip:Show()
 	end)
-	auditBtn:SetScript("OnLeave", function()
-		ApplyBackdrop(auditBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
+	auditBtn:SetScript("OnLeave", function(btn)
+		ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+		btn._text:SetTextColor(unpack(C_TEXT))
 		GameTooltip:Hide()
-	end)
-	auditBtn:SetScript("OnClick", function()
-		if _G.AutoDelete_AuditAffixOnLists then
-			_G.AutoDelete_AuditAffixOnLists(GetActiveProfile(db))
-		end
 	end)
 
 	-- Filters Card 3: Process Bags launcher. Moved here from Tools Card 1
@@ -2077,28 +2168,15 @@ local function BuildUI(self)
 	processCount:SetText("...")
 	self._processCount = processCount
 
-	local launchBtn = CreateFrame("Button", nil, tCard3)
-	launchBtn:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	launchBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -64)
-	ApplyBackdrop(launchBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
-	local launchBtnText = launchBtn:CreateFontString(nil, "OVERLAY")
-	launchBtnText:SetFont(FONT, 11, "OUTLINE")
-	launchBtnText:SetTextColor(unpack(C_TEXT))
-	launchBtnText:SetPoint("CENTER")
-	launchBtnText:SetText("Open Panel")
-	-- Subtle hover: slightly-lighter dark fill + accent border. The full-
-	-- accent-fill hover was too loud; this matches the rest of the panel's
-	-- button convention (the list-mode Delete/Sell/Keep tabs use the same
-	-- subtle highlight on hover).
-	launchBtn:SetScript("OnEnter", function()
-		ApplyBackdrop(launchBtn, { 0.16, 0.16, 0.16, 1 }, C_ACCENT)
-	end)
-	launchBtn:SetScript("OnLeave", function()
-		ApplyBackdrop(launchBtn, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
-	end)
-	launchBtn:SetScript("OnClick", function()
+	-- Open Panel: launches the standalone Process Bags window. C_BLUE
+	-- (change/transform class) per the 3-color semantic palette: opening
+	-- a sub-window transforms the user's view, it does not add or remove
+	-- data. Uses the standard ROW3 anchor so this button sits at the same
+	-- size and same y as the Audit Lists button on tCard2.
+	local launchBtn = MakeActionButton(tCard3, "Open Panel", C_BLUE, function()
 		if _G.AutoDelete_ToggleProcessPanel then _G.AutoDelete_ToggleProcessPanel() end
-	end)
+	end, cardW - CARD_INNER_PAD_X * 2, CARD_ROW_H)
+	launchBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, CARD_ROW3_Y)
 
 	function self:_refreshProcessCount()
 		if not self._processCount then return end
@@ -2175,6 +2253,10 @@ local function BuildUI(self)
 				label:SetText("Click to bind")
 				label:SetTextColor(unpack(C_DIM))
 			end
+			-- Optional hook the panel sets so it can refresh the row's
+			-- status text the moment a key is bound or cleared (without
+			-- waiting for the next BAG_UPDATE to do it).
+			if row._onBindingChanged then row._onBindingChanged() end
 		end
 		row._refresh = RefreshLabel
 		RefreshLabel()
@@ -2271,7 +2353,11 @@ local function BuildUI(self)
 	local KEYBIND_TGL_W   = 16              -- the small checkbox-only width
 	local KEYBIND_NAME_W  = 140
 	local KEYBIND_KEY_W   = 110
-	local KEYBIND_GEAR_W  = 22
+	-- Widened from 22 (gear-glyph era) to 56 to fit "Filters" text label.
+	-- The glyph (`*`) was confusing -- it read like a footnote marker. The
+	-- explicit text button is unambiguous and tells the user what the
+	-- button does without needing a hover tooltip.
+	local KEYBIND_GEAR_W  = 56
 	local CONTENT_W_KEYBINDS = genContentW - KEYBIND_PAD_X * 2
 
 	-- Reusable row factory. Each row has the slots described above; the
@@ -2286,7 +2372,11 @@ local function BuildUI(self)
 
 		-- Master toggle on the far left. Compact icon-only width; the
 		-- feature name label sits next to it as the "real" label.
-		local tgl = MakeToggle(row, "", C_ACCENT, opts.tooltip)
+		-- Pass opts.label as the explicit tooltipTitle so the GameTooltip
+		-- header still reads the feature name ("One-Key Open" etc.) even
+		-- though the checkbox itself has no inline label (the name lives in
+		-- a sibling FontString in the row).
+		local tgl = MakeToggle(row, "", C_ACCENT, opts.tooltip, opts.label)
 		tgl:SetPoint("LEFT", row, "LEFT", 0, 0)
 		tgl:SetSize(KEYBIND_TGL_W, KEYBIND_TGL_W)
 
@@ -2310,32 +2400,41 @@ local function BuildUI(self)
 		statusText:SetWordWrap(false)
 		statusText:SetText("")
 
-		-- Gear button on the far right; opens the filter popup for this
+		-- Stash the binding command on the row so the panel's status
+		-- composer can call GetBindingKey() to check whether the user has
+		-- actually bound a key. The composer uses this to switch between
+		-- "Bind a key" (no key) and "[KEY] [Item]" (key + target) status.
+		row._bindingCmd = opts.bindingCmd
+
+		-- Filters button on the far right; opens the filter popup for this
 		-- feature if one is provided. Hidden when openFilters is nil so
-		-- features without filters (Mill, Prospect) get a clean row.
+		-- features without filters (Mill, Prospect, Open) get a clean row.
+		-- Text label "Filters" instead of a glyph because FRIZQT does not
+		-- carry the unicode gear character and the prior `*` placeholder
+		-- read like a footnote indicator to non-technical users.
 		local gear
 		if opts.openFilters then
 			gear = CreateFrame("Button", nil, row)
-			gear:SetSize(KEYBIND_GEAR_W, KEYBIND_GEAR_W)
+			gear:SetSize(KEYBIND_GEAR_W, KEYBIND_ROW_H - 4)
 			gear:SetPoint("RIGHT", row, "RIGHT", 0, 0)
 			ApplyBackdrop(gear, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
-			local gearGlyph = gear:CreateFontString(nil, "OVERLAY")
-			gearGlyph:SetFont(FONT, 12, "OUTLINE")
-			gearGlyph:SetTextColor(unpack(C_TEXT))
-			gearGlyph:SetPoint("CENTER")
-			gearGlyph:SetText("*")  -- gear-style glyph; FRIZQT doesn't carry ⚙
+			local gearLabel = gear:CreateFontString(nil, "OVERLAY")
+			gearLabel:SetFont(FONT, 10, "OUTLINE")
+			gearLabel:SetTextColor(unpack(C_TEXT))
+			gearLabel:SetPoint("CENTER")
+			gearLabel:SetText("Filters")
 			gear:SetScript("OnEnter", function(self)
 				ApplyBackdrop(self, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.85 }, C_ACCENT)
-				gearGlyph:SetTextColor(0.05, 0.05, 0.05, 1)
+				gearLabel:SetTextColor(0.05, 0.05, 0.05, 1)
 				GameTooltip:SetOwner(self, "ANCHOR_TOP")
 				GameTooltip:SetText("Filters", 1, 1, 1)
-				GameTooltip:AddLine("Click to configure filters for " .. opts.label .. ".",
+				GameTooltip:AddLine("Click to choose which items " .. opts.label .. " will target.",
 					C_DIM[1], C_DIM[2], C_DIM[3], true)
 				GameTooltip:Show()
 			end)
 			gear:SetScript("OnLeave", function(self)
 				ApplyBackdrop(self, { 0.10, 0.10, 0.10, 1 }, { 0.30, 0.30, 0.30, 1 })
-				gearGlyph:SetTextColor(unpack(C_TEXT))
+				gearLabel:SetTextColor(unpack(C_TEXT))
 				GameTooltip:Hide()
 			end)
 			gear:SetScript("OnClick", function() opts.openFilters() end)
@@ -2351,46 +2450,66 @@ local function BuildUI(self)
 	local tglOpenEnabled, openKeyRow, openStatus = MakeKeybindRow({
 		label      = "One-Key Open",
 		bindingCmd = "CLICK AutoDeleteOpenButton:LeftButton",
-		tooltip    = "Wires the next openable item in your bags (clams, coin purses, unlocked junkboxes, eggs, etc.) to the key you bind. Pressing the key fires /use on that bag slot.",
+		tooltip    = "Press one button to open the next clam, coin purse, or egg in your bags. Locked boxes are skipped until you can pick the lock.",
 	}, -6)
-	self._tglOpenEnabled = tglOpenEnabled
-	self._openKeyRow     = openKeyRow
-	self._openStatus     = openStatus
+	self._tglOpenEnabled  = tglOpenEnabled
+	self._openKeyRow      = openKeyRow
+	self._openStatus      = openStatus
+	self._openBindingCmd  = "CLICK AutoDeleteOpenButton:LeftButton"
 
 	-- Row 2: One-Key Disenchant (y=-30).
 	local tglDisenchant, disenchantKeyRow, disenchantStatus = MakeKeybindRow({
 		label      = "One-Key Disenchant",
 		bindingCmd = "CLICK AutoDeleteDisenchantButton:LeftButton",
-		tooltip    = "Wires the next disenchantable item in your bags to the key you bind. Pressing the key fires /cast Disenchant + /use. Requires the Enchanting profession.",
+		tooltip    = "Press one button to disenchant your next green or higher item. You need the Enchanting profession. Use the Filters button to choose which items count.",
 		openFilters = function()
 			if _G.AutoDelete_ToggleDisenchantFiltersPopup then
 				_G.AutoDelete_ToggleDisenchantFiltersPopup()
 			end
 		end,
 	}, -(6 + (KEYBIND_ROW_H + KEYBIND_ROW_GAP)))
-	self._tglDisenchant     = tglDisenchant
-	self._disenchantKeyRow  = disenchantKeyRow
-	self._disenchantStatus  = disenchantStatus
+	self._tglDisenchant         = tglDisenchant
+	self._disenchantKeyRow      = disenchantKeyRow
+	self._disenchantStatus      = disenchantStatus
+	self._disenchantBindingCmd  = "CLICK AutoDeleteDisenchantButton:LeftButton"
 
 	-- Row 3: One-Key Mill (y=-54).
 	local tglMill, millKeyRow, millStatus = MakeKeybindRow({
 		label      = "One-Key Mill",
 		bindingCmd = "CLICK AutoDeleteMillButton:LeftButton",
-		tooltip    = "Wires the next stack of 5+ herbs in your bags to the key you bind. Pressing the key fires /cast Milling. Requires the Inscription profession.",
+		tooltip    = "Press one button to mill the next stack of herbs in your bags. The stack needs at least 5 herbs. You need the Inscription profession.",
 	}, -(6 + (KEYBIND_ROW_H + KEYBIND_ROW_GAP) * 2))
-	self._tglMill    = tglMill
-	self._millKeyRow = millKeyRow
-	self._millStatus = millStatus
+	self._tglMill        = tglMill
+	self._millKeyRow     = millKeyRow
+	self._millStatus     = millStatus
+	self._millBindingCmd = "CLICK AutoDeleteMillButton:LeftButton"
 
 	-- Row 4: One-Key Prospect (y=-78).
 	local tglProspect, prospectKeyRow, prospectStatus = MakeKeybindRow({
 		label      = "One-Key Prospect",
 		bindingCmd = "CLICK AutoDeleteProspectButton:LeftButton",
-		tooltip    = "Wires the next stack of 5+ ore in your bags to the key you bind. Pressing the key fires /cast Prospecting. Requires the Jewelcrafting profession.",
+		tooltip    = "Press one button to prospect the next stack of ore in your bags. The stack needs at least 5 ore. You need the Jewelcrafting profession.",
 	}, -(6 + (KEYBIND_ROW_H + KEYBIND_ROW_GAP) * 3))
-	self._tglProspect    = tglProspect
-	self._prospectKeyRow = prospectKeyRow
-	self._prospectStatus = prospectStatus
+	self._tglProspect        = tglProspect
+	self._prospectKeyRow     = prospectKeyRow
+	self._prospectStatus     = prospectStatus
+	self._prospectBindingCmd = "CLICK AutoDeleteProspectButton:LeftButton"
+
+	-- Wire the key-row's _onBindingChanged callbacks so the row's status
+	-- text refreshes the moment a key is bound or cleared. Without these,
+	-- the row would say "Bind a key" until the next BAG_UPDATE fired.
+	openKeyRow._onBindingChanged       = function()
+		if self._refreshOpenStatus       then self:_refreshOpenStatus()       end
+	end
+	disenchantKeyRow._onBindingChanged = function()
+		if self._refreshDisenchantStatus then self:_refreshDisenchantStatus() end
+	end
+	millKeyRow._onBindingChanged       = function()
+		if self._refreshMillStatus       then self:_refreshMillStatus()       end
+	end
+	prospectKeyRow._onBindingChanged   = function()
+		if self._refreshProspectStatus   then self:_refreshProspectStatus()   end
+	end
 	end  -- end of Keybinds-tab `do` block
 
 	-- ========================================================================
@@ -2648,64 +2767,55 @@ local function BuildUI(self)
 	do
 		local profilesPage = tabPages.profiles
 
-		-- 4-column layout inside the 498px tab content area.
-		--   Col 1 (X=8,   W=113): Row 1 = "Current: <char>" header.
-		--   Col 2 (X=131, W=113): Row 1 = empty.
-		--   Col 3 (X=254, W=113): Row 1 = Copy;   Row 2 = Import Lists.
-		--   Col 4 (X=377, W=113): Row 1 = Delete; Row 2 = Clear List.
-		-- Dropdown spans Col 1+2 on Row 2 (width = 2*113 + 10 = 236).
+		-- Left-stack + right 2x2 grid layout inside the tab content area.
+		--
+		--   LEFT half (x=8, width=236):
+		--     "Current: <char>" label at y=-10 (top)
+		--     Profile dropdown at  y=-30 (below label, 22 tall)
+		--
+		--   RIGHT half (cols 3+4):
+		--     Row 1 (y=-10): [Copy]        [Delete]
+		--     Row 2 (y=-40): [Import Lists] [Clear List]
+		--     Buttons are 113 wide, 26 tall, 6px gap between rows.
+		--
+		-- Semantic colors per Addon_UI_StyleGuide.md:
+		--   Copy / Import Lists  -> C_GREEN (additive, copies data in)
+		--   Delete / Clear List  -> C_RED   (destructive)
+		-- Both sides are independently top-aligned. Each side is read
+		-- top-down so the user does not have to scan diagonally.
 		local PROF_LEFT_PAD = 8
 		local PROF_COL_W    = 113
 		local PROF_COL_GAP  = 10
-		local PROF_COL2_X   = PROF_LEFT_PAD + PROF_COL_W + PROF_COL_GAP           -- 131
-		local PROF_COL3_X   = PROF_COL2_X   + PROF_COL_W + PROF_COL_GAP           -- 254
+		local PROF_COL3_X   = PROF_LEFT_PAD + PROF_COL_W * 2 + PROF_COL_GAP * 2   -- 254
 		local PROF_COL4_X   = PROF_COL3_X   + PROF_COL_W + PROF_COL_GAP           -- 377
-		local PROF_BTN_H    = 22
+		local PROF_BTN_H    = 26
 		local PROF_BTN_GAP  = 6
-		local PROF_ROW1_Y   = -14
-		local PROF_ROW2_Y   = PROF_ROW1_Y - PROF_BTN_H - PROF_BTN_GAP             -- -42
 		local PROF_DD_W     = PROF_COL_W * 2 + PROF_COL_GAP                       -- 236
+		local PROF_LABEL_Y  = -10
+		local PROF_DD_Y     = PROF_LABEL_Y - 20                                   -- -30
+		local PROF_ROW1_Y   = PROF_LABEL_Y                                        -- top-aligned with LEFT label
+		local PROF_ROW2_Y   = PROF_ROW1_Y - PROF_BTN_H - PROF_BTN_GAP             -- -42
 
-		-- Row 1 / Col 1: "Current: <charname>" header. Nudged down a few pixels
-		-- so the text baseline sits roughly centered with the button row.
+		-- LEFT half / row 1: "Current: <charname>" label (small accent text).
 		local curHeader = MakeText(profilesPage, 10, C_TITLE, "OUTLINE")
-		curHeader:SetPoint("TOPLEFT", PROF_LEFT_PAD, PROF_ROW1_Y - 4)
+		curHeader:SetPoint("TOPLEFT", PROF_LEFT_PAD, PROF_LABEL_Y)
 		curHeader:SetJustifyH("LEFT")
 		curHeader:SetText("Current: " .. (UnitName("player") or "?"))
 
 		-- Selected-character state (tracked on self since the dropdown is built
-		-- dynamically in Refresh. We can't capture it as a BuildUI local or
-		-- it won't update when characters are added/deleted).
+		-- dynamically in Refresh. We cannot capture it as a BuildUI local or
+		-- it will not update when characters are added/deleted).
 		self._selectedProfile = nil
 
-		-- Row 2 / Col 1+2 spanning: profile dropdown.
+		-- LEFT half / row 2: profile dropdown (sits directly below the label).
 		local profileDD = MakeDropdown(profilesPage, PROF_DD_W, {}, function(val)
 			self._selectedProfile = val
 		end)
-		profileDD:SetPoint("TOPLEFT", PROF_LEFT_PAD, PROF_ROW2_Y)
+		profileDD:SetPoint("TOPLEFT", PROF_LEFT_PAD, PROF_DD_Y)
 		self._profileDD = profileDD
 
-		-- Action buttons.
-		local function MakeActionBtn(label, onClick)
-			local btn = CreateFrame("Button", nil, profilesPage)
-			btn:SetSize(80, 22)
-			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
-			local txt = MakeText(btn, 10, C_DIM, "OUTLINE")
-			txt:SetPoint("CENTER")
-			txt:SetText(label)
-			btn:SetScript("OnEnter", function()
-				ApplyBackdrop(btn, C_ROW_HOVER, C_BORDER)
-				txt:SetTextColor(unpack(C_TEXT))
-			end)
-			btn:SetScript("OnLeave", function()
-				ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
-				txt:SetTextColor(unpack(C_DIM))
-			end)
-			btn:SetScript("OnClick", onClick)
-			return btn
-		end
-
-		local copyBtn = MakeActionBtn("Copy", function()
+		-- RIGHT half / row 1: Copy (green) and Delete (red).
+		local copyBtn = MakeActionButton(profilesPage, "Copy", C_GREEN, function()
 			local sel = self._selectedProfile
 			if not sel or sel == "" then
 				print("|cffff8000[AutoDelete]|r: Select a profile first.")
@@ -2714,9 +2824,10 @@ local function BuildUI(self)
 			local dlg = StaticPopup_Show("AUTODELETE_PROFILE_COPY", sel,
 				_G.AutoDelete_Profiles.GetCurrentCharacter())
 			if dlg then dlg.data = sel end
-		end)
+		end, PROF_COL_W, PROF_BTN_H)
+		copyBtn:SetPoint("TOPLEFT", PROF_COL3_X, PROF_ROW1_Y)
 
-		local deleteBtn = MakeActionBtn("Delete", function()
+		local deleteBtn = MakeActionButton(profilesPage, "Delete", C_RED, function()
 			local sel = self._selectedProfile
 			if not sel or sel == "" then
 				print("|cffff8000[AutoDelete]|r: Select a profile first.")
@@ -2724,12 +2835,14 @@ local function BuildUI(self)
 			end
 			local dlg = StaticPopup_Show("AUTODELETE_PROFILE_DELETE", sel)
 			if dlg then dlg.data = sel end
-		end)
+		end, PROF_COL_W, PROF_BTN_H)
+		deleteBtn:SetPoint("TOPLEFT", PROF_COL4_X, PROF_ROW1_Y)
 
-		-- Import button: merges the 3 lists (Delete/Sell/Keep) from the selected
+		-- RIGHT half / row 2: Import Lists (green) and Clear List (red).
+		-- Import merges the 3 lists (Delete/Sell/Keep) from the selected
 		-- profile into the current character's profile. Never touches other
 		-- settings. Duplicates are skipped; cross-list conflicts open a popup.
-		local importBtn = MakeActionBtn("Import Lists", function()
+		local importBtn = MakeActionButton(profilesPage, "Import Lists", C_GREEN, function()
 			local sel = self._selectedProfile
 			if not sel or sel == "" then
 				print("|cffff8000[AutoDelete]|r: Select a profile first.")
@@ -2753,36 +2866,22 @@ local function BuildUI(self)
 			end
 			if #preview.conflicts == 0 then
 				-- Fast path: just additions, no conflicts. Confirm and apply.
-				local msg = string.format("Import %d item(s) from %s into your lists?", #preview.additions, sel)
 				StaticPopup_Show("AUTODELETE_PROFILE_IMPORT_SIMPLE", sel, tostring(#preview.additions)).data = sel
 				return
 			end
 			-- Conflicts exist. Open the conflict resolution popup.
 			_G.AutoDelete_ShowImportConflicts(sel, preview)
-		end)
+		end, PROF_COL_W, PROF_BTN_H)
+		importBtn:SetPoint("TOPLEFT", PROF_COL3_X, PROF_ROW2_Y)
 
-		-- Clear List button: wipes one list (Delete/Sell/Keep) or all three
-		-- on the current character's profile. Opens a small picker popup; the
-		-- destructive action is then confirmed via a StaticPopup.
-		local clearBtn = MakeActionBtn("Clear List", function()
+		-- Clear List opens a picker that wipes one list (Delete/Sell/Keep)
+		-- or all three on the current character. The destructive action is
+		-- then confirmed via a StaticPopup inside the picker.
+		local clearBtn = MakeActionButton(profilesPage, "Clear List", C_RED, function()
 			if _G.AutoDelete_ShowClearListPicker then
 				_G.AutoDelete_ShowClearListPicker()
 			end
-		end)
-
-		-- Buttons: column 3 is Copy + Import Lists (stacked); column 4 is
-		-- Delete + Clear List (stacked). All buttons are identically sized
-		-- to match the column width.
-		copyBtn:SetSize(PROF_COL_W, PROF_BTN_H)
-		copyBtn:SetPoint("TOPLEFT", PROF_COL3_X, PROF_ROW1_Y)
-
-		deleteBtn:SetSize(PROF_COL_W, PROF_BTN_H)
-		deleteBtn:SetPoint("TOPLEFT", PROF_COL4_X, PROF_ROW1_Y)
-
-		importBtn:SetSize(PROF_COL_W, PROF_BTN_H)
-		importBtn:SetPoint("TOPLEFT", PROF_COL3_X, PROF_ROW2_Y)
-
-		clearBtn:SetSize(PROF_COL_W, PROF_BTN_H)
+		end, PROF_COL_W, PROF_BTN_H)
 		clearBtn:SetPoint("TOPLEFT", PROF_COL4_X, PROF_ROW2_Y)
 
 		-- Register StaticPopups (once). Unique names to avoid collisions.
@@ -4024,6 +4123,64 @@ local function BuildUI(self)
 	-- self so both the Keybinds-tab card's handlers and the Refresh path
 	-- below share one implementation. Safe to call before AutoDelete.lua
 	-- exports the accessor (falls back to a dim "..." string).
+
+	-- Status composer for all four Keybinds-tab rows. Takes the raw text
+	-- the addon-side getter returns ("Disabled" / "Requires X" / "Next: ..."
+	-- / "No ... in bags") and rewrites it in plain English that explains
+	-- the next step the user should take. Reads the current keybind via
+	-- GetBindingKey() so a feature that's enabled but unbound surfaces
+	-- "Bind a key" instead of misleading "Next: <item>" text.
+	--
+	-- Returns: (text, r, g, b). Always returns a string + a color triple,
+	-- even on error paths, so callers can SetText/SetTextColor unconditionally.
+	function self:_buildKeybindStatus(rawText, bindingCmd, r, g, b)
+		if not rawText or rawText == "" then
+			return "...", 0.55, 0.55, 0.55
+		end
+
+		-- Checkbox is off. The addon getter returns "Disabled" only in
+		-- this case (profession requirements have their own branch).
+		if rawText == "Disabled" then
+			return "Off -- tick the box to enable", 0.55, 0.55, 0.55
+		end
+
+		-- Profession requirement not met. Re-word "Requires Enchanting"
+		-- as "Needs Enchanting profession" so it reads as an action
+		-- prompt rather than a flat label.
+		local profMatch = rawText:match("^Requires (.+)$")
+		if profMatch then
+			return "Needs " .. profMatch .. " profession", 1.0, 0.4, 0.4
+		end
+
+		-- Feature is enabled; check whether the user has actually
+		-- bound a key. If not, surface that as the next step regardless
+		-- of whether the bags have a valid target.
+		local boundKey = bindingCmd and GetBindingKey(bindingCmd)
+		if not boundKey then
+			return "Bind a key (button to the left)", 1.0, 0.7, 0.0
+		end
+
+		-- "Next: <link>" -> "[KEY] <link>". The item link is colored
+		-- by WoW so we don't need a special color triple on the whole
+		-- string; the leading "[KEY] " inherits the cyan tint from the
+		-- addon getter's r/g/b.
+		local link = rawText:match("^Next:%s*(.+)$")
+		if link then
+			return "[" .. boundKey .. "] " .. link, r or 0.7, g or 0.85, b or 1.0
+		end
+
+		-- "No ... in bags" -> "Nothing to <feature> right now". Trim
+		-- the addon's wordy phrasing to one short line. Bag-empty is a
+		-- transient state, not a problem to fix, so use the dim color.
+		if rawText:find("^No ") then
+			return "Nothing to do right now", 0.55, 0.55, 0.55
+		end
+
+		-- Unknown shape; pass through with the original color so we
+		-- don't lose information.
+		return rawText, r or 0.55, g or 0.55, b or 0.55
+	end
+
 	function self:_refreshDisenchantStatus()
 		if not self._disenchantStatus then return end
 		local getter = _G.AutoDelete_GetDisenchantStatus
@@ -4032,9 +4189,10 @@ local function BuildUI(self)
 			self._disenchantStatus:SetTextColor(0.55, 0.55, 0.55)
 			return
 		end
-		local text, r, g, b = getter()
-		self._disenchantStatus:SetText(text or "")
-		self._disenchantStatus:SetTextColor(r or 0.55, g or 0.55, b or 0.55)
+		local rawText, r, g, b = getter()
+		local text, nr, ng, nb = self:_buildKeybindStatus(rawText, self._disenchantBindingCmd, r, g, b)
+		self._disenchantStatus:SetText(text)
+		self._disenchantStatus:SetTextColor(nr, ng, nb)
 	end
 
 	-- Keybinds tab: One-Key Open. Toggle + sub-toggle update the profile
@@ -4069,9 +4227,10 @@ local function BuildUI(self)
 			self._openStatus:SetTextColor(0.55, 0.55, 0.55)
 			return
 		end
-		local text, r, g, b = getter()
-		self._openStatus:SetText(text or "")
-		self._openStatus:SetTextColor(r or 0.55, g or 0.55, b or 0.55)
+		local rawText, r, g, b = getter()
+		local text, nr, ng, nb = self:_buildKeybindStatus(rawText, self._openBindingCmd, r, g, b)
+		self._openStatus:SetText(text)
+		self._openStatus:SetTextColor(nr, ng, nb)
 	end
 
 	-- Keybinds tab Row 2: Mill (Inscription) and Prospect (Jewelcrafting).
@@ -4079,7 +4238,7 @@ local function BuildUI(self)
 	-- status-refresher pair into a tiny closure-builder. `field` is the
 	-- profile key, `updateFn` is the AutoDelete.lua exported updater, and
 	-- `statusKey` / `getterKey` plug into the per-feature self fields.
-	local function MakeSecureCastWiring(field, updateGlobalName, getterGlobalName, statusFieldKey, refreshSelfKey)
+	local function MakeSecureCastWiring(field, updateGlobalName, getterGlobalName, statusFieldKey, refreshSelfKey, bindingCmdKey)
 		local function OnClickHandler(btn)
 			btn._checked = not btn._checked
 			btn:SetChecked(btn._checked)
@@ -4098,9 +4257,10 @@ local function BuildUI(self)
 				widget:SetTextColor(0.55, 0.55, 0.55)
 				return
 			end
-			local text, r, g, b = getter()
-			widget:SetText(text or "")
-			widget:SetTextColor(r or 0.55, g or 0.55, b or 0.55)
+			local rawText, r, g, b = getter()
+			local text, nr, ng, nb = s:_buildKeybindStatus(rawText, s[bindingCmdKey], r, g, b)
+			widget:SetText(text)
+			widget:SetTextColor(nr, ng, nb)
 		end
 		return OnClickHandler
 	end
@@ -4111,7 +4271,8 @@ local function BuildUI(self)
 			"AutoDelete_UpdateMillButton",
 			"AutoDelete_GetMillStatus",
 			"_millStatus",
-			"_refreshMillStatus"))
+			"_refreshMillStatus",
+			"_millBindingCmd"))
 	end
 	if self._tglProspect then
 		self._tglProspect:SetScript("OnClick", MakeSecureCastWiring(
@@ -4119,7 +4280,8 @@ local function BuildUI(self)
 			"AutoDelete_UpdateProspectButton",
 			"AutoDelete_GetProspectStatus",
 			"_prospectStatus",
-			"_refreshProspectStatus"))
+			"_refreshProspectStatus",
+			"_prospectBindingCmd"))
 	end
 
 	-- Filters tab: Affix Protection toggles. Same RefreshCachedProfile call
@@ -4761,27 +4923,6 @@ local function BuildPopupSkeleton(globalName, title, W, H)
 	return f, body
 end
 
--- Shared "dialog button" builder (Apply/Cancel style).
-local function MakeDialogButton(parent, label, onClick)
-	local btn = CreateFrame("Button", nil, parent)
-	btn:SetSize(90, 24)
-	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
-	local txt = MakeText(btn, 11, C_TEXT, "OUTLINE")
-	txt:SetPoint("CENTER")
-	txt:SetText(label)
-	btn._text = txt
-	btn:SetScript("OnEnter", function(b)
-		ApplyBackdrop(b, C_ROW_HOVER, C_BORDER)
-		txt:SetTextColor(1, 1, 1)
-	end)
-	btn:SetScript("OnLeave", function(b)
-		ApplyBackdrop(b, C_ROW_ODD, C_BORDER)
-		txt:SetTextColor(unpack(C_TEXT))
-	end)
-	btn:SetScript("OnClick", onClick)
-	return btn
-end
-
 -- ============================================================================
 -- Import Conflicts Window
 -- ============================================================================
@@ -5030,40 +5171,31 @@ local function BuildClearListWindow()
 
 	local BTN_W, BTN_H = 290, 26
 	local BTN_GAP = 4
+	-- 3-color semantic palette per Addon_UI_StyleGuide.md:
+	--   Six options destructive (clear / remove user data) -> C_RED
+	--   "Remove recipes & patterns..." opens a sub-picker  -> C_BLUE
 	local options = {
-		{ value = "Delete",   label = "Delete list",                     color = C_RED },
-		{ value = "Sell",     label = "Sell list",                       color = C_ACCENT },
-		{ value = "Keep",     label = "Keep list",                       color = C_GREEN },
-		{ value = "All",      label = "All three lists",                 color = { 0.85, 0.25, 0.85, 1 } },
+		{ value = "Delete",   label = "Delete list",                     color = C_RED  },
+		{ value = "Sell",     label = "Sell list",                       color = C_RED  },
+		{ value = "Keep",     label = "Keep list",                       color = C_RED  },
+		{ value = "All",      label = "All three lists",                 color = C_RED  },
 		-- Remove Junk: scans Delete + Sell only, removes gray-quality items.
-		{ value = "Junk",     label = "Remove junk items",               color = { 0.55, 0.55, 0.55, 1 } },
+		{ value = "Junk",     label = "Remove junk items",               color = C_RED  },
 		-- Remove Sellable: scans Delete only, removes items with vendor value.
-		{ value = "Sellable", label = "Remove items with vendor value",  color = { 0.95, 0.80, 0.20, 1 } },
+		{ value = "Sellable", label = "Remove items with vendor value",  color = C_RED  },
 		-- Remove Patterns: opens a sub-window listing each profession-style
 		-- subtype (Pattern / Recipe / Plans / Schematic / Formula / Design /
-		-- Technique / Manual). Ellipsis on the label signals "opens another
-		-- window" rather than a single confirm.
-		{ value = "Patterns", label = "Remove recipes & patterns...",    color = { 0.45, 0.85, 0.55, 1 } },
+		-- Technique / Manual). This is navigational, not directly destructive,
+		-- so it gets C_BLUE per the change/transform class. Ellipsis on the
+		-- label signals "opens another window."
+		{ value = "Patterns", label = "Remove recipes & patterns...",    color = C_BLUE },
 	}
 
 	for i, opt in ipairs(options) do
-		local b = CreateFrame("Button", nil, card)
-		b:SetSize(BTN_W, BTN_H)
+		local b = MakeActionButton(card, opt.label, opt.color, nil, BTN_W, BTN_H)
 		b:SetPoint("TOP", 0, -8 - ((i - 1) * (BTN_H + BTN_GAP)))
-		ApplyBackdrop(b, C_ROW_ODD, C_BORDER)
-		local txt = MakeText(b, 11, C_TEXT, "OUTLINE")
-		txt:SetPoint("CENTER")
-		txt:SetText(opt.label)
-		b:SetScript("OnEnter", function(btn)
-			local c = opt.color
-			btn:SetBackdropColor(c[1], c[2], c[3], 0.3)
-			btn:SetBackdropBorderColor(c[1], c[2], c[3], 1)
-			txt:SetTextColor(1, 1, 1)
-		end)
-		b:SetScript("OnLeave", function(btn)
-			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
-			txt:SetTextColor(unpack(C_TEXT))
-		end)
+		-- MakeActionButton wires its own OnEnter/OnLeave (hover tint + white
+		-- text). Only the click action is bespoke per row.
 		b:SetScript("OnClick", function()
 			clearFrame:Hide()
 			-- "Patterns" routes to a sub-window (sibling, not confirm) so
