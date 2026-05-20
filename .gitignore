@@ -14,7 +14,7 @@ Thumbs.db
 *.lua.bak
 
 # Local-only reference material that lives in the parent folder
-# (F:\Claude\Addons\). Never commit copies of these even if someone
+# (D:\Claude\Addons\). Never commit copies of these even if someone
 # accidentally drags them into the repo directory.
 addon-conventions.md
 lua-reference/
