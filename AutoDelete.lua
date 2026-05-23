@@ -39,6 +39,93 @@ local API = {
 	min                  = math.min,
 }
 
+-- ============================================================================
+-- Perf instrumentation (opt-in via /del perf)
+-- ============================================================================
+-- Backed by debugprofilestop(), available on 3.3.5a since 2.0 -- returns
+-- ms with sub-ms precision since UI init.
+--
+-- IMPORTANT: this module deliberately uses ONLY globals (no file-locals).
+-- AutoDelete.lua's main chunk is right at Lua 5.1's 200-local cap; adding
+-- six file-locals here for the perf functions pushed parsing over the
+-- edge and broke the addon (see git history, the regression that broke
+-- MakeSubToggle in Options.lua). Globals are slower per-call but the
+-- whole point of AutoDelete_PerfBegin is a nil-check early return when disabled,
+-- so the lookup cost is acceptable for the diagnostic-only use case.
+--
+-- Usage in code:
+--     local _p = AutoDelete_PerfBegin("phase-name")
+--     ...work...
+--     AutoDelete_PerfEnd("phase-name", _p)
+--
+-- Report via /del perf report. Stats persist across reloads until /del
+-- perf reset is run. Phase names are free-form strings; pick names that
+-- group related work (one per hot-path function is the sweet spot).
+
+_G.AutoDelete_PerfEnabled = _G.AutoDelete_PerfEnabled or false
+_G.AutoDelete_PerfStats   = _G.AutoDelete_PerfStats or {}
+
+function AutoDelete_PerfBegin(phase)
+	if not _G.AutoDelete_PerfEnabled then return nil end
+	return debugprofilestop()
+end
+
+function AutoDelete_PerfEnd(phase, startMs)
+	if not startMs then return end
+	local elapsed = debugprofilestop() - startMs
+	local s = _G.AutoDelete_PerfStats[phase]
+	if not s then
+		s = { count = 0, totalMs = 0, lastMs = 0, maxMs = 0 }
+		_G.AutoDelete_PerfStats[phase] = s
+	end
+	s.count   = s.count + 1
+	s.totalMs = s.totalMs + elapsed
+	s.lastMs  = elapsed
+	if elapsed > s.maxMs then s.maxMs = elapsed end
+end
+
+function AutoDelete_PerfReport()
+	local hasAny = false
+	for _ in pairs(_G.AutoDelete_PerfStats) do hasAny = true; break end
+	if not hasAny then
+		print("|cffff8000[AutoDelete PERF]|r no data collected. Enable with /del perf, then loot/delete/sell something.")
+		return
+	end
+	-- Sort by totalMs descending so the worst offender shows first.
+	local rows = {}
+	for k, v in pairs(_G.AutoDelete_PerfStats) do
+		table.insert(rows, {
+			name  = k,
+			count = v.count,
+			total = v.totalMs,
+			avg   = v.totalMs / math.max(1, v.count),
+			max   = v.maxMs,
+		})
+	end
+	table.sort(rows, function(a, b) return a.total > b.total end)
+	print("|cffff8000[AutoDelete PERF]|r report (sorted by total ms):")
+	print(string.format("  %-32s %7s %10s %8s %8s", "phase", "n", "total ms", "avg ms", "max ms"))
+	for _, r in ipairs(rows) do
+		print(string.format(
+			"  %-32s %7d %10.1f %8.2f %8.1f",
+			r.name, r.count, r.total, r.avg, r.max))
+	end
+end
+
+function AutoDelete_PerfReset()
+	_G.AutoDelete_PerfStats = {}
+	print("|cffff8000[AutoDelete PERF]|r stats cleared.")
+end
+
+function AutoDelete_PerfToggle()
+	_G.AutoDelete_PerfEnabled = not _G.AutoDelete_PerfEnabled
+	if _G.AutoDelete_PerfEnabled then
+		print("|cffff8000[AutoDelete PERF]|r tracking |cff00ff00ON|r. Loot/delete/sell normally, then /del perf report.")
+	else
+		print("|cffff8000[AutoDelete PERF]|r tracking |cffff5555OFF|r. Use /del perf report to view captured data.")
+	end
+end
+
 -- cachedProfile is used throughout the file (Hide Greedy Spam filter, Auto-Invite
 -- handlers, sell/delete logic). It MUST be declared before any function that
 -- references it, otherwise Lua resolves `cachedProfile` to the global env (nil)
@@ -165,13 +252,35 @@ local DEFAULT_PROFILE = {
 	-- lives on the General tab next to Scan Speed.
 	showAffixDot           = true,
 
-	-- Bag Space (Tools tab):
-	--   bagSpaceWarnEnabled gates the chat warning (one-shot per low cycle).
-	--   bagSpaceWarnThreshold is a single shared threshold: it drives both
-	--   the warning AND the "Summon Goblin Merchant when bags are full"
-	--   feature on the Goblin tab. One value, two consumers, simpler UI.
-	bagSpaceWarnEnabled       = false,
-	bagSpaceWarnThreshold     = 5,
+	-- Affix Collection Mode (Filters tab, Affix Protection card).
+	-- When OFF (default): the affix dot shows on every affixed item,
+	-- colored by tier (white/green/blue/purple/orange). Affix
+	-- protection applies to all affixed items above the iLvl floor.
+	-- When ON: the dot ONLY shows for affixes the player hasn't yet
+	-- learned in PE's perk system (reads ExtractionService.learnedAffixes
+	-- directly), colored a single attention-gold. Items whose affix is
+	-- already owned at the same tier pass through to normal sell/delete
+	-- rules (duplicate-cleanup behavior). Fallback when the PE addon
+	-- isn't loaded: behaves as if mode is OFF.
+	affixCollectionMode    = false,
+
+	-- Bag Space / Goblin summon (Pets tab):
+	--   bagSpaceWarnThreshold is the free-slot count at or below which
+	--   the Goblin Merchant auto-summon fires (after BAGS_FULL_DELAY of
+	--   sustained-low). Default 2 = "really almost full" -- matches what
+	--   "bags full" intuitively means; previous default of 5 conflated
+	--   "heads-up warning" with "actually need a merchant" and caused
+	--   premature summons during normal play.
+	--
+	--   The migration in RunDBMigrations() upgrades existing profiles
+	--   whose stored value is exactly 5 (the old default) to 2 so users
+	--   don't have to manually adjust after upgrade.
+	--
+	--   bagSpaceWarnEnabled is retained in defaults as `false` for
+	--   backward compatibility with profiles created before v3.20; the
+	--   chat-warning code that read this field has been removed.
+	bagSpaceWarnEnabled       = false,   -- legacy; no longer consumed
+	bagSpaceWarnThreshold     = 2,       -- Goblin summon threshold
 
 	-- One-Key Disenchant (Keybinds tab): a SecureActionButton wired to the
 	-- next disenchantable item in bags. The user binds a key in the panel's
@@ -227,9 +336,26 @@ local DEFAULT_PROFILE = {
 	autoOpenEnabled       = false,
 	autoOpenIncludeLocked = true,
 
-	autoGray         = false,  -- Auto-Delete Junk   (gray quality, any item)
-	autoDeleteCommon = false,  -- Auto-Delete Common (white quality, equippable gear only)
-	autoSellGreens   = false,  -- Auto-Sell Greens   (green quality, equippable gear only)
+	-- Quality filters are tri-state cycle toggles: "off" | "delete" | "sell".
+	-- Each quality can be independently set to do nothing, auto-delete, or
+	-- auto-sell at vendor. Old booleans (autoGray, autoDeleteCommon,
+	-- autoSellGreens) are migrated to these fields by RunDBMigrations v3
+	-- and then left in place for one version as a fallback read for older
+	-- code paths; the canonical fields going forward are the qualityAction*
+	-- enums.
+	--   Junk    = gray quality, any item type
+	--   Common  = white quality, equippable gear only
+	--   Greens  = green quality, equippable gear only
+	qualityActionJunk    = "off",
+	qualityActionCommon  = "off",
+	qualityActionGreens  = "off",
+
+	-- Legacy booleans -- retained for one version while migration settles.
+	-- DO NOT read these in new code; read qualityAction* instead. Removed
+	-- in v3.21 after we confirm no users are running un-migrated profiles.
+	autoGray         = false,  -- DEPRECATED: see qualityActionJunk
+	autoDeleteCommon = false,  -- DEPRECATED: see qualityActionCommon
+	autoSellGreens   = false,  -- DEPRECATED: see qualityActionGreens
 
 	-- ============================================================
 	-- Auto-Add Equipped (General tab)
@@ -442,14 +568,83 @@ end
 --
 -- Convention borrowed from Bagnon / Postal: one canonical migration spot
 -- so a future reader knows exactly where to add a new step.
-local AUTODELETE_DB_VERSION = 1
+local AUTODELETE_DB_VERSION = 4
 
 local function RunDBMigrations(db)
 	if not db then return end
 	db.version = db.version or 0
 	-- Migrations land here, in numeric order, each bumping db.version.
-	-- No-op for v1: the field is just being introduced; existing profiles
-	-- pass through with db.version set to current.
+	--
+	-- v1: introduce db.version field. No-op for existing data.
+	-- v2 (2026-05-20): the bag-space chat warning was removed and the
+	--     bagSpaceWarnThreshold field repurposed as the Goblin summon
+	--     threshold only. Old default was 5 (sized for "heads up, bags
+	--     filling"); new default is 2 (sized for "actually need a
+	--     merchant now"). Bump any profile whose stored value is exactly
+	--     5 (the old default) to 2 so users don't see premature summons
+	--     after upgrade. Leave non-5 user-set values alone.
+	if db.version < 2 and db.profiles then
+		for _, profile in pairs(db.profiles) do
+			if profile and profile.bagSpaceWarnThreshold == 5 then
+				profile.bagSpaceWarnThreshold = 2
+			end
+		end
+	end
+	-- v3 (2026-05-22): three independent quality booleans
+	-- (autoGray, autoDeleteCommon, autoSellGreens) become three tri-state
+	-- enum fields (qualityActionJunk/Common/Greens) so each quality can be
+	-- independently set to Off / Delete / Sell. Migration: existing TRUE
+	-- becomes the same semantic the old field had (delete for Junk and
+	-- Common, sell for Greens); FALSE becomes "off". Legacy booleans stay
+	-- present for one version so any straggler code path that still reads
+	-- the old field doesn't crash, but new code reads the new enum only.
+	if db.version < 3 and db.profiles then
+		local migrated = 0
+		for _, profile in pairs(db.profiles) do
+			if profile then
+				-- Only set the new field if it isn't already present so
+				-- re-running the migration on a partially-migrated profile
+				-- doesn't overwrite a deliberate user choice.
+				if profile.qualityActionJunk == nil then
+					profile.qualityActionJunk = (profile.autoGray == true) and "delete" or "off"
+				end
+				if profile.qualityActionCommon == nil then
+					profile.qualityActionCommon = (profile.autoDeleteCommon == true) and "delete" or "off"
+				end
+				if profile.qualityActionGreens == nil then
+					profile.qualityActionGreens = (profile.autoSellGreens == true) and "sell" or "off"
+				end
+				migrated = migrated + 1
+			end
+		end
+		if migrated > 0 then
+			-- One-time chat note so the user knows their settings carried
+			-- over and they don't get blamed for "weird new defaults."
+			print("|cffff8000[AutoDelete]|r migrated " .. migrated ..
+				" profile(s) to the new Junk/Common/Greens tri-state quality filters. " ..
+				"Your existing Delete/Sell choices were preserved.")
+		end
+	end
+	-- v4 (2026-05-22): Greens lost its Delete option in the Auto Actions UI
+	-- (deleting greens by quality was rarely the intended outcome; users who
+	-- want that can put specific greens on the Delete list explicitly). Any
+	-- profile carrying qualityActionGreens == "delete" gets normalized to
+	-- "off" here so the new segmented control's SetValue lands on a valid
+	-- segment instead of silently no-op'ing and leaving stale data behind.
+	if db.version < 4 and db.profiles then
+		local fixed = 0
+		for _, profile in pairs(db.profiles) do
+			if profile and profile.qualityActionGreens == "delete" then
+				profile.qualityActionGreens = "off"
+				fixed = fixed + 1
+			end
+		end
+		if fixed > 0 then
+			print("|cffff8000[AutoDelete]|r Greens no longer supports Delete-by-quality. " ..
+				fixed .. " profile(s) reset to Off. Add specific greens to the Delete list " ..
+				"if you want them deleted.")
+		end
+	end
 	db.version = AUTODELETE_DB_VERSION
 end
 
@@ -645,6 +840,34 @@ local function IsWhitelisted(profile, itemId, itemName)
 		if wlId and itemId and wlId == itemId then return true end
 		if raw ~= "" and itemName and Normalize(raw) == Normalize(itemName) then return true end
 	end
+	return false
+end
+
+-- Fast-path Keep-list check used by hot loops (DeleteItems / SellItems).
+-- IsWhitelisted above re-parses the whitelist text from scratch on every
+-- call (gmatch + gsub + tonumber + Normalize per line). For a 50-line
+-- Keep list and 80 bag slots that's 4000 string ops per pass -- which
+-- /del perf identified as the dominant cost in DeleteItems (~25ms avg
+-- per call). This helper takes pre-built hash sets (via BuildWantedSets
+-- on profile.whitelistText) and does two O(1) lookups instead.
+--
+-- Build once at the top of a scan:
+--   local keepNames, keepIDs = BuildWantedSets(profile.whitelistText)
+-- Then inside the loop:
+--   if AutoDelete__G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then ...
+--
+-- Globalized (via _G) instead of declared `local function` because the
+-- main chunk is at Lua 5.1's 200-local cap; adding one more local-scope
+-- function would push us past the limit and break the addon at load. The
+-- existing helpers AutoDelete_DecideDot / AutoDelete_RefreshOwnedAffixes
+-- follow the same pattern for the same reason.
+--
+-- IsWhitelisted (the slow path) is kept for non-hot callers (secure
+-- button candidate selection at /Open/Mill/Prospect/Disenchant) where
+-- the call frequency is one-per-keypress, not one-per-slot-per-tick.
+_G.AutoDelete_IsWhitelistedFast = function(keepIDs, keepNames, itemId, itemName)
+	if itemId and keepIDs[itemId] then return true end
+	if itemName and keepNames[Normalize(itemName)] then return true end
 	return false
 end
 
@@ -1223,7 +1446,21 @@ local scanRequested = false
 
 local function RequestScan() scanRequested = true end
 
-local DELETE_BATCH_SIZE = 20
+-- Items deleted per scan tick. Capped here, not by total bag walk -- the
+-- scan tick itself fires at most once per cachedProfile.scanInterval
+-- (minimum 0.25 s -- see scanner OnUpdate). Each WoW delete API call
+-- (PickupContainerItem + DeleteCursorItem) costs ~3-5 ms; with a batch
+-- of 30 the cumulative call duration was 117 ms (seven dropped frames)
+-- and the user reported a visible chug during loot bursts. Tuned twice:
+--   v3.19: 30 -> 5 (peak ~25 ms, no visible chug)
+--   v3.20: 5 -> 8 (peak ~32 ms, still well under a full 60fps frame)
+-- The 8/tick tuning landed because the 5/tick rate was too slow to keep
+-- up with heavy loot bursts: bags filled, BAGS_FULL_DELAY elapsed, and
+-- the Goblin Merchant summon fired BEFORE deletes finished clearing.
+-- At 8/tick × 2 ticks/sec (default scanInterval 0.5 s) = 16 items/sec,
+-- bagged against the 2.0 s BAGS_FULL_DELAY (~32 items absorbed before
+-- summon), which comfortably covers typical loot bursts.
+local DELETE_BATCH_SIZE = 8
 
 -- Cosmetic slots (shirts + tabards). Items in these slots are NEVER touched
 -- by the automatic rules (Auto-Delete Junk, Auto-Delete Common, Auto-Sell
@@ -1251,25 +1488,23 @@ local IsAffixProtected
 -- bag-space warning check. Same hoisting issue as IsAffixProtected above.
 local ComputeTotalFreeSlots
 
--- Bag-space warning state. Declared here (BEFORE the BAG_UPDATE handler
--- that reads/writes it) so the handler captures it as an upvalue. Without
--- this, the handler resolves it as a global, and Lua treats GLOBAL writes
--- as the SAME storage slot - which combined with the outer-else reset in
--- the handler caused the flag to flip back to false on stray events,
--- producing spam.
---
--- v3.20: repurposed from a rising-edge bool to a cooldown timestamp. The
--- original "print on cross-below, re-arm on cross-above" design spammed
--- when bags oscillated around the threshold (loot fills bags -> AutoDelete
--- drains below threshold -> next loot crosses again, repeat). The
--- timestamp enforces a hard cooldown: print at most once per 60 seconds
--- regardless of how many threshold crossings happen. Reusing the same
--- file-local slot rather than adding a new one keeps us under Lua 5.1's
--- 200-local cap on the main chunk. (Renamed for clarity; same slot.)
-local bagSpaceLastWarnAt = 0
+-- (bag-space chat warning removed v3.20; bagSpaceLastWarnAt file-local
+-- deleted. Goblin Merchant arrival serves as the user-visible "bags
+-- filling" indicator; the chat print was redundant and spammed during
+-- oscillation around the threshold. Threshold field 'bagSpaceWarnThreshold'
+-- is now read only by GetGoblinBagThreshold for summon timing.)
 
 local function DeleteItems()
-	if CursorHasItem() then return end
+	local _p = AutoDelete_PerfBegin("DeleteItems")
+	if CursorHasItem() then AutoDelete_PerfEnd("DeleteItems", _p); return end
+	-- Open a "self-update" suppression window so the BAG_UPDATE events
+	-- caused by our own PickupContainerItem + DeleteCursorItem calls
+	-- below don't restart the burst-quiescence wait in the scanner.
+	-- Without this, after every batch of 5 deletes the scanner would
+	-- see "BAG_UPDATE arrived <1s ago" and wait another full second --
+	-- turning a 1.5s clearing into a 7s crawl. 0.5s window covers the
+	-- typical 1-2 frame delay between API call and BAG_UPDATE arrival.
+	_G.AutoDelete_SelfBagUpdateUntil = GetTime() + 0.5
 	local db = GetDB()
 	local profile = GetActiveProfile(db)
 	if not profile.enabled then
@@ -1280,20 +1515,28 @@ local function DeleteItems()
 				_G._AutoDelete_DebugDelGateLogged = true
 			end
 		end
+		AutoDelete_PerfEnd("DeleteItems", _p)
 		return
 	end
 	_G._AutoDelete_DebugDelGateLogged = false
 
 	local wantedNames, wantedIDs = BuildWantedSets(profile.listText)
 	local hasWanted = next(wantedNames) or next(wantedIDs)
-	local doGray = profile.autoGray
-	local doCommon = profile.autoDeleteCommon
+	-- Pre-built Keep-list hash sets so the inner loop doesn't re-parse
+	-- the whitelist text per-item. See IsWhitelistedFast for the perf
+	-- rationale (the slow path was the dominant cost in DeleteItems).
+	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText)
+	-- Tri-state quality filter: only "delete" is a delete-path trigger.
+	-- "sell" is handled in SellItems; "off" is a no-op for both paths.
+	local doGray = (profile.qualityActionJunk == "delete")
+	local doCommon = (profile.qualityActionCommon == "delete")
 
 	if not hasWanted and not doGray and not doCommon then
 		if _G.AutoDelete_DebugSell and not _G._AutoDelete_DebugDelEmptyLogged then
-			print("|cffff8000[AutoDelete DEBUG]|r delete scan: no work - Delete list empty AND Auto-Delete Junk/Common both off.")
+			print("|cffff8000[AutoDelete DEBUG]|r delete scan: no work - Delete list empty AND Junk/Common quality filters not in delete mode.")
 			_G._AutoDelete_DebugDelEmptyLogged = true
 		end
+		AutoDelete_PerfEnd("DeleteItems", _p)
 		return
 	end
 	_G._AutoDelete_DebugDelEmptyLogged = false
@@ -1302,7 +1545,7 @@ local function DeleteItems()
 
 	for bag = 0, 4 do
 		for slot = 1, GetContainerNumSlots(bag) do
-			if deleted >= DELETE_BATCH_SIZE then return end
+			if deleted >= DELETE_BATCH_SIZE then AutoDelete_PerfEnd("DeleteItems", _p); return end
 			local _, _, locked, _, _, _, itemLink = GetContainerItemInfo(bag, slot)
 			if itemLink and not locked then
 				-- 6th return = itemType. Quest items (itemType "Quest") are
@@ -1353,8 +1596,10 @@ local function DeleteItems()
 				-- Execute the delete. Keep list always overrides - even Delete
 				-- list entries can't bypass it (Keep is the safety net of
 				-- last resort). Affix Protection (when toggled on, and item
-				-- meets the iLvl floor) is the second safety net.
-				if shouldDelete and not IsWhitelisted(profile, itemId, itemName)
+				-- meets the iLvl floor) is the second safety net. Uses
+				-- IsWhitelistedFast against pre-built keepNames/keepIDs to
+				-- avoid the per-item re-parse of the entire whitelist text.
+				if shouldDelete and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
 					and not IsAffixProtected(profile, bag, slot, itemLink, "delete") then
 					if _G.AutoDelete_DebugSell then
 						local reason = onDeleteList and "DeleteList" or "auto"
@@ -1379,6 +1624,89 @@ local function DeleteItems()
 			end
 		end
 	end
+	AutoDelete_PerfEnd("DeleteItems", _p)
+end
+
+-- ============================================================================
+-- AutoDelete_HasPendingDeleteItems
+-- ============================================================================
+-- Cheap predicate: returns true if any item currently in the player's bags
+-- would be deleted on the next DeleteItems pass. Used by the bag-full
+-- Goblin Merchant auto-summon to defer firing while AutoDelete still has
+-- trash to clear -- looting a stack of grays into a near-full bag should
+-- result in "wait for the delete pass to free space", not "burn a Goblin
+-- Merchant summon for items that are about to disappear anyway".
+--
+-- Decision mirrors DeleteItems' decision chain MINUS the affix-protection
+-- tooltip scan (which is expensive). We deliberately do NOT call IsAffix-
+-- Protected here: an affix-protected gray would still count as "pending"
+-- under this check, which leans toward delaying the summon a beat longer
+-- than strictly necessary. That's the safe direction -- a delayed summon
+-- is recoverable; a summon burned on items that vanish is not.
+--
+-- Returns on the first eligible item found (early break) so the average
+-- cost is well under a full bag scan.
+function AutoDelete_HasPendingDeleteItems(profile)
+	if not profile then return false end
+	-- Tri-state quality filter: only "delete" mode counts as pending here.
+	-- "sell" items don't block the bag-full Goblin summon -- selling requires
+	-- the player to interact with a merchant, which is a different flow.
+	local doGray   = (profile.qualityActionJunk == "delete")
+	local doCommon = (profile.qualityActionCommon == "delete")
+	-- BuildWantedSets returns (nameSet, idSet) in that order. `hasWanted`
+	-- mirrors DeleteItems' canonical "is the user's Delete list non-empty"
+	-- check via next(); it's the cheap way to skip the per-slot list
+	-- match when the list has zero entries.
+	local wantedNames, wantedIDs = BuildWantedSets(profile.listText)
+	local hasWanted = next(wantedNames) or next(wantedIDs)
+	-- Bail early if there's nothing to look for. Saves the full bag walk
+	-- in the common case of a brand-new profile with no rules enabled.
+	if not (hasWanted or doGray or doCommon) then return false end
+
+	-- Pre-built Keep-list sets so the inner loop's up-to-3 IsWhitelisted
+	-- calls per slot become 3 hash lookups instead of 3 full whitelist
+	-- re-parses. Same optimization as DeleteItems' hot path.
+	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText)
+
+	for bag = 0, 4 do
+		for slot = 1, (GetContainerNumSlots(bag) or 0) do
+			local link = GetContainerItemLink(bag, slot)
+			if link then
+				local itemName, _, itemQuality, _, _, itemClass, _, _, equipSlot = GetItemInfo(link)
+				local itemId = GetItemIDFromLink(link)
+				local isQuestItem = (itemClass == "Quest")
+
+				-- (1) Explicit Delete list. Wins over quest protection.
+				if hasWanted then
+					local onList = false
+					if itemId and wantedIDs[itemId] then onList = true end
+					if not onList and itemName and wantedNames[Normalize(itemName)] then
+						onList = true
+					end
+					if onList and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then
+						return true
+					end
+				end
+
+				-- (2) Auto rules. Quest-protected; respect cosmetic slots.
+				-- Quality codes: 0 = Poor (gray), 1 = Common (white).
+				if not isQuestItem then
+					if doGray and itemQuality and itemQuality == 0
+						and not IsCosmeticSlot(link)
+						and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then
+						return true
+					end
+					if doCommon and itemQuality and itemQuality == 1
+						and not IsCosmeticSlot(link)
+						and equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG"
+						and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then
+						return true
+					end
+				end
+			end
+		end
+	end
+	return false
 end
 
 -- ============================================================================
@@ -1469,6 +1797,107 @@ _G.AutoDelete_TooltipCache = _G.AutoDelete_TooltipCache or {
 	boe       = {},
 	soulbound = {},
 }
+-- Versioned cache invalidation. When the parsing logic (esp.
+-- AutoDelete_ExtractAffixLevel) changes between addon builds, cached values from
+-- prior loads can disagree with what the new code would produce
+-- (e.g. an item that used to cache as `true` boolean now needs to be
+-- 1-4; an item that used to cache at the wrong level under an Arabic-
+-- only parser needs to re-classify under the Roman-numeral parser).
+-- /reload only re-runs this file, it doesn't drop the global table,
+-- so we drop the affected sub-cache here when the version doesn't
+-- match. Bump _CACHE_VERSION whenever parsing semantics change.
+do
+	local _CACHE_VERSION = 5
+	if _G.AutoDelete_TooltipCache._cacheVersion ~= _CACHE_VERSION then
+		_G.AutoDelete_TooltipCache.affix     = {}
+		_G.AutoDelete_TooltipCache.soulbound = {}
+		_G.AutoDelete_TooltipCache.boe       = {}
+		_G.AutoDelete_TooltipCache._cacheVersion = _CACHE_VERSION
+	end
+end
+
+-- Combined-marker tooltip scan. Walks the bag-slot tooltip ONCE and
+-- extracts all three flags we care about (BoE, Soulbound, affix-level)
+-- in a single pass, then writes them to the corresponding global
+-- caches. This is the cold-path for IsBindOnEquip / IsSoulbound /
+-- HasAffix when the caller's specific cache is empty -- whichever
+-- function gets called first warms the other two for free.
+--
+-- Before this consolidation, FindDisenchantTarget on a freshly-looted
+-- 100-item bag did up to 200 tooltip scans (IsSoulbound + IsBindOnEquip
+-- per slot, both cold). The combined scan halves that: each fresh
+-- item incurs ONE scan that fills both caches; the second check is a
+-- cache hit. Dot-rendering through HasAffix benefits the same way.
+--
+-- Cost per combined scan is roughly the same as one previous single-
+-- marker scan: most items have NEITHER BoE nor Soulbound nor affix,
+-- so the single-marker scans were already walking the full tooltip
+-- (no early break possible when the marker is absent). Items WITH a
+-- marker may walk slightly more (no early break here either), but
+-- they're the minority and the cache savings dominate.
+--
+-- Caller must pass a non-nil `link` (used as the cache key). Returns
+-- (hasBoE, isSoulbound, affixLevel-or-false). Debug-mode scans
+-- bypass this function so the per-marker debug prints still work.
+function AutoDelete_ScanBagItemMarkers(bag, slot, link)
+	local _p = AutoDelete_PerfBegin("AutoDelete_ScanBagItemMarkers")
+	boeTip:Hide()
+	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
+	boeTip:ClearLines()
+	boeTip:SetBagItem(bag, slot)
+	-- Force population on environments where SetBagItem alone leaves
+	-- NumLines == 0 until the tooltip is shown.
+	boeTip:Show()
+	local n = boeTip:NumLines()
+	local hasBoE, isSoulbound, hasAffixMarker = false, false, false
+	for i = 1, n do
+		local leftFS  = _G["AutoDelete_BoETipTextLeft"  .. i]
+		local rightFS = _G["AutoDelete_BoETipTextRight" .. i]
+		local leftTxt  = leftFS  and leftFS:GetText()  or nil
+		local rightTxt = rightFS and rightFS:GetText() or nil
+		if leftTxt then
+			if not hasBoE and ITEM_BIND_ON_EQUIP
+				and string.find(leftTxt, ITEM_BIND_ON_EQUIP, 1, true) then
+				hasBoE = true
+			end
+			if not isSoulbound and ITEM_SOULBOUND
+				and string.find(leftTxt, ITEM_SOULBOUND, 1, true) then
+				isSoulbound = true
+			end
+			if not hasAffixMarker and string.find(leftTxt, "@affix@", 1, true) then
+				hasAffixMarker = true
+			end
+		end
+		if rightTxt and not hasAffixMarker
+			and string.find(rightTxt, "@affix@", 1, true) then
+			hasAffixMarker = true
+		end
+	end
+	boeTip:Hide()
+	-- Determine affix tier. The @affix@ tooltip markers tell us an item
+	-- HAS an affix, but the actual tier (I-IV) is encoded as a trailing
+	-- Roman numeral on the item NAME, not in the tooltip body. Examples:
+	-- "Belt of Draconic Runes of Iron Will IV", "Hydra-fang Necklace of
+	-- Cold II". We parse the trailing Roman from the name via
+	-- AutoDelete_ExtractAffixLevel; if the marker is present but the
+	-- name has no parseable suffix, default to tier 1 so the dot still
+	-- renders (better to over-show than silently hide).
+	local affixLevel = false
+	if hasAffixMarker then
+		local itemName = GetItemInfo(link)
+		affixLevel = AutoDelete_ExtractAffixLevel(itemName) or 1
+		if _G.AutoDelete_DebugSell then
+			print(string.format(
+				"|cffff8000[AutoDelete DEBUG]|r affix-marker found: name='%s' -> tier=%d",
+				tostring(itemName), affixLevel))
+		end
+	end
+	_G.AutoDelete_TooltipCache.affix[link]     = affixLevel
+	_G.AutoDelete_TooltipCache.soulbound[link] = isSoulbound
+	_G.AutoDelete_TooltipCache.boe[link]       = hasBoE
+	AutoDelete_PerfEnd("AutoDelete_ScanBagItemMarkers", _p)
+	return hasBoE, isSoulbound, affixLevel
+end
 
 local function IsBindOnEquip(bag, slot)
 	-- Phase D cache: BoE state is intrinsic to the item template and never
@@ -1480,41 +1909,39 @@ local function IsBindOnEquip(bag, slot)
 		local cached = _G.AutoDelete_TooltipCache.boe[link]
 		if cached ~= nil then return cached end
 	end
-	boeTip:Hide()
-	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
-	boeTip:ClearLines()
-	boeTip:SetBagItem(bag, slot)
-	-- Force population on environments where SetBagItem alone leaves
-	-- NumLines == 0 until the tooltip is shown.
-	boeTip:Show()
-	local n = boeTip:NumLines()
-
-	local foundBoE = false
-	local lines = debug and {} or nil
-	for i = 2, n do
-		local text = _G["AutoDelete_BoETipTextLeft" .. i]
-		if text then
-			local line = text:GetText()
-			if debug and line then
-				table.insert(lines, "  ["..i.."] "..line)
-			end
-			if line and string.find(line, ITEM_BIND_ON_EQUIP, 1, true) then
-				foundBoE = true
-				if not debug then
-					boeTip:Hide()
-					if link then _G.AutoDelete_TooltipCache.boe[link] = true end
-					return true
+	if debug then
+		-- Verbose debug-mode scan. Walks the tooltip and prints every
+		-- line so the user can verify what we're seeing. Doesn't go
+		-- through AutoDelete_ScanBagItemMarkers (which is the fast non-debug
+		-- combined-marker path) so the per-line print logic stays.
+		boeTip:Hide()
+		boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
+		boeTip:ClearLines()
+		boeTip:SetBagItem(bag, slot)
+		boeTip:Show()
+		local n = boeTip:NumLines()
+		local foundBoE = false
+		local lines = {}
+		for i = 2, n do
+			local text = _G["AutoDelete_BoETipTextLeft" .. i]
+			if text then
+				local line = text:GetText()
+				if line then
+					table.insert(lines, "  ["..i.."] "..line)
+				end
+				if line and string.find(line, ITEM_BIND_ON_EQUIP, 1, true) then
+					foundBoE = true
 				end
 			end
 		end
-	end
-	if debug then
 		print("|cffff8000[AutoDelete DEBUG]|r tooltip scan ("..n.." lines, foundBoE="..tostring(foundBoE).."):")
 		for _, l in ipairs(lines) do print(l) end
+		boeTip:Hide()
+		return foundBoE
 	end
-	boeTip:Hide()
-	if link and not debug then _G.AutoDelete_TooltipCache.boe[link] = foundBoE end
-	return foundBoE
+	if not link then return false end
+	local boe = AutoDelete_ScanBagItemMarkers(bag, slot, link)
+	return boe
 end
 
 -- Auto-Open Containers uses this to gate "locked" items (e.g. Battered
@@ -1559,31 +1986,13 @@ local function IsSoulbound(bag, slot)
 	-- equip). Cache is invalidated wholesale on PLAYER_EQUIPMENT_CHANGED so
 	-- a freshly-equipped BoE can't return a stale "not soulbound" hit.
 	local link = GetContainerItemLink(bag, slot)
-	if link then
-		local cached = _G.AutoDelete_TooltipCache.soulbound[link]
-		if cached ~= nil then return cached end
-	end
-	boeTip:Hide()
-	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
-	boeTip:ClearLines()
-	boeTip:SetBagItem(bag, slot)
-	boeTip:Show()
-	local n = boeTip:NumLines()
-	-- ITEM_SOULBOUND is a WoW FrameXML global string; pre-localized by
-	-- the client on every locale. The pattern argument is plain (plain=true)
-	-- because some locales include regex-special characters.
-	for i = 2, n do
-		local fs = _G["AutoDelete_BoETipTextLeft" .. i]
-		local txt = fs and fs:GetText()
-		if txt and string.find(txt, ITEM_SOULBOUND, 1, true) then
-			boeTip:Hide()
-			if link then _G.AutoDelete_TooltipCache.soulbound[link] = true end
-			return true
-		end
-	end
-	boeTip:Hide()
-	if link then _G.AutoDelete_TooltipCache.soulbound[link] = false end
-	return false
+	if not link then return false end
+	local cached = _G.AutoDelete_TooltipCache.soulbound[link]
+	if cached ~= nil then return cached end
+	-- Cold path: combined scan also warms boe + affix caches for free.
+	-- See AutoDelete_ScanBagItemMarkers for the rationale.
+	local _, sb = AutoDelete_ScanBagItemMarkers(bag, slot, link)
+	return sb
 end
 
 -- Affix Protection: PE wraps server-set affix tooltip lines with literal
@@ -1602,53 +2011,296 @@ end
 -- Defense in depth: we scan BOTH the left and right text columns and
 -- emit a debug print when /del debug is active so the user can verify
 -- the scan is finding what it should.
+-- Extract the affix level (1-4) from a tooltip line that contains the
+-- @affix@TEXT@affix@ marker pair. PE encodes the level as a Roman
+-- numeral inside the markers: `@affix@I@affix@` / `@affix@II@affix@` /
+-- `@affix@III@affix@` / `@affix@IV@affix@`. Returns the level on hit,
+-- or 1 (default to white/lowest tier) if the markers are present but
+-- no parseable level is found. Returns false if no marker pair on the
+-- line at all.
+--
+-- Color mapping for AutoDelete_SetButtonAffixDot:
+--   1 -> white (#FFFFFF)   common-tier affix    (Roman "I")
+--   2 -> green (#1EFF00)   uncommon-tier affix  (Roman "II")
+--   3 -> blue  (#0070DD)   rare-tier affix      (Roman "III")
+--   4 -> purple(#A335EE)   epic-tier affix      (Roman "IV")
+--
+-- Robustness:
+--   * Whitespace inside the markers is tolerated via a trim-then-exact
+--     check on the inner string.
+--   * If the inner content has extra text around the numeral (some PE
+--     builds wrap it as "Tier II" or "Rank IV"), we fall back to a
+--     longest-first substring search. Longest-first matters: "III"
+--     contains "II" contains "I" as substrings, so searching shorter
+--     numerals first would misclassify higher tiers as lower ones.
+--   * Arabic digit fallback (1-4) is kept for forward compatibility in
+--     case a future PE build switches encoding.
+--   * Last resort: markers present but no numeral parsed -> level 1.
+-- Extract the affix tier (1-5) from an item NAME.
+--
+-- PE encodes the affix tier as a trailing Roman numeral on the item
+-- name (NOT inside the @affix@ tooltip markers -- those wrap the
+-- affix effect description, not the tier number). Confirmed via
+-- /del debug capture 2026-05-20 and cross-verified against PE's own
+-- ParseAffixNameAndTier in extraction.lua, which uses this exact
+-- pattern. Examples:
+--   "Belt of Draconic Runes of Iron Will IV"          -> 4
+--   "Belt of Draconic Runes of Arcane Mind II"        -> 2
+--   "Lola's Lifegiving Branch of Iron Will III"       -> 3
+--   "Hydra-fang Necklace of Cold II"                  -> 2
+--   "Milan's Mastercraft Band of Block IV"            -> 4
+--   (PE supports up to V too -- "Foo of Bar V" -> 5)
+--
+-- Returns 1-5 if a trailing Roman is present, nil otherwise. The
+-- caller (ScanBagItemMarkers) decides what to do with a nil result
+-- when an affix marker IS present on the item -- currently defaults
+-- to tier 1 so the dot still renders.
+local AFFIX_ROMAN_TO_NUM = { i = 1, ii = 2, iii = 3, iv = 4, v = 5 }
+function AutoDelete_ExtractAffixLevel(itemName)
+	if not itemName then return nil end
+	-- Lowercase + match a trailing Roman numeral run anchored at end of
+	-- string, preceded by whitespace. The [iv]+ pattern matches any
+	-- combination of i/v chars; the table lookup is the actual gate
+	-- (so weird suffixes like "vii" or "ivi" fall through to nil).
+	-- This is the same pattern PE uses internally in extraction.lua.
+	local roman = itemName:lower():match("%s+([iv]+)$")
+	if not roman then return nil end
+	return AFFIX_ROMAN_TO_NUM[roman]
+end
+
+-- ============================================================================
+-- Affix Collection Mode
+-- ============================================================================
+-- When the user enables `affixCollectionMode`, the affix dot becomes a
+-- "you haven't learned this yet" indicator rather than a "this item has
+-- an affix" indicator. Owned-at-this-tier items pass through normal
+-- sell/delete rules so the player can clear duplicates; missing-affix
+-- items get a single attention-gold dot AND keep their affix protection.
+--
+-- Data source: PE's ExtractionService.learnedAffixes global (populated
+-- by PE's SEND_LEARNED_AFFIXES server packet). Each entry has fields
+-- { id, name = "Iron Will IV", learned = true|false, ... }. We mirror
+-- only the `learned == true` entries into a lowercase-keyed lookup so
+-- per-item membership checks are O(1).
+--
+-- When ExtractionService is nil (PE addon not loaded), the lookup
+-- table stays empty and IsAffixOwnedByItemName returns nil -- callers
+-- treat nil as "can't determine" and fall back to non-collection-mode
+-- behavior so nothing breaks for non-PE users.
+--
+-- State lives on _G to keep the main chunk under Lua 5.1's 200-local
+-- cap (we've already had to globalize a lot for this reason).
+_G.AutoDelete_OwnedAffixes = _G.AutoDelete_OwnedAffixes or {}
+
+-- Mirror of PE's AFFIX_ALIASES table at extraction.lua:129. PE's
+-- internal spell names don't always match the names that appear in
+-- item suffixes (e.g. spell "Shield Block IV" -> item suffix "Block
+-- IV"; spell "Cold IV" -> item suffix "Precision IV"). PE handles
+-- this via GetAffixSearchNames at extraction.lua:184; we must do the
+-- same or our suffix-match check returns false on every aliased
+-- affix and draws a "missing" gold dot on items the player actually
+-- owns.
+--
+-- KEEP THIS TABLE IN SYNC with PE's extraction.lua AFFIX_ALIASES.
+-- If PE adds/changes an alias, add/change it here too. The table is
+-- small and stable (6 entries as of PE 2026-05-20), so mirroring is
+-- cheaper than RPC into PE's file-local. Documented in
+-- D:\Claude\Addons\AutoDelete\CLAUDE.md PE-integration table.
+local AUTODELETE_AFFIX_ALIASES = {
+	["cold"]            = "precision",
+	["enduring flesh"]  = "ironhide",
+	["feral grace"]     = "swift footwork",
+	["keen strikes"]    = "keen strike",
+	["shield block"]    = "block",
+	["spirit surge"]    = "inner light",
+}
+
+-- Rebuild the owned-affixes lookup from PE's data. Cheap; called from
+-- PLAYER_LOGIN, SPELLS_CHANGED, ExtractionUI.OnLearnedAffixesReceived
+-- (auto-hook -- see AutoDelete_InstallPEAffixHook below), and on the
+-- affixCollectionMode toggle. Idempotent. Returns the count of learned
+-- affixes mirrored, useful for a debug print.
+function AutoDelete_RefreshOwnedAffixes()
+	local map = {}
+	local count = 0
+	if _G.ExtractionService and _G.ExtractionService.learnedAffixes then
+		for _, entry in ipairs(_G.ExtractionService.learnedAffixes) do
+			if entry and entry.learned and entry.name then
+				local lname = entry.name:lower()
+				map[lname] = true
+				count = count + 1
+				-- Alias expansion: if PE renames this spell for item
+				-- naming purposes, also store the renamed form so the
+				-- suffix-match check at AutoDelete_IsAffixOwnedByItemName
+				-- hits both spellings. Mirrors PE's GetAffixSearchNames
+				-- logic at extraction.lua:184.
+				local base = lname:match("^(.-)%s+[iv]+$") or lname
+				local roman = lname:match("%s+([iv]+)$")
+				local alias = AUTODELETE_AFFIX_ALIASES[base]
+				if alias then
+					if roman then
+						map[alias .. " " .. roman] = true
+					else
+						map[alias] = true
+					end
+				end
+			end
+		end
+	end
+	_G.AutoDelete_OwnedAffixes = map
+	if _G.AutoDelete_DebugSell then
+		print(string.format(
+			"|cffff8000[AutoDelete DEBUG]|r owned-affix map rebuilt: %d learned affixes mirrored (alias expansion included).",
+			count))
+	end
+	return count
+end
+
+-- Auto-refresh hook: install once at PLAYER_LOGIN. PE's packet handler
+-- at extraction_service.lua line 62 rebuilds ExtractionService
+-- .learnedAffixes from a server-pushed SEND_LEARNED_AFFIXES packet,
+-- THEN calls ExtractionUI.OnLearnedAffixesReceived(). hooksecurefunc on
+-- that UI callback gives us a notification the instant PE's table
+-- changes -- which is the ONLY time our mirror can be stale -- so we
+-- don't need a BAG_UPDATE poll, a /del collection re-run, or any other
+-- manual refresh trigger.
+--
+-- PE fires SEND_LEARNED_AFFIXES on:
+--   1. PLAYER_ENTERING_WORLD (post-login initial fetch)
+--   2. Successful extraction (server re-pushes the updated list)
+--   3. Any other server-initiated update (rare)
+--
+-- We can't subscribe via ProjectEbonhold.onEventReceived because that's
+-- a SINGLE-callback registry (projectebonhold.lua line 114: assignment,
+-- not append), so registering would silently overwrite PE's own handler
+-- and break PE's UI. hooksecurefunc is the only safe path.
+--
+-- Returns true if the hook installed (PE present + ExtractionUI loaded),
+-- false otherwise. Idempotent -- second call is a no-op.
+_G.AutoDelete_PEAffixHookInstalled = false
+function AutoDelete_InstallPEAffixHook()
+	if _G.AutoDelete_PEAffixHookInstalled then return true end
+	if type(_G.ExtractionUI) ~= "table" then return false end
+	if type(_G.ExtractionUI.OnLearnedAffixesReceived) ~= "function" then
+		return false
+	end
+	hooksecurefunc(_G.ExtractionUI, "OnLearnedAffixesReceived", function()
+		-- PE just rebuilt learnedAffixes. Mirror it now.
+		AutoDelete_RefreshOwnedAffixes()
+		-- Only repaint dots if collection mode is active. When OFF, dot
+		-- color is purely tier-based and an ownership refresh changes
+		-- nothing visible -- skipping the repaint avoids a no-op walk
+		-- across every visible bag slot + a B:UpdateAllBagSlots() call
+		-- on ElvUI.
+		if cachedProfile and cachedProfile.affixCollectionMode then
+			if _G.AutoDelete_RefreshAffixDots then
+				_G.AutoDelete_RefreshAffixDots()
+			end
+		end
+		if _G.AutoDelete_DebugSell then
+			print("|cffff8000[AutoDelete DEBUG]|r PE affix hook fired -- mirror refreshed.")
+		end
+	end)
+	_G.AutoDelete_PEAffixHookInstalled = true
+	if _G.AutoDelete_DebugSell then
+		print("|cffff8000[AutoDelete DEBUG]|r installed ExtractionUI.OnLearnedAffixesReceived hook.")
+	end
+	return true
+end
+
+-- Returns true if the given item NAME ends with " of <known-owned-affix>".
+-- Returns false if no owned-affix name matches the suffix.
+-- Returns nil if PE data hasn't been observed yet (so callers can fall
+-- back to the non-collection-mode path instead of incorrectly hiding
+-- dots before PE has finished initializing).
+function AutoDelete_IsAffixOwnedByItemName(itemName)
+	if not itemName then return nil end
+	-- nil-vs-empty distinction: if we have no PE data at all, return nil
+	-- ("can't determine"). If we have PE data but the item's affix isn't
+	-- in it, return false ("not owned").
+	if not _G.ExtractionService or not _G.ExtractionService.learnedAffixes then
+		return nil
+	end
+	local lower = itemName:lower()
+	for affixName in pairs(_G.AutoDelete_OwnedAffixes) do
+		-- Item names follow "<base item> of <affix name>" so the affix
+		-- name appears as a suffix preceded by " of ". Match against the
+		-- end of the item name string.
+		local suffix = " of " .. affixName
+		if #lower >= #suffix and lower:sub(-#suffix) == suffix then
+			return true
+		end
+	end
+	return false
+end
+
+-- AFFIX_GOLD is the single attention color used by the dot when
+-- affixCollectionMode is ON and the item's affix is missing from the
+-- player's owned set. WoW gold (#FFD200), the same shade used for
+-- legendary item-name links so it reads as "noteworthy".
+local AFFIX_GOLD = { 1.00, 0.82, 0.00 }
+
 local function HasAffix(bag, slot)
 	-- Phase D cache: @affix@ marker is server-attached to a specific item
 	-- instance and never changes mid-session. itemLink is a stable per-
-	-- instance key. Skip cache when debug is on so every call dumps fresh
-	-- tooltip lines.
+	-- instance key. Cache value: 1-4 on affix hit (carries level for the
+	-- dot renderer), false on miss. Skip cache when debug is on so every
+	-- call dumps fresh tooltip lines.
 	local debug = _G.AutoDelete_DebugSell
 	local link = GetContainerItemLink(bag, slot)
 	if link and not debug then
 		local cached = _G.AutoDelete_TooltipCache.affix[link]
 		if cached ~= nil then return cached end
 	end
-	boeTip:Hide()
-	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
-	boeTip:ClearLines()
-	boeTip:SetBagItem(bag, slot)
-	boeTip:Show()
-	local n = boeTip:NumLines()
-	local found = false
-	local foundLine = nil
-
-	for i = 1, n do
-		local leftFS  = _G["AutoDelete_BoETipTextLeft"  .. i]
-		local rightFS = _G["AutoDelete_BoETipTextRight" .. i]
-		local leftTxt  = leftFS  and leftFS:GetText()  or nil
-		local rightTxt = rightFS and rightFS:GetText() or nil
-		if leftTxt and string.find(leftTxt, "@affix@", 1, true) then
-			found = true
-			foundLine = "L[" .. i .. "] " .. leftTxt
-			break
-		end
-		if rightTxt and string.find(rightTxt, "@affix@", 1, true) then
-			found = true
-			foundLine = "R[" .. i .. "] " .. rightTxt
-			break
-		end
-	end
-
 	if debug then
-		print(string.format(
-			"|cffff8000[AutoDelete DEBUG]|r HasAffix bag=%d slot=%d lines=%d found=%s%s",
-			bag, slot, n, tostring(found),
-			foundLine and (" | " .. foundLine) or ""))
+		-- Verbose debug-mode scan: walks the tooltip, prints every
+		-- line containing @affix@ so the user can verify the marker
+		-- is being seen, then resolves the tier from the item name.
+		boeTip:Hide()
+		boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
+		boeTip:ClearLines()
+		boeTip:SetBagItem(bag, slot)
+		boeTip:Show()
+		local n = boeTip:NumLines()
+		local hasAffixMarker = false
+		local foundLine = nil
+		for i = 1, n do
+			local leftFS  = _G["AutoDelete_BoETipTextLeft"  .. i]
+			local rightFS = _G["AutoDelete_BoETipTextRight" .. i]
+			local leftTxt  = leftFS  and leftFS:GetText()  or nil
+			local rightTxt = rightFS and rightFS:GetText() or nil
+			if leftTxt and string.find(leftTxt, "@affix@", 1, true) then
+				hasAffixMarker = true
+				foundLine = "L[" .. i .. "] " .. leftTxt
+				break
+			end
+			if rightTxt and string.find(rightTxt, "@affix@", 1, true) then
+				hasAffixMarker = true
+				foundLine = "R[" .. i .. "] " .. rightTxt
+				break
+			end
+		end
+		boeTip:Hide()
+		local foundLevel = false
+		if hasAffixMarker then
+			local itemName = link and GetItemInfo(link) or nil
+			foundLevel = AutoDelete_ExtractAffixLevel(itemName) or 1
+			print(string.format(
+				"|cffff8000[AutoDelete DEBUG]|r HasAffix bag=%d slot=%d lines=%d name='%s' level=%d%s",
+				bag, slot, n, tostring(itemName), foundLevel,
+				foundLine and (" | " .. foundLine) or ""))
+		else
+			print(string.format(
+				"|cffff8000[AutoDelete DEBUG]|r HasAffix bag=%d slot=%d lines=%d (no @affix@ marker)",
+				bag, slot, n))
+		end
+		return foundLevel
 	end
-
-	boeTip:Hide()
-	if link and not debug then _G.AutoDelete_TooltipCache.affix[link] = found end
-	return found
+	if not link then return false end
+	-- Cold path: combined scan also warms boe + soulbound caches for
+	-- free. See AutoDelete_ScanBagItemMarkers for the rationale.
+	local _, _, level = AutoDelete_ScanBagItemMarkers(bag, slot, link)
+	return level
 end
 
 -- Wrapped in `do ... end` so the two helper locals don't bump the main
@@ -1662,36 +2314,47 @@ do
 -- because the marker is on the item record. Cheap one-shot scan.
 local function HasAffixByLink(link)
 	if not link then return false end
-	-- Phase D cache: same store as the bag-slot variant. Tooltip text
-	-- for a given itemLink is identical whether fetched via SetBagItem
-	-- or SetHyperlink, so the answers share a key space.
+	-- Phase D cache: same store as the bag-slot variant. Cache value:
+	-- 1-4 on hit (tier), false on miss.
 	local cached = _G.AutoDelete_TooltipCache.affix[link]
 	if cached ~= nil then return cached end
+	-- Scan the item-template tooltip for the @affix@ marker. We only
+	-- need to detect PRESENCE here; the actual tier comes from the
+	-- item name (PE encodes it as a trailing Roman numeral). See
+	-- AutoDelete_ExtractAffixLevel for the name-parsing details.
 	boeTip:Hide()
 	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
 	boeTip:ClearLines()
 	boeTip:SetHyperlink(link)
 	boeTip:Show()
 	local n = boeTip:NumLines()
+	local hasAffixMarker = false
 	for i = 1, n do
 		local leftFS  = _G["AutoDelete_BoETipTextLeft"  .. i]
 		local rightFS = _G["AutoDelete_BoETipTextRight" .. i]
 		local leftTxt  = leftFS  and leftFS:GetText()  or nil
 		local rightTxt = rightFS and rightFS:GetText() or nil
 		if leftTxt and string.find(leftTxt, "@affix@", 1, true) then
-			boeTip:Hide()
-			_G.AutoDelete_TooltipCache.affix[link] = true
-			return true
+			hasAffixMarker = true
+			break
 		end
 		if rightTxt and string.find(rightTxt, "@affix@", 1, true) then
-			boeTip:Hide()
-			_G.AutoDelete_TooltipCache.affix[link] = true
-			return true
+			hasAffixMarker = true
+			break
 		end
 	end
 	boeTip:Hide()
-	_G.AutoDelete_TooltipCache.affix[link] = false
-	return false
+	if not hasAffixMarker then
+		_G.AutoDelete_TooltipCache.affix[link] = false
+		return false
+	end
+	-- Marker present: resolve the tier from the item name. Default to
+	-- tier 1 if the name has no trailing Roman numeral (still better
+	-- than hiding the dot entirely).
+	local itemName = GetItemInfo(link)
+	local level = AutoDelete_ExtractAffixLevel(itemName) or 1
+	_G.AutoDelete_TooltipCache.affix[link] = level
+	return level
 end
 
 -- Audit the user's Delete + Sell lists for items carrying the @affix@
@@ -1744,44 +2407,279 @@ end
 
 _G.AutoDelete_AuditAffixOnLists = AuditAffixOnLists
 
+-- Scan + display the player's learned affixes. Two jobs in one call:
+--   1. Refresh the owned-affix mirror from PE's current data (same call
+--      `/del collection` makes internally) so we're not displaying stale
+--      info if PE's table changed since the last hook fire.
+--   2. Build a tier-grouped roster string and hand it off to the
+--      Learned Affixes popup (lives in Options.lua) for display.
+-- Output goes to a scrollable themed window, not the chat frame -- the
+-- user explicitly asked for a window so this function never prints unless
+-- the UI side failed to load (defensive fallback).
+local function ScanLearnedAffixes()
+	-- Step 1: refresh the mirror. Safe to call any time; idempotent.
+	if _G.AutoDelete_RefreshOwnedAffixes then
+		_G.AutoDelete_RefreshOwnedAffixes()
+	end
+
+	-- Defensive: if the UI popup didn't load (Options.lua bailed early or
+	-- the global isn't registered yet), we have nowhere to display. Fall
+	-- back to a single chat line so the user knows the click did something
+	-- and what to investigate.
+	local showFn = _G.AutoDelete_ShowLearnedAffixesWindow
+	if type(showFn) ~= "function" then
+		print("|cffff8000[AutoDelete]|r Learned Affixes window not available. "
+			.. "Options panel may not have finished loading -- try again in a moment.")
+		return
+	end
+
+	-- Helper to build "|cff...COLOR HEX...|r text |r" wrapped strings so the
+	-- popup's FontString renders tier headers in legendary orange. C_ACCENT
+	-- here is fixed in chat color escape form so it matches the addon's
+	-- chrome without re-importing the table from Options.lua.
+	local ACCENT_OPEN  = "|cffff8000"
+	local DIM_OPEN     = "|cff8a8a8a"
+	local COLOR_CLOSE  = "|r"
+
+	-- Empty / error states render as their own in-window message rather
+	-- than chat noise. Keeps the user experience consistent regardless of
+	-- whether PE is loaded.
+	if type(_G.ExtractionService) ~= "table"
+		or type(_G.ExtractionService.learnedAffixes) ~= "table" then
+		showFn(ACCENT_OPEN .. "Project Ebonhold not loaded" .. COLOR_CLOSE
+			.. "\n\nNo learned-affix data is available yet. Open the "
+			.. "Extraction UI in-game once to trigger data sync, then click "
+			.. "Scan Learned Affixes again.")
+		return
+	end
+
+	-- Group by Roman-numeral tier so a 40-entry roster reads as a handful
+	-- of headed sections instead of a wall of text. Affix names look like
+	-- "Iron Will IV" -- strip the trailing roman and use it as a key.
+	local byTier = {}
+	local total = 0
+	for _, entry in ipairs(_G.ExtractionService.learnedAffixes) do
+		if entry and entry.learned and entry.name then
+			local base, roman = entry.name:match("^(.-)%s+([IVX]+)$")
+			if not base then
+				base, roman = entry.name, "?"
+			end
+			byTier[roman] = byTier[roman] or {}
+			table.insert(byTier[roman], base)
+			total = total + 1
+		end
+	end
+
+	if total == 0 then
+		showFn(ACCENT_OPEN .. "No learned affixes found" .. COLOR_CLOSE
+			.. "\n\nEither this character has not learned any affixes yet, "
+			.. "or Project Ebonhold has not received the SEND_LEARNED_AFFIXES "
+			.. "packet yet. Try opening the Extraction UI once, then re-scan.")
+		return
+	end
+
+	-- Build the body string. Summary first, then one section per tier in
+	-- the canonical order, with affixes one-per-line and alphabetically
+	-- sorted within each section. Catch-all loop at the end picks up any
+	-- unexpected tier (e.g. PE adds VI later, or a name with no roman
+	-- suffix landed in byTier["?"]).
+	local lines = {}
+	table.insert(lines, string.format("%s%d learned affix(es) mirrored from PE.%s",
+		DIM_OPEN, total, COLOR_CLOSE))
+	table.insert(lines, "")
+
+	local function emitTier(tier, group)
+		table.sort(group)
+		-- Display-only special case: affixes with no Roman-numeral suffix
+		-- get bucketed under the "?" key during the grouping pass, but in
+		-- the rendered list they read as "Weapon Affix" (per user feedback).
+		-- The underlying bucket key stays "?" so the catch-all loop after
+		-- the canonical tiers still picks them up alongside any other
+		-- unexpected tier code; only the header label changes.
+		local header
+		if tier == "?" then
+			header = string.format("%sWeapon Affix (%d)%s",
+				ACCENT_OPEN, #group, COLOR_CLOSE)
+		else
+			header = string.format("%sTier %s (%d)%s",
+				ACCENT_OPEN, tier, #group, COLOR_CLOSE)
+		end
+		table.insert(lines, header)
+		for _, name in ipairs(group) do
+			table.insert(lines, "    " .. name)
+		end
+		table.insert(lines, "")
+	end
+
+	local tierOrder = { "I", "II", "III", "IV", "V" }
+	for _, t in ipairs(tierOrder) do
+		local group = byTier[t]
+		if group and #group > 0 then
+			emitTier(t, group)
+			byTier[t] = nil
+		end
+	end
+	for tier, group in pairs(byTier) do
+		if #group > 0 then
+			emitTier(tier, group)
+		end
+	end
+
+	-- Drop the trailing blank line so the last tier doesn't render with a
+	-- dead-space gap at the bottom of the scroll content.
+	if lines[#lines] == "" then
+		lines[#lines] = nil
+	end
+
+	showFn(table.concat(lines, "\n"))
+end
+
+_G.AutoDelete_ScanLearnedAffixes = ScanLearnedAffixes
+
 end  -- end of audit `do` block
 
 -- ============================================================================
 -- Affix dot indicator on bag slot buttons
 -- ============================================================================
--- Small purple dot (~8x8) in the bottom-left of every bag slot that
--- contains an affixed item. Color matches PE's affix purple #B048F8 so
--- the dot reads as the same thing the user sees on the tooltip.
+-- Affix-level marker in the bottom-left of every bag slot that contains
+-- an affixed item. Color encodes the affix level (1-4) using the WoW
+-- item-quality palette so the dot reads the same way as item borders:
+--   1 white (common), 2 green (uncommon), 3 blue (rare), 4 purple (epic).
 --
 -- Cache by item LINK so we don't run a tooltip scan every time
 -- ContainerFrame_Update fires (which is often). When an item moves
 -- between slots its link is unchanged, so we get a cache hit. When the
 -- slot empties or holds a different item, the new link triggers a fresh
--- HasAffix scan.
+-- HasAffix scan. Cache stores the level (1-4) on hit, false on miss.
 local affixLinkCache = {}
 
-local function ClassifyAffixByLink(link, bag, slot)
+-- ============================================================================
+-- Deferred affix-scan queue
+-- ============================================================================
+-- Each cold HasAffix call costs ~5-15ms on PE: SetBagItem on our hidden
+-- tooltip frame, NumLines walk, dozens of GetText calls. Doing 100 cold
+-- scans in one frame (the typical "AOE loot just dropped 100 items"
+-- pattern) produces a visible 0.5-1.5s freeze even with AutoDelete's
+-- master toggle OFF, because the affix-dot renderer still wants to
+-- classify every fresh slot.
+--
+-- The queue spreads the cost: cache misses from the dot-rendering path
+-- (UpdateAffixDotForFrame and the ElvUI B:UpdateSlot hook) enqueue and
+-- return false (no dot yet); the scanner OnUpdate pops a small batch
+-- per tick and runs the real HasAffix. The button is updated when its
+-- scan completes, as long as the slot still holds the same link
+-- (otherwise the new occupant has its own queue entry from the natural
+-- bag-refresh path).
+--
+-- Synchronous callers (IsAffixProtected from DeleteItems/SellItems,
+-- ProcessScan from the settings panel) keep the existing behavior: they
+-- omit the `button` argument to ClassifyAffixByLink and pay the cold
+-- scan inline. Those paths are already throttled by DELETE/SELL_BATCH
+-- size and the 0.5s scan-tick interval, so the per-tick cost is bounded.
+_G.AutoDelete_affixScanQueue       = {}
+_G.AutoDelete_AFFIX_SCAN_PER_TICK  = 3      -- cold scans per processed tick
+_G.AutoDelete_AFFIX_SCAN_INTERVAL  = 0.05   -- seconds between processed ticks (60 scans/sec budget)
+_G.AutoDelete_nextAffixScanAt      = 0      -- GetTime() of next eligible scan tick
+
+function AutoDelete_QueueAffixScan(link, bag, slot, button)
+	if not link or not button then return end
+	-- De-dupe: if the same button is already queued for this link
+	-- (common during ContainerFrame_Update bursts that refire for the
+	-- same bag), skip re-queueing. Linear scan is fine -- the queue
+	-- is small (drained ~60/sec, fills at the rate of new items
+	-- entering bags) and we early-break on first match.
+	for i = 1, #AutoDelete_affixScanQueue do
+		local entry = AutoDelete_affixScanQueue[i]
+		if entry.button == button and entry.link == link then return end
+	end
+	table.insert(AutoDelete_affixScanQueue, { link = link, bag = bag, slot = slot, button = button })
+end
+
+-- Called from scanner:OnUpdate every frame. No-op when the queue is
+-- empty (the common steady-state case). When non-empty, processes up to
+-- AutoDelete_AFFIX_SCAN_PER_TICK entries per AutoDelete_AFFIX_SCAN_INTERVAL window.
+function AutoDelete_ProcessAffixScanQueue(now)
+	if #AutoDelete_affixScanQueue == 0 then return end
+	if now < AutoDelete_nextAffixScanAt then return end
+	local _p = AutoDelete_PerfBegin("AutoDelete_ProcessAffixScanQueue")
+	AutoDelete_nextAffixScanAt = now + AutoDelete_AFFIX_SCAN_INTERVAL
+	local budget = AutoDelete_AFFIX_SCAN_PER_TICK
+	while budget > 0 and #AutoDelete_affixScanQueue > 0 do
+		local entry = table.remove(AutoDelete_affixScanQueue, 1)
+		budget = budget - 1
+		-- Validate: did the slot's occupant change while queued? If so,
+		-- skip the scan (the new occupant has its own queue entry from
+		-- the natural ContainerFrame_Update / B:UpdateSlot path).
+		local currentLink = GetContainerItemLink(entry.bag, entry.slot)
+		if currentLink == entry.link then
+			-- Combined scan: ONE tooltip walk populates affix +
+			-- soulbound + boe caches. Critical for the
+			-- FindDisenchantTarget path -- when the deferred button
+			-- refresh fires 150ms later, the soulbound/boe caches it
+			-- needs are already warm from this queue's processing.
+			local _, _, level = AutoDelete_ScanBagItemMarkers(entry.bag, entry.slot, entry.link)
+			affixLinkCache[entry.link] = level
+			-- Resolve the final (level, color) through DecideDot so the
+			-- queue path honors affixCollectionMode + ownership the same
+			-- way the live ContainerFrame_Update / B:UpdateSlot hooks do.
+			-- Previously we drew tier-color dots here unconditionally,
+			-- which produced wrong dots on owned items (should be hidden)
+			-- and tier-color instead of gold on missing items, with the
+			-- per-button link-cache short-circuit then locking the wrong
+			-- dot in until the next item move / version bump.
+			local effLevel, effColor = _G.AutoDelete_DecideDot(
+				entry.link, entry.bag, entry.slot, nil)
+			AutoDelete_SetButtonAffixDot(entry.button, effLevel, effColor)
+			-- Stamp the button's per-slot cache so the next natural
+			-- ContainerFrame_Update / B:UpdateSlot pass sees a cache HIT
+			-- and short-circuits (we just drew the authoritative dot).
+			-- Without this, the very next refresh sees a version mismatch
+			-- and re-runs DecideDot, which is harmless but wasteful.
+			entry.button._autoDeleteCachedLink   = entry.link
+			entry.button._autoDeleteAffixVersion = affixDotVersion
+		end
+	end
+	AutoDelete_PerfEnd("AutoDelete_ProcessAffixScanQueue", _p)
+end
+
+local function ClassifyAffixByLink(link, bag, slot, button)
 	if not link then return false end
 	local cached = affixLinkCache[link]
 	if cached ~= nil then return cached end
-	local has = HasAffix(bag, slot)
-	affixLinkCache[link] = has
-	return has
+	-- Cache miss. If the caller passed a button (= dot-rendering path),
+	-- defer to the queue and return false (no dot shown yet). The
+	-- queue processor will set the dot when the scan completes.
+	-- Callers WITHOUT a button (IsAffixProtected, ProcessScan) get
+	-- synchronous behavior -- they're invoked from already-throttled
+	-- delete/sell scan ticks where the per-call cost is bounded.
+	if button then
+		AutoDelete_QueueAffixScan(link, bag, slot, button)
+		return false
+	end
+	local level = HasAffix(bag, slot)
+	affixLinkCache[link] = level
+	return level
 end
 
--- Affix dot color #00E5FF (electric cyan). Chosen for maximum visibility
--- against both the dark bag UI chrome and the typically-warm color palette
--- of WoW item icons. Distinct from every WoW item-quality color so it
--- can't be confused with a rarity border.
-local AFFIX_DOT_R = 0x00 / 255
-local AFFIX_DOT_G = 0xE5 / 255
-local AFFIX_DOT_B = 0xFF / 255
-local AFFIX_DOT_SIZE = 12
--- Backing ring (slightly larger, solid black). Sits underneath the cyan
--- dot so the dot reads cleanly against light item icons AND the backing
--- itself reads against dark icons. Two-layer contrast = visible on any
--- background.
-local AFFIX_DOT_BACKING_SIZE = 16
+-- Color table indexed by affix level. Values are the standard WoW item-
+-- quality RGB tints so a player who already reads quality borders
+-- instinctively understands the dot color. Levels outside 1-5 fall back
+-- to level 1 (white) -- safe default for unrecognized PE name formats.
+-- Tier 5 is rare on PE but supported; coloring it WoW-legendary orange
+-- (#FF8000) matches PE's own affix-tier conventions in extraction.lua.
+local AFFIX_DOT_COLORS = {
+	[1] = { 1.00, 1.00, 1.00 },   -- #FFFFFF white   (common)
+	[2] = { 0.12, 1.00, 0.00 },   -- #1EFF00 green   (uncommon)
+	[3] = { 0.00, 0.44, 0.87 },   -- #0070DD blue    (rare)
+	[4] = { 0.64, 0.21, 0.93 },   -- #A335EE purple  (epic)
+	[5] = { 1.00, 0.50, 0.00 },   -- #FF8000 orange  (legendary)
+}
+-- 9px dot inside a 12px black backing ring. Sizes were 12+16 in v3.19;
+-- shrunk to 9+12 in v3.20 because the larger dot covered too much of
+-- the item icon. The 4:3 ratio between dot and backing keeps the
+-- contrast frame visible without dominating the slot.
+local AFFIX_DOT_SIZE         = 9
+local AFFIX_DOT_BACKING_SIZE = 12
 -- Custom dot texture shipped with the addon. 32x32 RGBA TGA with a white
 -- anti-aliased filled circle on transparent background. Tinting via
 -- SetVertexColor produces a clean colored dot. Used instead of a Blizzard
@@ -1789,17 +2687,23 @@ local AFFIX_DOT_BACKING_SIZE = 16
 -- exist on PE clients.
 local AFFIX_DOT_TEXTURE = "Interface\\AddOns\\AutoDelete\\textures\\dot.tga"
 
-local function SetButtonAffixDot(button, hasAffix)
+function AutoDelete_SetButtonAffixDot(button, affixLevel, colorOverride)
 	if not button then return end
 	-- Respect user preference. When the dot is toggled off, treat every
 	-- slot as "no affix" so any previously-drawn dot/backing gets hidden.
 	if cachedProfile and cachedProfile.showAffixDot == false then
-		hasAffix = false
+		affixLevel = false
 	end
 	local dot = button._autoDeleteAffixDot
 	local back = button._autoDeleteAffixBacking
-	if hasAffix then
-		-- Backing first (lower sublevel = drawn underneath the cyan dot).
+	if affixLevel then
+		-- Color comes from colorOverride if provided (collection-mode
+		-- "missing affix" path uses AFFIX_GOLD); otherwise pick the tier
+		-- color. Fall back to level 1 (white) for unrecognized tiers.
+		local color = colorOverride
+			or AFFIX_DOT_COLORS[affixLevel]
+			or AFFIX_DOT_COLORS[1]
+		-- Backing first (lower sublevel = drawn underneath the colored dot).
 		if not back then
 			back = button:CreateTexture(nil, "OVERLAY", nil, 1)
 			back:SetTexture(AFFIX_DOT_TEXTURE)
@@ -1809,15 +2713,21 @@ local function SetButtonAffixDot(button, hasAffix)
 			button._autoDeleteAffixBacking = back
 		end
 		back:Show()
-		-- Cyan dot on top.
+		-- Colored dot on top. We re-apply SetVertexColor on every call (not
+		-- just on first creation) because the same button can be reused
+		-- across items of different affix levels as the player moves items
+		-- between slots; the dot must recolor immediately, not wait for a
+		-- frame teardown.
 		if not dot then
 			dot = button:CreateTexture(nil, "OVERLAY", nil, 2)
 			dot:SetTexture(AFFIX_DOT_TEXTURE)
 			dot:SetSize(AFFIX_DOT_SIZE, AFFIX_DOT_SIZE)
+			-- Offset 2 px from BOTTOMLEFT keeps the 9 px dot centered in
+			-- the 12 px backing (1.5 px margin on each side, rounded down).
 			dot:SetPoint("BOTTOMLEFT", 2, 2)
-			dot:SetVertexColor(AFFIX_DOT_R, AFFIX_DOT_G, AFFIX_DOT_B, 1)
 			button._autoDeleteAffixDot = dot
 		end
+		dot:SetVertexColor(color[1], color[2], color[3], 1)
 		dot:Show()
 	else
 		if dot then dot:Hide() end
@@ -1825,8 +2735,76 @@ local function SetButtonAffixDot(button, hasAffix)
 	end
 end
 
+-- Per-frame refresh-skip version counter. Bumped by RefreshAffixDots
+-- (the toggle path) so that the link-equality short-circuit below
+-- still updates dots when the showAffixDot setting flips, even if the
+-- underlying item link in each slot is unchanged. Buttons carry their
+-- last-seen version in button._autoDeleteAffixVersion; mismatch forces
+-- a full AutoDelete_SetButtonAffixDot rebuild for that slot.
+local affixDotVersion = 0
+
+-- Centralizes the "what dot do we draw for this slot?" decision so the
+-- Blizzard bag hook and the ElvUI B:UpdateSlot hook share one logic
+-- path. Returns (affixLevel, colorOverride) suitable for direct pass
+-- into AutoDelete_SetButtonAffixDot:
+--   * affixLevel = 1-5 or false (false hides the dot)
+--   * colorOverride = nil (use tier color from AFFIX_DOT_COLORS) or
+--     a {r,g,b} table forcing a specific color
+--
+-- Decision tree:
+--   no marker / showAffixDot off       -> (false, nil)  hide
+--   affixCollectionMode OFF            -> (tier, nil)   tier color
+--   collection ON, PE data unknown     -> (tier, nil)   fall back to tier
+--   collection ON, affix is owned      -> (false, nil)  hide (dup)
+--   collection ON, affix is missing    -> (tier, GOLD)  gold "you need this"
+--
+-- Globalized so the deferred-scan queue (ProcessAffixScanQueue, declared
+-- earlier in the file) can call it without a forward-reference dance.
+-- The locals-cap pressure on the main chunk also makes a global cheaper
+-- than a forward-declared file-local.
+_G.AutoDelete_DecideDot = function(link, bag, slot, button)
+	if not link then return false, nil end
+	if cachedProfile and cachedProfile.showAffixDot == false then
+		return false, nil
+	end
+	-- Pass `button` so cache misses defer to the rate-limited scan
+	-- queue instead of a synchronous tooltip walk.
+	local tier = ClassifyAffixByLink(link, bag, slot, button)
+	if not tier then return false, nil end
+
+	if not (cachedProfile and cachedProfile.affixCollectionMode) then
+		return tier, nil
+	end
+
+	-- Collection mode is ON. Check ownership against PE's data.
+	local itemName = GetItemInfo(link)
+	local owned = AutoDelete_IsAffixOwnedByItemName(itemName)
+	if owned == nil then
+		-- PE data not observed yet; fall back to non-collection behavior
+		-- so dots aren't silently hidden during PE's startup window.
+		return tier, nil
+	end
+	if owned then
+		-- User already has this affix at this tier; suppress dot so
+		-- duplicates blend with regular sell/delete-eligible items.
+		return false, nil
+	end
+	-- Missing affix -> gold "attention" dot regardless of tier.
+	return tier, AFFIX_GOLD
+end
+
 local function UpdateAffixDotForFrame(frame)
-	if not frame then return end
+	local _p = AutoDelete_PerfBegin("UpdateAffixDotForFrame")
+	if not frame then AutoDelete_PerfEnd("UpdateAffixDotForFrame", _p); return end
+	-- Visibility short-circuit. Blizzard fires ContainerFrame_Update on
+	-- ALL default container frames during a bag refresh storm, even if
+	-- the frame is hidden (which is the common case when ElvUI or
+	-- another bag addon owns the visible UI). Running a full slot walk
+	-- for an off-screen frame is pure waste -- in a 100-item AOE loot
+	-- burst it accounted for the bulk of our per-event cost on ElvUI
+	-- setups. The ElvUI side has its own hook (B:UpdateSlot) so we
+	-- don't lose coverage by gating here.
+	if not frame:IsShown() then return end
 	local name = frame:GetName()
 	if not name then return end
 	local bag = frame:GetID()
@@ -1835,9 +2813,23 @@ local function UpdateAffixDotForFrame(frame)
 	-- (button "Item1" is the LAST slot visually).
 	for slot = 1, size do
 		local button = _G[name .. "Item" .. (size - slot + 1)]
-		local link = GetContainerItemLink(bag, slot)
-		SetButtonAffixDot(button, ClassifyAffixByLink(link, bag, slot))
+		if button then
+			local link = GetContainerItemLink(bag, slot)
+			-- Per-slot short-circuit: if the link hasn't changed AND
+			-- the affix-dot version hasn't bumped, skip the whole
+			-- DecideDot + AutoDelete_SetButtonAffixDot pipeline. Most
+			-- slots in a bag don't change during a single loot event,
+			-- so this skips ~90% of calls in the burst case.
+			if button._autoDeleteCachedLink ~= link
+				or button._autoDeleteAffixVersion ~= affixDotVersion then
+				button._autoDeleteCachedLink   = link
+				button._autoDeleteAffixVersion = affixDotVersion
+				local level, color = _G.AutoDelete_DecideDot(link, bag, slot, button)
+				AutoDelete_SetButtonAffixDot(button, level, color)
+			end
+		end
 	end
+	AutoDelete_PerfEnd("UpdateAffixDotForFrame", _p)
 end
 
 -- Install hook so dots refresh whenever Blizzard updates a bag frame.
@@ -1849,8 +2841,19 @@ end
 -- Exposed so Options.lua can force an immediate refresh when the user
 -- toggles the affix-dot setting (otherwise dots persist until the next
 -- natural bag event). Walks visible default Blizzard bag frames AND
--- pokes ElvUI's bag refresh if loaded.
+-- pokes ElvUI's bag refresh if loaded. Bumps affixDotVersion so the
+-- per-slot link-cache short-circuit above (and the matching one in
+-- the ElvUI B:UpdateSlot hook below) still re-runs AutoDelete_SetButtonAffixDot
+-- on every slot even when the item link is unchanged.
+--
+-- WARNING: do NOT call this function from BAG_UPDATE or any other
+-- per-event path. ElvUI's B:UpdateAllBagSlots() is a full bag-UI
+-- rebuild that costs >100ms per call. A previous build invoked this
+-- inline on every BAG_UPDATE and the result was 1 FPS during 100-item
+-- delete bursts. The natural ContainerFrame_Update / B:UpdateSlot
+-- hooks handle live bag changes cheaply via the per-slot caches.
 _G.AutoDelete_RefreshAffixDots = function()
+	affixDotVersion = affixDotVersion + 1
 	for i = 1, (NUM_CONTAINER_FRAMES or 12) do
 		local frame = _G["ContainerFrame" .. i]
 		if frame and frame:IsShown() then
@@ -1890,16 +2893,37 @@ local function InstallElvUIAffixDotHook()
 		if not ok or not B or not B.UpdateSlot then return end   -- (3)
 
 		hooksecurefunc(B, "UpdateSlot", function(self, frame, bagID, slotID)
-			if not frame or not frame.Bags then return end
+			local _p = AutoDelete_PerfBegin("ElvUI:UpdateSlot hook")
+			if not frame or not frame.Bags then AutoDelete_PerfEnd("ElvUI:UpdateSlot hook", _p); return end
 			local bagFrame = frame.Bags[bagID]
-			if not bagFrame then return end
+			if not bagFrame then AutoDelete_PerfEnd("ElvUI:UpdateSlot hook", _p); return end
 			local slot = bagFrame[slotID]
-			if not slot then return end
+			if not slot then AutoDelete_PerfEnd("ElvUI:UpdateSlot hook", _p); return end
 			-- Bank/reagent slots have bagID outside the 0..4 player-bag range;
 			-- skip those (auto-rules don't act on bank contents anyway).
-			if bagID < 0 or bagID > 4 then return end
+			if bagID < 0 or bagID > 4 then AutoDelete_PerfEnd("ElvUI:UpdateSlot hook", _p); return end
 			local link = GetContainerItemLink(bagID, slotID)
-			SetButtonAffixDot(slot, ClassifyAffixByLink(link, bagID, slotID))
+			-- Per-slot short-circuit: mirrors UpdateAffixDotForFrame's
+			-- link-cache so that ElvUI's per-slot update storm during a
+			-- loot burst doesn't redundantly re-run AutoDelete_SetButtonAffixDot
+			-- on slots whose item hasn't changed. ElvUI calls UpdateSlot
+			-- for every slot in a bag on many of its internal refresh
+			-- paths, so without this check a 100-item loot fired the
+			-- full pipeline ~16 * (number-of-bags-rebuilt) times.
+			if slot._autoDeleteCachedLink == link
+				and slot._autoDeleteAffixVersion == affixDotVersion then
+				return
+			end
+			slot._autoDeleteCachedLink   = link
+			slot._autoDeleteAffixVersion = affixDotVersion
+			-- DecideDot handles every gating concern (showAffixDot
+			-- toggle, affixCollectionMode owned/missing logic, deferred
+			-- queue for cache misses). One code path for both Blizzard
+			-- and ElvUI bag UIs -- see DecideDot above for the full
+			-- decision tree.
+			local level, color = _G.AutoDelete_DecideDot(link, bagID, slotID, slot)
+			AutoDelete_SetButtonAffixDot(slot, level, color)
+			AutoDelete_PerfEnd("ElvUI:UpdateSlot hook", _p)
 		end)
 
 		-- Trigger an initial refresh so dots appear immediately on already-
@@ -1919,19 +2943,37 @@ end
 -- Assigned (not `local function`) because the name was forward-declared
 -- above DeleteItems so the scanner can capture it as an upvalue.
 IsAffixProtected = function(profile, bag, slot, itemLink, action)
+	if action ~= "delete" and action ~= "sell" then return false end
+	-- Collection-mode hard-protect: when collection mode is ON, items
+	-- carrying an UNKNOWN affix are NEVER auto-sold or auto-deleted,
+	-- regardless of the per-action toggles AND regardless of the iLvl
+	-- floor. Losing the only copy of an un-learned affix defeats the
+	-- whole point of collection mode -- the user explicitly turned this
+	-- on to COLLECT, so we err on the side of preservation. Owned-affix
+	-- items (`owned == true`) fall through to the per-action gating
+	-- below so duplicates can still be cleared by normal rules. PE data
+	-- unavailable (`owned == nil`) also gets protected for the same
+	-- safety reason as before.
+	if profile.affixCollectionMode and HasAffix(bag, slot) then
+		local itemName = GetItemInfo(itemLink)
+		local owned = AutoDelete_IsAffixOwnedByItemName(itemName)
+		if owned ~= true then return true end
+		-- Owned -> drop through to standard per-action gating.
+	end
+	-- Standard per-action gating (the original "No Auto-Sell" /
+	-- "No Auto-Delete" toggles + iLvl floor).
 	if action == "delete" then
 		if not profile.protectAffixFromDelete then return false end
-	elseif action == "sell" then
+	else  -- "sell"
 		if not profile.protectAffixFromSell then return false end
-	else
-		return false
 	end
 	local threshold = tonumber(profile.affixIlvlMin) or 0
 	if threshold > 0 then
 		local _, _, _, ilvl = GetItemInfo(itemLink)
 		if not ilvl or ilvl < threshold then return false end
 	end
-	return HasAffix(bag, slot)
+	if not HasAffix(bag, slot) then return false end
+	return true
 end
 
 -- Merchant name tracking for Greedy Scavenger summon
@@ -2010,11 +3052,20 @@ local function IsOtherCompanionSummoned(skipName)
 	return false
 end
 
--- Cooldown gate so we don't fire CallCompanion more than once every few
--- seconds. The server can take a moment to confirm a summon under load,
--- and a second call inside that window can either no-op or get queued
--- as a redundant toggle.
-local lastSummonCallAt = 0
+-- Per-pet cooldown gate so we don't fire CallCompanion for the SAME pet
+-- more than once every few seconds. The server can take a moment to
+-- confirm a summon under load, and a second call inside that window can
+-- either no-op or get queued as a redundant toggle.
+--
+-- Per-pet (NOT shared) because the common after-sell flow goes:
+--   1. SummonGoblinMerchant fires      -> lastSummonCallAt.merchant = T0
+--   2. User sells items at the Goblin  -> takes 1-4 seconds
+--   3. After-sell SummonGreedyScavenger fires at T0 + 2-4s
+-- A SHARED cooldown made step 3 drop the Scav summon silently because
+-- the recent Goblin summon kept the gate closed. (User report
+-- 2026-05-20: "scav sometimes won't summon after sell.") Per-pet keys
+-- mean a Goblin summon no longer blocks a Scav summon and vice versa.
+local lastSummonCallAt = { scavenger = 0, merchant = 0 }
 local SUMMON_RESPECT_WINDOW = 5
 
 local function SummonGreedyScavenger(force)
@@ -2031,10 +3082,12 @@ local function SummonGreedyScavenger(force)
 		end
 		return
 	end
-	-- Server-confirm window: if we fired a CallCompanion very recently,
-	-- the server may not have flipped the summoned flag yet. Skip this
-	-- attempt; the next tick or trigger will retry once the window is up.
-	if (GetTime() - lastSummonCallAt) < SUMMON_RESPECT_WINDOW then
+	-- Server-confirm window: if we fired a CallCompanion for the SCAVENGER
+	-- specifically very recently, the server may not have flipped the
+	-- summoned flag yet. Skip this attempt; the next tick or trigger will
+	-- retry once the window is up. Per-pet key: a recent Goblin summon
+	-- does NOT block the Scav (was a bug pre-2026-05-20).
+	if (GetTime() - lastSummonCallAt.scavenger) < SUMMON_RESPECT_WINDOW then
 		return
 	end
 	-- Dismiss-first when another companion holds the slot. CallCompanion
@@ -2048,7 +3101,7 @@ local function SummonGreedyScavenger(force)
 			local idx2, isUp2 = FindCompanionById(SCAVENGER_CREATURE_ID, "greedy scavenger")
 			if not idx2 or isUp2 then return end
 			CallCompanion("CRITTER", idx2)
-			lastSummonCallAt = GetTime()
+			lastSummonCallAt.scavenger = GetTime()
 			print("|cffff8000[AutoDelete]|r: Summoned Greedy Scavenger")
 			if _G.AutoDelete_SetActiveTrackedPet then
 				_G.AutoDelete_SetActiveTrackedPet("scavenger")
@@ -2060,7 +3113,7 @@ local function SummonGreedyScavenger(force)
 		return
 	end
 	CallCompanion("CRITTER", idx)
-	lastSummonCallAt = GetTime()
+	lastSummonCallAt.scavenger = GetTime()
 	print("|cffff8000[AutoDelete]|r: Summoned Greedy Scavenger")
 	if _G.AutoDelete_SetActiveTrackedPet then
 		_G.AutoDelete_SetActiveTrackedPet("scavenger")
@@ -2085,7 +3138,10 @@ local function SummonGoblinMerchant(force)
 		end
 		return
 	end
-	if (GetTime() - lastSummonCallAt) < SUMMON_RESPECT_WINDOW then
+	-- Per-pet cooldown -- see SummonGreedyScavenger for rationale. Only
+	-- a recent Goblin summon blocks another Goblin summon; a recent Scav
+	-- summon does not.
+	if (GetTime() - lastSummonCallAt.merchant) < SUMMON_RESPECT_WINDOW then
 		return
 	end
 	if IsOtherCompanionSummoned("goblin merchant") then
@@ -2094,7 +3150,7 @@ local function SummonGoblinMerchant(force)
 			local idx2, isUp2 = FindCompanionById(MERCHANT_CREATURE_ID, "goblin merchant")
 			if not idx2 or isUp2 then return end
 			CallCompanion("CRITTER", idx2)
-			lastSummonCallAt = GetTime()
+			lastSummonCallAt.merchant = GetTime()
 			print("|cffff8000[AutoDelete]|r: Summoned Goblin Merchant. Target it and press your Interact With Target keybind to open the vendor.")
 			if _G.AutoDelete_SetActiveTrackedPet then
 				_G.AutoDelete_SetActiveTrackedPet("merchant")
@@ -2106,7 +3162,7 @@ local function SummonGoblinMerchant(force)
 		return
 	end
 	CallCompanion("CRITTER", idx)
-	lastSummonCallAt = GetTime()
+	lastSummonCallAt.merchant = GetTime()
 	print("|cffff8000[AutoDelete]|r: Summoned Goblin Merchant. Target it and press your Interact With Target keybind to open the vendor.")
 	if _G.AutoDelete_SetActiveTrackedPet then
 		_G.AutoDelete_SetActiveTrackedPet("merchant")
@@ -2516,7 +3572,10 @@ local function TryAutoRepair()
 	end
 end
 
-local SELL_BATCH_SIZE = 20
+-- Items sold per scan tick. Same throttle rationale as DELETE_BATCH_SIZE
+-- (see comment there). Kept equal so delete and sell behave the same
+-- under the scan-tick gate, matching user-facing expectation.
+local SELL_BATCH_SIZE = 30
 local sellSessionCount = 0
 local sellSessionCopper = 0
 local sellDryTicks = 0
@@ -2532,6 +3591,11 @@ local function SellItems(silent)
 	local profile = GetActiveProfile(db)
 
 	local sellNames, sellIDs = BuildWantedSets(profile.sellListText)
+	-- Pre-built Keep-list sets so the per-slot Keep-list short-circuit
+	-- below is an O(1) hash lookup instead of a full whitelist re-parse.
+	-- Same optimization as DeleteItems' hot path -- /del perf showed the
+	-- old IsWhitelisted re-parse was the dominant cost in scan loops.
+	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText)
 
 	local batchCount = 0
 
@@ -2591,7 +3655,7 @@ local function SellItems(silent)
 					-- Step 1: Keep list short-circuits the whole chain.
 					-- Step 1b: Affix Protection (when toggled on, and item meets
 					-- the iLvl floor) also short-circuits before any sell rule.
-					local isOnKeepList = IsWhitelisted(profile, itemId, name)
+					local isOnKeepList = _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, name)
 					local isAffixProtected = IsAffixProtected(profile, bag, slot, itemLink, "sell")
 
 					if not isOnKeepList and not isAffixProtected then
@@ -2607,9 +3671,29 @@ local function SellItems(silent)
 						-- item only sells if Step 2 matched it explicitly.
 						if not shouldSell and not isQuestItem then
 
-							-- Step 3: Auto-Sell Greens (global). Junk and Common
-							-- are DELETED by the delete scanner, not sold here.
-							if not shouldSell and itemQuality == 2 and profile.autoSellGreens and isGearItem then
+							-- Step 3: Tri-state quality filters (Junk / Common /
+							-- Greens). When a quality is set to "sell", items
+							-- of that quality are vendored from this loop.
+							-- When set to "delete" they're handled by the
+							-- delete scanner; "off" skips entirely.
+							--
+							-- Junk (quality 0): any item type. Junk is universally
+							-- vendor-trash; no gear-only restriction.
+							-- Common (quality 1): gear only (matches the old
+							-- Auto-Delete Common semantics -- selling a stack of
+							-- white reagents on a "Sell Common" toggle would be
+							-- surprising and destructive).
+							-- Greens (quality 2): gear only, same as before.
+							if not shouldSell and itemQuality == 0
+								and profile.qualityActionJunk == "sell" then
+								shouldSell = true; sellReason = "junk"
+							end
+							if not shouldSell and itemQuality == 1 and isGearItem
+								and profile.qualityActionCommon == "sell" then
+								shouldSell = true; sellReason = "common"
+							end
+							if not shouldSell and itemQuality == 2 and isGearItem
+								and profile.qualityActionGreens == "sell" then
 								shouldSell = true; sellReason = "greens"
 							end
 
@@ -3690,6 +4774,7 @@ end
 local function FindDisenchantTarget(profile)
 	if not profile or not profile.disenchantEnabled then return nil end
 	if not CharacterCanDisenchant() then return nil end
+	local _p = AutoDelete_PerfBegin("FindDisenchantTarget")
 	local bestBag, bestSlot, bestLink, bestName, bestIlvl = nil, nil, nil, nil, nil
 	for bag = 0, NUM_BAG_SLOTS do
 		local count = GetContainerNumSlots(bag) or 0
@@ -3704,6 +4789,7 @@ local function FindDisenchantTarget(profile)
 			end
 		end
 	end
+	AutoDelete_PerfEnd("FindDisenchantTarget", _p)
 	return bestBag, bestSlot, bestLink, bestName
 end
 
@@ -3956,44 +5042,19 @@ scanner:RegisterEvent("MERCHANT_CLOSED")
 scanner:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 scanner:RegisterEvent("PLAYER_REGEN_ENABLED")    -- flush deferred disenchant updates
 scanner:RegisterEvent("SPELLS_CHANGED")          -- re-check Disenchant known status
-scanner:RegisterEvent("LOOT_OPENED")             -- bracket bag-scan work during loot bursts
-scanner:RegisterEvent("LOOT_CLOSED")             -- run deferred scan once when burst ends
 
--- ============================================================================
--- BAG_UPDATE burst bracketing
--- ============================================================================
--- Pet AOE looting fires 5+ BAG_UPDATE events in under 100ms. Vendor sell
--- loops do the same. Each event used to run the full heavy chain (4 secure-
--- button rewires + Process panel refresh), compounding into visible lag.
---
--- This bracket defers the chain while a "known burst" is in progress:
---   - merchantOpen flag is set on MERCHANT_SHOW, cleared MERCHANT_CLOSED+grace
---   - lootBurstOpen flag is set on LOOT_OPENED, cleared LOOT_CLOSED
--- During a burst, BAG_UPDATE marks pendingBagUpdate=true and returns
--- immediately. When the LAST bracket closes, the deferred chain runs ONCE.
--- This is cheaper than any debounce because the work doesn't run at all
--- during the burst -- it runs once at the end. Pattern lifted from AdiBags
--- (which uses the same approach for AUCTION_MULTISELL / EQUIPMENT_SWAP).
---
--- Exported as _G.AutoDelete_BurstState rather than a file-local: the main
--- chunk's local count is already brushing Lua 5.1's 200-cap, so we route
--- through a global table instead of adding new file-scope locals.
--- The OnEvent handler reads/writes via _G.AutoDelete_BurstState.* and the
--- RunChain field gets assigned to point at the heavy-chain function once
--- it's defined at the bottom of the event-handler block.
-_G.AutoDelete_BurstState = {
-	lootBurstOpen    = false,
-	pendingBagUpdate = false,
-	RunChain         = nil,
-	-- Phase C: throttle for unbracketed bursts (mailbox take-all, quest
-	-- chain turn-ins, etc). Leading edge runs immediately; further
-	-- BAG_UPDATEs within DEBOUNCE_INTERVAL schedule a single trailing
-	-- run. Trailing fires from the scanner OnUpdate. This bounds RunChain
-	-- to at most 2 invocations per 120ms regardless of burst rate.
-	lastRunAt         = 0,
-	scheduledRunAt    = 0,
-	DEBOUNCE_INTERVAL = 0.12,
-}
+-- Note on BAG_UPDATE handling: v3.20 briefly tried event bracketing
+-- (LOOT_OPENED/CLOSED + merchant flags) to coalesce BAG_UPDATE bursts.
+-- That design was wrong for this workload: pet AOE loot concentrated
+-- 30+ items' worth of cold-cache tooltip scans into one frame at
+-- LOOT_CLOSED (visible stutter), and vendor sell starved the
+-- scanRequested->next-batch loop because BAG_UPDATE no longer set
+-- the flag (sell hung between batches waiting for the periodic tick).
+-- The inline path below distributes the same total work across the
+-- natural frame boundaries between events, which is what makes
+-- looting and selling feel snappy. Tooltip cache, idempotent button
+-- short-circuits, and bag-space cooldown stay -- those were real
+-- wins without the latency cost.
 
 -- ============================================================================
 -- Welcome Popup
@@ -4014,7 +5075,22 @@ local function ShowWelcomePopup()
 	local FONT = "Fonts\\FRIZQT__.TTF"
 	local WHITE8 = "Interface\\Buttons\\WHITE8x8"
 
-	-- Outer frame
+	-- Canonical design tokens (mirrored from Options.lua's local C_* constants
+	-- because this file can't see those locals). Keep these values in sync
+	-- with Options.lua if the design system ever shifts. Documented in
+	-- D:\Claude\Addons\AutoDelete\CLAUDE.md PE-integration / design table.
+	local C_BG       = { 5/255,  5/255,  5/255, 1 }     -- #050505 panel bg
+	local C_BORDER   = { 0.16, 0.16, 0.16, 1 }          -- #2a2a2a outer border
+	local C_TITLEBAR = { 16/255, 16/255, 16/255, 1 }    -- #101010 title bar bg
+	local C_TITLE    = { 1.00, 0.50, 0.00, 1 }          -- #ff8000 legendary orange
+	local C_DIM      = { 0.45, 0.45, 0.45, 1 }          -- #737373 dim text
+
+	-- Outer frame. Audit fix 2026-05-20: dropped the legendary-orange border
+	-- (and the borderless orange-tint title bar) that made this popup read
+	-- as a different window family from the main settings panel and the
+	-- Process Bags / Import Conflicts windows. Now uses the canonical chrome:
+	-- dark body, dark gray border, dark title bar, orange title text, dim
+	-- close X that turns red on hover.
 	local f = CreateFrame("Frame", "AutoDelete_WelcomePopup", UIParent)
 	f:SetSize(440, 658)
 	f:SetPoint("CENTER")
@@ -4028,38 +5104,39 @@ local function ShowWelcomePopup()
 	f:SetBackdrop({
 		bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 1,
 	})
-	f:SetBackdropColor(0.04, 0.04, 0.04, 0.97)
-	f:SetBackdropBorderColor(1, 0.50, 0, 0.85)  -- legendary orange border
+	f:SetBackdropColor(unpack(C_BG))
+	f:SetBackdropBorderColor(unpack(C_BORDER))
 	-- Deliberately NOT registered in UISpecialFrames. Escape should not close
 	-- this popup; the X button is the only intended way out. This keeps the
 	-- popup visible when the user opens the keybinds panel and presses Esc
 	-- to leave keybinds (otherwise the same Esc keystroke closes our popup).
 
-	-- Title bar
+	-- Title bar -- dark bg + dark border, matching the main settings panel.
 	local titleBar = CreateFrame("Frame", nil, f)
 	titleBar:SetPoint("TOPLEFT", 1, -1)
 	titleBar:SetPoint("TOPRIGHT", -1, -1)
 	titleBar:SetHeight(28)
-	titleBar:SetBackdrop({ bgFile = WHITE8 })
-	titleBar:SetBackdropColor(0.08, 0.08, 0.08, 1)
+	titleBar:SetBackdrop({ bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 1 })
+	titleBar:SetBackdropColor(unpack(C_TITLEBAR))
+	titleBar:SetBackdropBorderColor(unpack(C_BORDER))
 
 	local title = titleBar:CreateFontString(nil, "OVERLAY")
 	title:SetFont(FONT, 14, "OUTLINE")
 	title:SetPoint("LEFT", 12, 0)
-	title:SetTextColor(1, 0.50, 0, 1)
+	title:SetTextColor(unpack(C_TITLE))
 	title:SetText("Welcome to AutoDelete")
 
-	-- Close X
+	-- Close X -- dim by default, red on hover, matches the main panel exactly.
 	local closeBtn = CreateFrame("Button", nil, titleBar)
 	closeBtn:SetSize(24, 24)
 	closeBtn:SetPoint("RIGHT", -4, 0)
 	local closeText = closeBtn:CreateFontString(nil, "OVERLAY")
 	closeText:SetFont(FONT, 16, "OUTLINE")
 	closeText:SetPoint("CENTER", 0, 1)
-	closeText:SetTextColor(0.7, 0.7, 0.7, 1)
+	closeText:SetTextColor(unpack(C_DIM))
 	closeText:SetText("x")
 	closeBtn:SetScript("OnEnter", function() closeText:SetTextColor(1, 0.3, 0.3, 1) end)
-	closeBtn:SetScript("OnLeave", function() closeText:SetTextColor(0.7, 0.7, 0.7, 1) end)
+	closeBtn:SetScript("OnLeave", function() closeText:SetTextColor(unpack(C_DIM)) end)
 	closeBtn:SetScript("OnClick", function() f:Hide() end)
 
 	-- Intro text
@@ -4509,77 +5586,11 @@ end
 -- PLAYER_LOGIN        -> print loaded notice, install MerchantFrame.Hide
 --                        wrappers, schedule the post-login ElvUI button
 --                        creation + welcome popup (2s delay)
--- BAG_UPDATE          -> request a delete-scan (bracketed during bursts)
+-- BAG_UPDATE          -> request a delete-scan + rewire secure buttons +
+--                        refresh process panel + bag-space warning
 -- BAG_UPDATE_DELAYED  -> request a delete-scan (Wrath: rarely fires; harmless)
--- LOOT_OPENED         -> open loot-burst bracket (defer bag-scan work)
--- LOOT_CLOSED         -> close loot-burst bracket; flush deferred chain
 -- MERCHANT_SHOW       -> sample inventory worth, then auto-repair + auto-sell
 -- MERCHANT_CLOSED     -> print sell summary, fire after-close summon if armed
-
--- RunChain: the "heavy" bag-update post-work, hoisted out of OnEvent so
--- the bracket can defer and replay it once per burst instead of once per
--- BAG_UPDATE. Wrapped in `do ... end` to avoid adding a file-local (we're
--- right at Lua 5.1's 200-cap on the main chunk). The closure captures
--- file-locals (cachedProfile, bagSpaceLastWarnAt, etc.) as upvalues,
--- and the function is exposed via _G.AutoDelete_BurstState.RunChain so
--- LOOT_CLOSED / MERCHANT_CLOSED grace callback / BAG_UPDATE can all call
--- the same code path.
-do
-	_G.AutoDelete_BurstState.RunChain = function()
-		-- Stamp completion time so the Phase C throttle treats this as
-		-- the most recent run regardless of which path invoked us
-		-- (BAG_UPDATE inline, LOOT_CLOSED flush, MERCHANT grace flush,
-		-- or OnUpdate trailing).
-		_G.AutoDelete_BurstState.lastRunAt      = GetTime()
-		_G.AutoDelete_BurstState.scheduledRunAt = 0
-		RefreshCachedProfile()
-		RequestScan()
-		-- Rewire the secure-action buttons. Each module is combat-safe (self-
-		-- defers via InCombatLockdown) and a cheap no-op when its feature is
-		-- off. Running on every bag update keeps the next-target pointer
-		-- current as the player loots, uses, sells, or rearranges items.
-		if UpdateDisenchantButton                then UpdateDisenchantButton() end
-		if _G.AutoDelete_UpdateOpenButton        then _G.AutoDelete_UpdateOpenButton() end
-		if _G.AutoDelete_UpdateMillButton        then _G.AutoDelete_UpdateMillButton() end
-		if _G.AutoDelete_UpdateProspectButton    then _G.AutoDelete_UpdateProspectButton() end
-
-		-- Refresh the Process Bags panel if it's open. RefreshProcessPanel
-		-- itself early-returns when the panel is hidden, so this is cheap.
-		-- Also update the Tools Card 1 count line on the settings panel if
-		-- the user has it open.
-		if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
-		local optPanel = _G.AutoDeleteOptionsPanel
-		if optPanel and optPanel.IsShown and optPanel:IsShown() and optPanel._refreshProcessCount then
-			optPanel:_refreshProcessCount()
-		end
-		-- Bag-space warning. Cooldown-gated so we print at most once per
-		-- 60s while below threshold. The old rising-edge design spammed
-		-- when bags oscillated around the threshold during active loot+
-		-- delete (loot fills -> AutoDelete clears past threshold -> next
-		-- loot crosses again -> print). The timestamp absorbs that.
-		-- Defensive nil-check: ComputeTotalFreeSlots is forward-declared
-		-- and assigned later in the file. If for any reason the assignment
-		-- hasn't happened yet (e.g. early event firing before file load
-		-- completes), silently skip rather than throw a nil-call.
-		if cachedProfile and cachedProfile.bagSpaceWarnEnabled and ComputeTotalFreeSlots then
-			local free = ComputeTotalFreeSlots()
-			local threshold = tonumber(cachedProfile.bagSpaceWarnThreshold) or 5
-			if free <= threshold then
-				local now = GetTime()
-				-- 60s cooldown between warnings. Tunable here if it ever
-				-- turns out 60 is too long/short for typical play.
-				if now - bagSpaceLastWarnAt >= 60 then
-					bagSpaceLastWarnAt = now
-					print(string.format(
-						"|cffff8000[AutoDelete]|r: Bag space low (%d free slot%s remaining).",
-						free, free == 1 and "" or "s"))
-				end
-			end
-			-- Note: no else-branch resetting the timestamp. The cooldown
-			-- only matters while below threshold; rising above is a no-op.
-		end
-	end
-end
 
 scanner:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
@@ -4600,6 +5611,20 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 	if event == "PLAYER_LOGIN" then
 		RefreshCachedProfile()
 		print("|cffff8000[AutoDelete]|r loaded. Type |cff00ff00/del|r to configure.")
+		-- Mirror PE's learnedAffixes if PE addon has already populated.
+		-- PE's SEND_LEARNED_AFFIXES often arrives later than PLAYER_LOGIN
+		-- so the auto-hook below catches subsequent updates, but a login-
+		-- time pass catches the case where PE pushed data via a different
+		-- path before our addon loaded.
+		if AutoDelete_RefreshOwnedAffixes then AutoDelete_RefreshOwnedAffixes() end
+		-- Install the PE auto-refresh hook NOW. This is the primary
+		-- trigger that keeps our mirror in sync with PE's table without
+		-- the user having to run `/del collection` after every Extract.
+		-- See AutoDelete_InstallPEAffixHook for the design rationale.
+		-- If PE isn't loaded yet (rare -- both addons should be loaded
+		-- by PLAYER_LOGIN), the install is a no-op and the SPELLS_CHANGED
+		-- handler will pick up affix updates as a fallback.
+		if AutoDelete_InstallPEAffixHook then AutoDelete_InstallPEAffixHook() end
 
 		-- One-Key Disenchant: create the SecureActionButton once. Name is
 		-- referenced by the panel's key-capture row as the CLICK target
@@ -4801,6 +5826,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 			_G.AutoDelete_RefreshProspectKnown()
 			if _G.AutoDelete_UpdateProspectButton then _G.AutoDelete_UpdateProspectButton() end
 		end
+		-- Mirror PE's learnedAffixes so affix-collection mode reflects
+		-- any new affixes the player just learned. Cheap rebuild.
+		if AutoDelete_RefreshOwnedAffixes then AutoDelete_RefreshOwnedAffixes() end
 		return
 	end
 	if event == "MERCHANT_SHOW" then
@@ -4829,41 +5857,20 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		end
 		return
 	end
-	if event == "LOOT_OPENED" then
-		-- Open the loot burst bracket. Pet AOE loot fires 5+ BAG_UPDATEs in
-		-- <100ms; deferring their tail work until LOOT_CLOSED replaces N runs
-		-- with 1 run.
-		_G.AutoDelete_BurstState.lootBurstOpen = true
-		return
-	end
-	if event == "LOOT_CLOSED" then
-		-- Close the loot bracket. If any BAG_UPDATE arrived during the burst,
-		-- flush the deferred chain now (unless merchantOpen also has a
-		-- bracket open, in which case wait for MERCHANT_CLOSED to flush).
-		_G.AutoDelete_BurstState.lootBurstOpen = false
-		if _G.AutoDelete_BurstState.pendingBagUpdate and not merchantOpen then
-			_G.AutoDelete_BurstState.pendingBagUpdate = false
-			if _G.AutoDelete_BurstState.RunChain then
-				_G.AutoDelete_BurstState.RunChain()
-			end
-		end
-		return
-	end
 	if event == "MERCHANT_CLOSED" then
 		-- Defer the unblock so any BAG_UPDATE events fired in the immediate
 		-- aftermath of closing the merchant (sell loop tail, manual sells
 		-- still being processed by the server) don't trigger auto-open on
-		-- the now-just-emptied slot. When the grace expires, also flush any
-		-- BAG_UPDATEs that arrived while the merchant bracket was open.
+		-- the now-just-emptied slot. When the grace expires we also
+		-- schedule a single catch-up button + panel refresh -- the
+		-- BAG_UPDATE handler skips those during merchant-open to avoid
+		-- stalling the sell loop, so the One-Key targets and Process
+		-- panel can be stale by the time the user closes the window.
 		AfterDelay(MERCHANT_CLOSE_GRACE, function()
 			merchantOpen = false
-			if _G.AutoDelete_BurstState.pendingBagUpdate
-				and not _G.AutoDelete_BurstState.lootBurstOpen then
-				_G.AutoDelete_BurstState.pendingBagUpdate = false
-				if _G.AutoDelete_BurstState.RunChain then
-					_G.AutoDelete_BurstState.RunChain()
-				end
-			end
+			local catchupAt = GetTime() + 0.15
+			scanner.nextButtonRefreshAt = catchupAt
+			scanner.nextPanelRefreshAt  = catchupAt
 		end)
 		if sellSessionCount > 0 then
 			print("|cffff8000[AutoDelete]|r: Sold " .. sellSessionCount .. " item(s) for " .. FormatMoney(sellSessionCopper))
@@ -4888,38 +5895,127 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 		return
 	end
 	-- BAG_UPDATE / BAG_UPDATE_DELAYED
-	-- During a known burst (loot frame open, merchant open or in grace
-	-- window), mark a pending flag and return. The bracket close will
-	-- replay RunChain() exactly once. This converts the 5+ BAG_UPDATEs
-	-- from pet AOE loot into a single tail invocation.
-	local bs = _G.AutoDelete_BurstState
-	if bs.lootBurstOpen or merchantOpen then
-		bs.pendingBagUpdate = true
-		return
-	end
-	-- Phase C throttle: leading-edge fire if we've cooled off, else
-	-- schedule a single trailing run from the OnUpdate handler. Covers
-	-- unbracketed bursts (mailbox take-all, quest chain rewards, etc).
+	-- Two-tier processing.
+	--
+	-- INLINE (synchronous, happens here on every BAG_UPDATE):
+	--   * RefreshCachedProfile() and RequestScan(): drive the auto-sell
+	--     loop. The scanner's OnUpdate sees scanRequested and fires the
+	--     next SellItems batch on the next tick -- this is what makes
+	--     selling feel continuous instead of hanging between batches.
+	--   * Bag-space warning: just a free-slot count + cooldown check.
+	--
+	-- DO NOT call _G.AutoDelete_RefreshAffixDots() here, ever. That
+	-- function exists for the Options-toggle path; it walks visible
+	-- Blizzard bag frames AND calls ElvUI's B:UpdateAllBagSlots(),
+	-- which is a full-bag-UI rebuild costing >100ms per call. A
+	-- previous build invoked it inline on every BAG_UPDATE and it
+	-- dropped the client to 1 FPS during 100-item delete bursts (one
+	-- full ElvUI bag rebuild per delete). Dot rendering for live bag
+	-- changes is already covered by two natural paths: Blizzard's
+	-- ContainerFrame_Update hook (UpdateAffixDotForFrame is wired
+	-- to it via hooksecurefunc above) and ElvUI's B:UpdateSlot hook
+	-- (InstallElvUIAffixDotHook). Neither needs help from BAG_UPDATE.
+	--
+	-- DEFERRED (~150ms trailing-edge debounce, fires from OnUpdate):
+	--   * The four Update*Button calls. Each runs a Find*Target scan that
+	--     iterates every bag slot. FindDisenchantTarget in particular
+	--     scans EVERY slot looking for the lowest-iLvl candidate (no
+	--     early break) and does up to TWO tooltip scans per slot
+	--     (IsSoulbound + IsBindOnEquip). With 5+ BAG_UPDATEs in a loot
+	--     burst x 4 buttons x ~60 slots x ~2 tooltip ops, the cold-cache
+	--     case hit ~5000 tooltip operations concentrated in one frame
+	--     and produced 10-20s visible freezes. The user pressing the
+	--     bind key after looting can tolerate a 150ms button-rescan
+	--     delay; they can't tolerate the freeze.
+	--   * RefreshProcessPanel + the settings-panel process count: also
+	--     bag-scanning when the panel is open. Same justification.
+	--
+	-- SKIPPED during merchant-open (button + panel only):
+	--   At a vendor each sell fires a BAG_UPDATE. If we scheduled the
+	--   deferred refresh on every one of those, the deferred batch of
+	--   button rescans would eventually fire mid-sell and block the
+	--   OnUpdate scan loop for ~1s, stalling the next SellItems batch.
+	--   Result: visible "hang" between sell batches and the after-sell
+	--   summon never firing because sellDryTicks never reaches 2.
+	--   Instead, while merchantOpen is true, we leave the deferred
+	--   timers alone. MERCHANT_CLOSED's grace callback fires a single
+	--   button + panel refresh after the sell session settles, which
+	--   catches up the One-Key targets for the now-emptied bags.
+	--
+	-- The debounce uses GetTime() on the scanner frame as state (no new
+	-- file-locals; we're brushing Lua 5.1's 200-cap on the main chunk).
+	-- Trailing-edge only: each non-merchant BAG_UPDATE pushes the
+	-- deadline out by 150ms; the actual fire happens 150ms after the
+	-- LAST BAG_UPDATE.
+	local _pBag = AutoDelete_PerfBegin("BAG_UPDATE handler")
+	RefreshCachedProfile()
+	RequestScan()
 	local now = GetTime()
-	if now - bs.lastRunAt >= bs.DEBOUNCE_INTERVAL then
-		bs.lastRunAt      = now
-		bs.scheduledRunAt = 0
-		if bs.RunChain then bs.RunChain() end
-	else
-		bs.scheduledRunAt = bs.lastRunAt + bs.DEBOUNCE_INTERVAL
+	-- Burst-quiescence timestamp: the scanner OnUpdate uses this to
+	-- defer DeleteItems while BAG_UPDATEs are still arriving (scav AOE
+	-- loot, mailbox take-all, quest chain rewards). See scanner OnUpdate
+	-- below for the consumer. Stashed on the scanner frame so we don't
+	-- add a file-local (Lua 5.1's 200-cap is tight on the main chunk).
+	--
+	-- Suppress self-updates: DeleteItems opens a 0.5s window before
+	-- doing its own deletes. BAG_UPDATEs that arrive inside that
+	-- window are almost certainly from our own deletes -- treating
+	-- them as "external burst extending" would re-trigger a fresh
+	-- 1s wait after every delete batch, adding 1s × N batches to
+	-- the clearing time. Skip the timestamp update for those.
+	if now >= (_G.AutoDelete_SelfBagUpdateUntil or 0) then
+		scanner.lastBagUpdateAt = now
 	end
+	if not merchantOpen then
+		scanner.nextButtonRefreshAt = now + 0.15
+		scanner.nextPanelRefreshAt  = now + 0.15
+	end
+	-- (Bag-space chat warning removed v3.20. The Goblin Merchant appearing
+	-- IS the visual "bags filling up" signal; the chat print was redundant
+	-- and spammed once per cooldown window while bags hovered around the
+	-- threshold. The threshold field 'bagSpaceWarnThreshold' is now used
+	-- only by the Goblin summon trigger -- see GetGoblinBagThreshold.)
+	AutoDelete_PerfEnd("BAG_UPDATE handler", _pBag)
 end)
 
 scanner:SetScript("OnUpdate", function(self, elapsed)
 	local now = GetTime()
-	-- Phase C trailing flush: fire RunChain for any BAG_UPDATEs that were
-	-- coalesced during the debounce window. Runs even when the addon is
-	-- "disabled" because button rewires and panel refreshes must reflect
-	-- bag state regardless of master toggle.
-	local bs = _G.AutoDelete_BurstState
-	if bs.scheduledRunAt > 0 and now >= bs.scheduledRunAt
-		and not bs.lootBurstOpen and not merchantOpen then
-		if bs.RunChain then bs.RunChain() end
+	-- Deferred affix-scan queue. Runs every frame but no-ops when the
+	-- queue is empty. When non-empty, processes a small batch of cold
+	-- tooltip scans (rate-limited to ~60 scans/sec) so they don't all
+	-- pile into a single frame during a 100-item loot. Runs BEFORE the
+	-- master-toggle gate because the affix dot is a user-facing
+	-- feature independent of the master enable.
+	AutoDelete_ProcessAffixScanQueue(now)
+	-- Deferred button refresh: trailing-edge debounce, fires 150ms after
+	-- the last BAG_UPDATE (see BAG_UPDATE handler for rationale). Runs
+	-- regardless of the master toggle because the per-feature One-Key
+	-- buttons can be enabled independently of the master delete/sell
+	-- master. The Update*Button functions self-gate via their own
+	-- profile toggles and have idempotent short-circuits when off.
+	-- nil-safe: nextButtonRefreshAt starts as nil before the first
+	-- BAG_UPDATE schedules it; (nil or 0) > 0 is false, so we wait.
+	if (self.nextButtonRefreshAt or 0) > 0 and now >= self.nextButtonRefreshAt then
+		self.nextButtonRefreshAt = 0
+		local _pBR = AutoDelete_PerfBegin("deferred button refresh (all 4)")
+		if UpdateDisenchantButton                then UpdateDisenchantButton() end
+		if _G.AutoDelete_UpdateOpenButton        then _G.AutoDelete_UpdateOpenButton() end
+		if _G.AutoDelete_UpdateMillButton        then _G.AutoDelete_UpdateMillButton() end
+		if _G.AutoDelete_UpdateProspectButton    then _G.AutoDelete_UpdateProspectButton() end
+		AutoDelete_PerfEnd("deferred button refresh (all 4)", _pBR)
+	end
+	-- Deferred panel refresh: same debounce. RefreshProcessPanel itself
+	-- early-returns when the panel is hidden, so when the Process Bags
+	-- window isn't open this is a free check on every tick.
+	if (self.nextPanelRefreshAt or 0) > 0 and now >= self.nextPanelRefreshAt then
+		self.nextPanelRefreshAt = 0
+		local _pPR = AutoDelete_PerfBegin("deferred panel refresh")
+		if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+		local optPanel = _G.AutoDeleteOptionsPanel
+		if optPanel and optPanel.IsShown and optPanel:IsShown() and optPanel._refreshProcessCount then
+			optPanel:_refreshProcessCount()
+		end
+		AutoDelete_PerfEnd("deferred panel refresh", _pPR)
 	end
 	if not cachedProfile or not cachedProfile.enabled then return end
 	if now >= nextPeriodicAt then
@@ -4927,11 +6023,61 @@ scanner:SetScript("OnUpdate", function(self, elapsed)
 		scanRequested = true
 	end
 	if scanRequested and now >= nextScanAt then
-		scanRequested = false
-		local interval = (cachedProfile.scanInterval and cachedProfile.scanInterval >= 0.5) and cachedProfile.scanInterval or 0.5
-		nextScanAt = now + interval
-		DeleteItems()
-		if MerchantFrame and MerchantFrame:IsShown() then SellItems(true) end
+		-- Burst-quiescence gate. While external BAG_UPDATEs are still
+		-- arriving (anything in the last BAG_QUIESCENCE_S window), defer
+		-- the scan so the per-item walk runs on a settled bag. Source-
+		-- agnostic: works for player loot, scav AOE loot, mailbox take-
+		-- all, quest reward chain.
+		--
+		-- Tuned 2026-05-22 after user feedback ("first burst still bad,
+		-- Scav loot bursts last ~1-2s"):
+		--
+		--   BAG_QUIESCENCE_S=1.0 -- match user's stated preference of
+		--     "wait 1 second after items hit the bag." 300ms was too
+		--     short to detect a still-ongoing burst.
+		--
+		--   BAG_QUIESCENCE_MAX_S=5.0 -- previous cap of 1s was firing
+		--     scans MID-BURST on multi-second scav loots (the
+		--     defer-cap timer kicked in before the burst finished).
+		--     Raised to 5s so the cap is only an anti-starvation
+		--     safeguard for the truly pathological "constant trickle"
+		--     case, not a regular fire path.
+		--
+		-- Our own deletes don't extend the wait -- see the
+		-- _G.AutoDelete_SelfBagUpdateUntil suppression in the
+		-- BAG_UPDATE handler and DeleteItems prologue. Without that,
+		-- the deletes' own BAG_UPDATEs would re-trigger the 1s wait
+		-- after every batch of 5 (turning a 1.5s clearing into a 7s
+		-- crawl).
+		local BAG_QUIESCENCE_S     = 1.0   -- wait this long after last EXTERNAL BAG_UPDATE
+		local BAG_QUIESCENCE_MAX_S = 5.0   -- anti-starvation cap on total defer
+		local lastBagAt    = self.lastBagUpdateAt or 0
+		local deferStarted = self.quiescenceFirstDeferredAt or 0
+		local stillBursting = (now - lastBagAt) < BAG_QUIESCENCE_S
+		local hitDeferCap   = deferStarted > 0
+			and (now - deferStarted) >= BAG_QUIESCENCE_MAX_S
+
+		if stillBursting and not hitDeferCap then
+			-- Defer; mark the start of this defer window if we just
+			-- entered it. Don't touch nextScanAt -- we want to check
+			-- again on the very next OnUpdate frame, not push a full
+			-- scanInterval forward.
+			if deferStarted == 0 then
+				self.quiescenceFirstDeferredAt = now
+			end
+		else
+			self.quiescenceFirstDeferredAt = 0
+			scanRequested = false
+			-- Minimum 0.25 s (was 0.5 s). Paired with the lowered
+			-- DELETE_BATCH_SIZE (30 -> 5) so loot-burst deletes spread
+			-- across multiple short scans instead of one big chug. Net
+			-- throughput stays roughly the same (~20 items/sec) but no
+			-- single scan tick exceeds one frame.
+			local interval = (cachedProfile.scanInterval and cachedProfile.scanInterval >= 0.25) and cachedProfile.scanInterval or 0.25
+			nextScanAt = now + interval
+			DeleteItems()
+			if MerchantFrame and MerchantFrame:IsShown() then SellItems(true) end
+		end
 	end
 end)
 
@@ -4994,7 +6140,13 @@ end
 -- threshold continuously for this many seconds before the Goblin Merchant is
 -- summoned. Prevents transient fills (loot a stack that auto-merges with an
 -- existing stack a moment later) from triggering a stray summon.
-local BAGS_FULL_DELAY = 1.5
+--
+-- Tuned twice:
+--   v3.17: 3.0 -> 1.5 (faster merchant pop when bags genuinely stuck full)
+--   v3.20: 1.5 -> 2.0 (give the delete scanner time to clear loot bursts
+--          before the merchant fires; with DELETE_BATCH_SIZE=8 and a 0.5 s
+--          scan interval, 2.0 s absorbs ~32 deletable items before summon)
+local BAGS_FULL_DELAY = 2.0
 
 -- ============================================================================
 -- User-dismiss vs leash classification (timing-based)
@@ -5229,15 +6381,20 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 				userDismissUntil = pollNow + USER_DISMISS_GRACE
 				activeTracked = nil
 			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= GetGoblinBagThreshold(p) and combatOk then
+				-- Post-despawn re-summon: merchant just went away,
+				-- bags are still near-full. Fire a fresh merchant.
+				-- (The HasPendingDeleteItems gate that used to live
+				-- here was removed -- see polling-tick comment.)
 				SummonGoblinMerchant()
 				-- Re-arm the bag-full timer state since we just resummoned.
 				bagsFullArmed = false
 				bagsFullSince = nil
 			else
 				activeTracked = nil
-				-- Merchant despawned while bags are still near-full (zoned, died,
-				-- etc.). Re-arm so the periodic bag-full check can fire a
-				-- fresh summon on the next BAGS_FULL_DELAY tick.
+				-- Merchant despawned while bags are still near-full
+				-- (zoned, died, etc.). Re-arm so the periodic bag-full
+				-- check can fire a fresh summon on the next
+				-- BAGS_FULL_DELAY tick.
 				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= GetGoblinBagThreshold(p) then
 					bagsFullArmed = true
 					bagsFullSince = nil
@@ -5246,16 +6403,33 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 		end
 	end
 
-	-- (3) Bag-full auto-summon. See BAGS_FULL_DELAY above for debounce rationale.
+	-- (3) Bag-full auto-summon. See BAGS_FULL_DELAY above for debounce.
+	--
+	-- The 1.5s debounce IS the "give AutoDelete a chance to clear"
+	-- gate: if AutoDelete frees slots in time, bags rise above
+	-- threshold and the "above threshold" branch below resets the
+	-- timer; no summon fires. If AutoDelete CAN'T keep up (e.g. scav
+	-- is looting faster than the delete scan can clear, so bags
+	-- oscillate around or stay below threshold for 1.5s straight),
+	-- the timer accumulates and the summon fires -- which is correct
+	-- (more loot coming in than auto-delete can handle, user needs
+	-- the Goblin).
+	--
+	-- An earlier build added an AutoDelete_HasPendingDeleteItems gate
+	-- here that reset bagsFullSince whenever any delete-eligible item
+	-- was in bags. That broke the scav-looting-faster-than-deletes
+	-- case: with pending deletes always present during a sustained
+	-- loot burst, the timer never accumulated and Goblin never
+	-- summoned. Removed -- the existing 1.5s debounce + "rose above
+	-- threshold" reset together produce the right behavior.
 	if p.summonMerchantWhenBagsFull then
 		local free = ComputeTotalFreeSlots()
 		if free <= GetGoblinBagThreshold(p) then
 			if bagsFullArmed and combatOk then
-				-- Start the timer if it isn't already running.
 				if not bagsFullSince then
 					bagsFullSince = GetTime()
 				elseif (GetTime() - bagsFullSince) >= BAGS_FULL_DELAY then
-					-- Bags have stayed near-full long enough; fire.
+					-- Bags have stayed near-full for 1.5s straight; fire.
 					bagsFullArmed = false
 					bagsFullSince = nil
 					SummonGoblinMerchant()
@@ -5263,7 +6437,9 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 				end
 			end
 		else
-			-- Free slots rose above the threshold: reset the timer and re-arm.
+			-- Free slots rose above the threshold: reset the timer and
+			-- re-arm. This is what handles the "AutoDelete cleared up
+			-- in time" case -- no special gate needed.
 			bagsFullSince = nil
 			bagsFullArmed = true
 		end
@@ -5380,6 +6556,9 @@ companionEventFrame:SetScript("OnEvent", function(_, event)
 				userDismissUntil = now + USER_DISMISS_GRACE
 				activeTracked = nil
 			elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= GetGoblinBagThreshold(p) and combatOk then
+				-- Post-despawn re-summon. HasPendingDeleteItems gate
+				-- that used to live here was removed -- see polling-
+				-- tick comment for the rationale.
 				SummonGoblinMerchant()
 				bagsFullArmed = false
 				bagsFullSince = nil
@@ -5961,6 +7140,53 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		end
 		return
 	end
+	if arg == "perf" then
+		AutoDelete_PerfToggle()
+		return
+	end
+	if arg == "perf report" then
+		AutoDelete_PerfReport()
+		return
+	end
+	if arg == "perf reset" then
+		AutoDelete_PerfReset()
+		return
+	end
+	if arg == "collection" then
+		-- Toggle Affix Collection Mode. When on, the affix dot only shows
+		-- on items whose affix the player hasn't yet learned in PE's
+		-- system, and items with already-owned affixes pass through to
+		-- normal sell/delete rules. Reads PE's ExtractionService.
+		local db = GetDB()
+		local p = GetActiveProfile(db)
+		p.affixCollectionMode = not p.affixCollectionMode
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+		-- Refresh the owned-affix map now so the next bag refresh
+		-- reflects current PE data.
+		if AutoDelete_RefreshOwnedAffixes then
+			AutoDelete_RefreshOwnedAffixes()
+		end
+		-- Bump the dot version so cached per-button decisions get
+		-- re-evaluated. RefreshAffixDots does this internally.
+		if _G.AutoDelete_RefreshAffixDots then
+			_G.AutoDelete_RefreshAffixDots()
+		end
+		if p.affixCollectionMode then
+			local count = 0
+			for _ in pairs(_G.AutoDelete_OwnedAffixes or {}) do
+				count = count + 1
+			end
+			print("|cffff8000[AutoDelete]|r affix collection mode |cff00ff00ON|r. "
+				.. count .. " owned affixes mirrored from PE. Dots will now "
+				.. "show ONLY for missing affixes (in gold).")
+		else
+			print("|cffff8000[AutoDelete]|r affix collection mode |cffff5555OFF|r. "
+				.. "Dots show on all affixed items, colored by tier.")
+		end
+		return
+	end
 	if arg == "pet" or arg == "pos" then
 		-- Diagnostic: dump pet stuck-detection state. Used to verify the
 		-- loot-event-based stuck detector is firing correctly.
@@ -6005,6 +7231,37 @@ SlashCmdList["AUTODELETE"] = function(msg)
 			print("  in combat=" .. tostring(UnitAffectingCombat and UnitAffectingCombat("player")) ..
 				"  mounted=" .. tostring(IsMounted and IsMounted()))
 		end
+		return
+	end
+	if arg == "help" or arg == "?" or arg == "commands" then
+		-- List every /del subcommand with a one-line description so the
+		-- player doesn't have to grep source or remember diagnostic
+		-- commands like `/del perf` when they need them. Grouped by
+		-- purpose: panel/action, then mode toggles, then diagnostics.
+		-- Color scheme: orange brand prefix, green command name, default
+		-- text for the description. Keep each line short enough that the
+		-- default chat frame width doesn't wrap (~80 visible chars).
+		local function row(cmd, desc)
+			print("  |cff00ff00" .. cmd .. "|r  -- " .. desc)
+		end
+		print("|cffff8000[AutoDelete]|r commands:")
+		row("/del",              "open / close the settings panel")
+		row("/del help",         "show this list (also: /del ? or /del commands)")
+		print(" ")
+		row("/del clean",        "run a delete pass on your bags right now")
+		row("/del sell",         "run a sell pass at the open vendor right now")
+		row("/del process",      "toggle the Process Bags window (DE / Mill / Prospect / Open)")
+		row("/del setup",        "re-open the first-time setup / welcome popup")
+		print(" ")
+		row("/del collection",   "toggle Affix Collection Mode (gold dot on un-learned only)")
+		print(" ")
+		row("/del perf",         "toggle perf instrumentation -- USE THIS TO DIAGNOSE LAG")
+		row("/del perf report",  "print perf stats collected since `/del perf` turned on")
+		row("/del perf reset",   "clear perf stats and start counting from zero")
+		row("/del debug",        "toggle the per-item auto-sell decision trace")
+		row("/del pet",          "dump pet stuck-detection state (alias: /del pos)")
+		print("|cffff8000[AutoDelete]|r lag diagnosis: run |cff00ff00/del perf|r before the next loot burst,")
+		print("|cffff8000           |r let it run for a few seconds, then |cff00ff00/del perf report|r.")
 		return
 	end
 	local panel = _G.AutoDeleteOptionsPanel

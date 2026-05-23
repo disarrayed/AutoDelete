@@ -210,6 +210,138 @@ local function MakeSubToggle(parent, label, color)
 	return row
 end
 
+-- Segmented control: N pills laid out side-by-side, one active at a time,
+-- or none active (idle/off). Used for the Auto Actions card but generic.
+--
+-- States table format (each entry):
+--   { value="delete", label="Del", tooltip="...",
+--     bg={r,g,b,a}, border={r,g,b,a}, fg={r,g,b,a} }
+-- bg/border/fg describe the ACTIVE appearance. Inactive segments share a
+-- single neutral-gray paint -- "all gray until you click one" -- so the
+-- active pill is the only thing competing for attention.
+--
+-- Click semantics:
+--   - Click an inactive segment   -> SetValue(segment.value)  (light it up)
+--   - Click the active segment    -> SetValue(offValue)       (dim it out)
+--     (only if offValue was supplied; otherwise it's a no-op repaint.)
+--
+-- offValue may be ANY string -- including one that doesn't match any segment.
+-- A value that doesn't match any segment renders as "no segment active",
+-- which is exactly what we want for an implicit-off state.
+--
+-- API surface:
+--   ctrl:GetValue()       -> current value string
+--   ctrl:SetValue(value)  -> set value (any string allowed); fires onChange
+--                            iff value actually changed
+--   onChange(newValue, oldValue) -> caller-supplied callback
+--
+-- segWidth is the PER-SEGMENT width. Total control width is
+-- N * segWidth + (N - 1) GAP. This lets two different controls share the
+-- same pill width but have different total widths -- e.g. a 2-segment row
+-- and a 1-segment row whose right edges line up because of where they're
+-- anchored, with the single pill lining up with the rightmost pill of the
+-- 2-segment row.
+local function MakeSegmentedControl(parent, segWidth, height, states, offValue, onChange)
+	local n = #states
+	local GAP = 1
+	local totalWidth = n * segWidth + math.max(0, n - 1) * GAP
+
+	local ctrl = CreateFrame("Frame", nil, parent)
+	ctrl:SetSize(totalWidth, height)
+
+	ctrl._states = states
+	ctrl._value = offValue   -- start in the implicit-off state; caller SetValue overrides
+	ctrl._segments = {}
+
+	-- Neutral inactive paint: dark bg, subtle gray border, dimmed text.
+	-- Same for every state when inactive so the visual reads "all gray".
+	local INACTIVE_BG     = { 0.07, 0.07, 0.07, 1 }
+	local INACTIVE_BORDER = { 0.22, 0.22, 0.22, 1 }
+	local INACTIVE_FG     = C_DIM
+
+	local function PaintSegment(seg, isActive)
+		local s = seg._state
+		if isActive then
+			ApplyBackdrop(seg, s.bg, s.border)
+			seg._text:SetTextColor(unpack(s.fg))
+		else
+			ApplyBackdrop(seg, INACTIVE_BG, INACTIVE_BORDER)
+			seg._text:SetTextColor(unpack(INACTIVE_FG))
+		end
+	end
+
+	local function Repaint()
+		for _, seg in ipairs(ctrl._segments) do
+			PaintSegment(seg, seg._state.value == ctrl._value)
+		end
+	end
+
+	for i, s in ipairs(states) do
+		local seg = CreateFrame("Button", nil, ctrl)
+		seg:SetSize(segWidth, height)
+		seg:SetPoint("LEFT", ctrl, "LEFT", (i - 1) * (segWidth + GAP), 0)
+		seg._state = s
+
+		local text = seg:CreateFontString(nil, "OVERLAY")
+		text:SetFont(FONT, 10, "OUTLINE")
+		text:SetPoint("CENTER", 0, 0)
+		text:SetJustifyH("CENTER")
+		text:SetText(s.label)
+		seg._text = text
+
+		-- Click an inactive segment -> activate it.
+		-- Click the active segment -> deselect (set to offValue).
+		seg:SetScript("OnClick", function()
+			if ctrl._value == s.value then
+				ctrl:SetValue(offValue)
+			else
+				ctrl:SetValue(s.value)
+			end
+		end)
+
+		-- Hover: brighten the border on this segment and show its tooltip.
+		-- Active segments brighten from their state border; inactive segments
+		-- brighten from INACTIVE_BORDER so the hover hint is visible without
+		-- pre-disclosing the state color.
+		seg:SetScript("OnEnter", function(self)
+			local b = (ctrl._value == self._state.value) and self._state.border or INACTIVE_BORDER
+			self:SetBackdropBorderColor(
+				math.min(b[1] + 0.25, 1),
+				math.min(b[2] + 0.25, 1),
+				math.min(b[3] + 0.25, 1),
+				1)
+			if self._state.tooltip then
+				GameTooltip:SetOwner(self, "ANCHOR_TOP")
+				GameTooltip:SetText(self._state.label, 1, 1, 1)
+				GameTooltip:AddLine(self._state.tooltip, C_DIM[1], C_DIM[2], C_DIM[3], true)
+				GameTooltip:Show()
+			end
+		end)
+		seg:SetScript("OnLeave", function()
+			Repaint()
+			GameTooltip:Hide()
+		end)
+
+		ctrl._segments[i] = seg
+	end
+
+	function ctrl:GetValue() return self._value end
+
+	function ctrl:SetValue(value)
+		local oldValue = self._value
+		if oldValue == value then
+			Repaint()  -- idempotent paint so stale visuals (e.g. post profile-switch) line up
+			return
+		end
+		self._value = value
+		Repaint()
+		if onChange then onChange(value, oldValue) end
+	end
+
+	Repaint()
+	return ctrl
+end
+
 -- PEADAR-style custom dropdown
 local function MakeDropdown(parent, width, options, onChange)
 	local dd = CreateFrame("Frame", nil, parent)
@@ -660,9 +792,11 @@ local DEFAULT_PROFILE = {
 	listText = "",
 	sellListText = "",
 	whitelistText = "",
-	autoGray = false,
+	-- 3-state quality filters: "off" | "delete" | "sell"
+	-- Migration: old boolean true → "delete" (user requested default)
+	autoGray = "delete",
 	scanInterval = 0.5,
-	autoDeleteCommon  = false,
+	autoDeleteCommon = "delete",
 	autoSellGreens    = false,
 	boeArmorEnabled   = false,
 	boeArmorIlvlMin   = 1,
@@ -1124,7 +1258,7 @@ clearBtn:SetScript("OnEnter", function(btn)
 	btn._text:SetTextColor(1, 1, 1)
 	GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 	GameTooltip:SetText("Clear Ignored", 1, 1, 1)
-	GameTooltip:AddLine("Reset the per-character ignore list. Items you've right-clicked off this list will reappear if they're still in your bags.",
+	GameTooltip:AddLine("Resets the ignore list. Items you right-clicked to hide will come back if they're still in your bags.",
 		C_DIM[1], C_DIM[2], C_DIM[3], true)
 	GameTooltip:Show()
 end)
@@ -1385,6 +1519,12 @@ do
 local POPUP_W = 240
 local POPUP_H = 170
 
+-- Visual style mirrors the Process Bags panel and the main settings
+-- panel: dark body, dark gray border, dark title bar with orange text,
+-- dim close X that turns red on hover. Previously this popup used an
+-- orange-filled title bar and an orange border, which read as a
+-- different window family from the rest of the addon (same regression
+-- the Process Bags panel had pre-2026-04). Audit fix 2026-05-20.
 local popup = CreateFrame("Frame", "AutoDeleteDisenchantFiltersPopup", UIParent)
 popup:SetSize(POPUP_W, POPUP_H)
 popup:SetFrameStrata("DIALOG")
@@ -1393,38 +1533,34 @@ popup:SetMovable(true)
 popup:EnableMouse(true)
 popup:SetClampedToScreen(true)
 popup:Hide()
-popup:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-popup:SetBackdropColor(0.04, 0.04, 0.04, 0.96)
-popup:SetBackdropBorderColor(unpack(C_ACCENT))
+ApplyBackdrop(popup, C_BG, C_BORDER)
 
--- Title bar / drag handle.
+-- Title bar: drag handle + window title. Same canonical look as
+-- Process Bags and the main settings panel.
 local titleBar = CreateFrame("Frame", nil, popup)
-titleBar:SetPoint("TOPLEFT", 0, 0)
-titleBar:SetPoint("TOPRIGHT", 0, 0)
-titleBar:SetHeight(22)
-titleBar:SetBackdrop({ bgFile = WHITE8x8 })
-titleBar:SetBackdropColor(C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.85)
+titleBar:SetPoint("TOPLEFT", popup, "TOPLEFT", 0, 0)
+titleBar:SetPoint("TOPRIGHT", popup, "TOPRIGHT", 0, 0)
+titleBar:SetHeight(24)
+ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
 titleBar:EnableMouse(true)
 titleBar:RegisterForDrag("LeftButton")
 titleBar:SetScript("OnDragStart", function() popup:StartMoving() end)
 titleBar:SetScript("OnDragStop", function() popup:StopMovingOrSizing() end)
 
-local titleText = titleBar:CreateFontString(nil, "OVERLAY")
-titleText:SetFont(FONT, 11, "OUTLINE")
-titleText:SetTextColor(0.05, 0.05, 0.05, 1)
-titleText:SetPoint("LEFT", titleBar, "LEFT", 8, 0)
+local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
+titleText:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
 titleText:SetText("Disenchant Filters")
 
+-- Close X in the title bar's right corner. Dim by default, red on
+-- hover -- matches the main settings panel and Process Bags exactly.
 local closeX = CreateFrame("Button", nil, titleBar)
-closeX:SetSize(20, 20)
-closeX:SetPoint("RIGHT", titleBar, "RIGHT", -2, 0)
-local closeXText = closeX:CreateFontString(nil, "OVERLAY")
-closeXText:SetFont(FONT, 12, "OUTLINE")
+closeX:SetSize(24, 24)
+closeX:SetPoint("TOPRIGHT", titleBar, "TOPRIGHT", 0, 0)
+local closeXText = MakeText(closeX, 14, C_DIM, "OUTLINE")
 closeXText:SetText("x")
-closeXText:SetTextColor(0.05, 0.05, 0.05, 1)
 closeXText:SetPoint("CENTER")
-closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.2, 0.2, 1) end)
-closeX:SetScript("OnLeave", function() closeXText:SetTextColor(0.05, 0.05, 0.05, 1) end)
+closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.3, 0.3) end)
+closeX:SetScript("OnLeave", function() closeXText:SetTextColor(unpack(C_DIM)) end)
 closeX:SetScript("OnClick", function() popup:Hide() end)
 
 -- Body: section labels + 5 inline sub-toggles (BoP / BoE / Unc / Rare /
@@ -1450,24 +1586,33 @@ local qualLabel = MakeSectionLabel(popup, "Quality:",    QUAL_Y)
 local ilvlLabel = MakeSectionLabel(popup, "iLvl range:", ILVL_Y)
 
 -- Sub-toggles: positioned with a per-toggle width, anchored to the
--- popup at fixed x offsets.
+-- popup at fixed x offsets. Color follows the main-panel convention:
+-- binary toggles (BoP/BoE) use C_ACCENT (the standard active-state
+-- orange); rarity toggles (Unc/Rare/Epic) use the WoW quality colors
+-- (green/blue/purple). Audit fix 2026-05-20 -- the previous build
+-- used C_DK_RED (Death Knight class color, only intended for the
+-- Auto-Repair "Use Guild Bank money" sub-toggle) for everything,
+-- which read as off-design and didn't communicate rarity.
 local TGL_Y_BIND = BIND_Y - 16
 local TGL_Y_QUAL = QUAL_Y - 16
 local TGL_W      = 52
 
-local function MakeFilterToggle(label, x, y)
-	local tgl = MakeSubToggle(popup, label, C_DK_RED)
+local function MakeFilterToggle(label, color, x, y)
+	local tgl = MakeSubToggle(popup, label, color)
 	tgl:SetPoint("TOPLEFT", x, y)
 	tgl:SetWidth(TGL_W)
 	return tgl
 end
 
-local tglBoP  = MakeFilterToggle("BoP",  LABEL_X,             TGL_Y_BIND)
-local tglBoE  = MakeFilterToggle("BoE",  LABEL_X + TGL_W,     TGL_Y_BIND)
+-- Binary bind-state toggles use the standard accent (orange).
+local tglBoP  = MakeFilterToggle("BoP",  C_ACCENT, LABEL_X,             TGL_Y_BIND)
+local tglBoE  = MakeFilterToggle("BoE",  C_ACCENT, LABEL_X + TGL_W,     TGL_Y_BIND)
 
-local tglUnc  = MakeFilterToggle("Unc",  LABEL_X,             TGL_Y_QUAL)
-local tglRare = MakeFilterToggle("Rare", LABEL_X + TGL_W,     TGL_Y_QUAL)
-local tglEpic = MakeFilterToggle("Epic", LABEL_X + TGL_W * 2, TGL_Y_QUAL)
+-- Rarity toggles use WoW quality colors so the checked-state fill
+-- communicates which rarity each control governs at a glance.
+local tglUnc  = MakeFilterToggle("Unc",  C_Q_UNCOMMON, LABEL_X,             TGL_Y_QUAL)
+local tglRare = MakeFilterToggle("Rare", C_Q_RARE,     LABEL_X + TGL_W,     TGL_Y_QUAL)
+local tglEpic = MakeFilterToggle("Epic", C_Q_EPIC,     LABEL_X + TGL_W * 2, TGL_Y_QUAL)
 
 -- iLvl min/max: two small numeric input boxes joined by a dash. Width
 -- and offset match the Process Bags panel's iLvl controls for visual
@@ -1513,11 +1658,17 @@ ilvlHint:SetText("0 = use default")
 -- OnClick handlers. Each writes the profile field, refreshes the cache,
 -- and re-arms the disenchant button. Mirrors the per-toggle handler the
 -- main panel sets up for other features.
+--
+-- IMPORTANT: this popup is constructed at FILE LOAD time, outside the
+-- BuildUI() closure where `db` is a local. Use GetDB() explicitly here
+-- so the handlers don't resolve `db` to a nil global. (Latent bug fixed
+-- 2026-05-20: any toggle click previously errored with "attempt to
+-- index local 'db' (a nil value)" at GetActiveProfile.)
 local function MakeFilterHandler(field)
 	return function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
-		GetActiveProfile(db)[field] = btn._checked
+		GetActiveProfile(GetDB())[field] = btn._checked
 		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
 		if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
 		local panel = _G.AutoDeleteOptionsPanel
@@ -1535,7 +1686,7 @@ local function MakeIlvlHandler(field)
 		local val = tonumber(s:GetText()) or 0
 		if val < 0 then val = 0 end
 		s:SetText(tostring(val))
-		GetActiveProfile(db)[field] = val
+		GetActiveProfile(GetDB())[field] = val
 		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
 		if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
 	end
@@ -1576,6 +1727,132 @@ _G.AutoDelete_ToggleDisenchantFiltersPopup = ToggleDisenchantFiltersPopup
 _G.AutoDelete_RefreshDisenchantFilters     = RefreshPopup
 
 end  -- end of Disenchant Filters Popup `do` block
+
+-- ============================================================================
+-- Learned Affixes Popup
+-- ============================================================================
+-- Scrollable read-only window that displays the player's learned affixes,
+-- populated by the Scan Learned Affixes button on the Affix Display card.
+-- Same draggable-frame pattern as the Disenchant Filters popup and the
+-- Process Bags panel: dark body, dark gray border, dark title bar with
+-- orange text, dim close X that turns red on hover.
+--
+-- Body is a ScrollFrame holding a single FontString -- one widget, no row
+-- pooling needed at the expected scale (~50-100 affixes max). The caller
+-- in AutoDelete.lua formats the multi-line string (tier headers in orange
+-- via embedded |cff...| escape codes, affix entries in default text) and
+-- hands it off via _G.AutoDelete_ShowLearnedAffixesWindow(text).
+
+do
+
+local POPUP_W = 320
+local POPUP_H = 360
+local TITLE_H = 24
+local BODY_PAD_X = 10
+local BODY_PAD_TOP = 4
+local BODY_PAD_BOT = 8
+-- Scrollbar built into UIPanelScrollFrameTemplate reserves ~22px on the
+-- right edge of the scroll frame; pad accordingly so text doesn't slide
+-- under the bar.
+local SCROLLBAR_W = 22
+
+local popup = CreateFrame("Frame", "AutoDeleteLearnedAffixesPopup", UIParent)
+popup:SetSize(POPUP_W, POPUP_H)
+popup:SetFrameStrata("DIALOG")
+popup:SetFrameLevel(120)
+popup:SetMovable(true)
+popup:EnableMouse(true)
+popup:SetClampedToScreen(true)
+popup:Hide()
+ApplyBackdrop(popup, C_BG, C_BORDER)
+
+-- Title bar: drag handle + window title + close X. Mirrors the canonical
+-- look used by the Disenchant Filters popup and Process Bags panel.
+local titleBar = CreateFrame("Frame", nil, popup)
+titleBar:SetPoint("TOPLEFT", popup, "TOPLEFT", 0, 0)
+titleBar:SetPoint("TOPRIGHT", popup, "TOPRIGHT", 0, 0)
+titleBar:SetHeight(TITLE_H)
+ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
+titleBar:EnableMouse(true)
+titleBar:RegisterForDrag("LeftButton")
+titleBar:SetScript("OnDragStart", function() popup:StartMoving() end)
+titleBar:SetScript("OnDragStop", function() popup:StopMovingOrSizing() end)
+
+local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
+titleText:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
+titleText:SetText("Learned Affixes")
+
+local closeX = CreateFrame("Button", nil, titleBar)
+closeX:SetSize(24, 24)
+closeX:SetPoint("TOPRIGHT", titleBar, "TOPRIGHT", 0, 0)
+local closeXText = MakeText(closeX, 14, C_DIM, "OUTLINE")
+closeXText:SetText("x")
+closeXText:SetPoint("CENTER")
+closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.3, 0.3) end)
+closeX:SetScript("OnLeave", function() closeXText:SetTextColor(unpack(C_DIM)) end)
+closeX:SetScript("OnClick", function() popup:Hide() end)
+
+-- Scroll frame fills the body below the title bar. Use Blizzard's stock
+-- UIPanelScrollFrameTemplate so we get a usable scrollbar with up/down
+-- arrows that match the rest of the WoW UI on 3.3.5a.
+local scroll = CreateFrame("ScrollFrame", "AutoDeleteLearnedAffixesScroll", popup,
+	"UIPanelScrollFrameTemplate")
+scroll:SetPoint("TOPLEFT", popup, "TOPLEFT", BODY_PAD_X, -(TITLE_H + BODY_PAD_TOP))
+scroll:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -SCROLLBAR_W, BODY_PAD_BOT)
+
+-- Scroll child: a Frame holding the body FontString. UIPanelScrollFrameTemplate
+-- needs an explicit child whose height drives how much can be scrolled. After
+-- setting text we measure GetStringHeight() and resize the child to match.
+local content = CreateFrame("Frame", nil, scroll)
+content:SetSize(POPUP_W - BODY_PAD_X - SCROLLBAR_W, 1) -- height set dynamically on Show
+scroll:SetScrollChild(content)
+
+local bodyFS = content:CreateFontString(nil, "OVERLAY")
+bodyFS:SetFont(FONT, 11, "OUTLINE")
+bodyFS:SetTextColor(unpack(C_TEXT))
+bodyFS:SetJustifyH("LEFT")
+bodyFS:SetJustifyV("TOP")
+bodyFS:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
+-- Fixed width so the FontString wraps cleanly within the scroll child.
+-- Per CLAUDE.md FontString rule §10.9: width MUST come from SetWidth(N),
+-- never from a RIGHT-anchor SetPoint. SetWordWrap + SetNonSpaceWrap
+-- explicit per the same rule.
+local CONTENT_FS_W = POPUP_W - BODY_PAD_X - SCROLLBAR_W
+bodyFS:SetWidth(CONTENT_FS_W)
+bodyFS:SetWordWrap(true)
+bodyFS:SetNonSpaceWrap(false)
+
+-- Show the popup with the given body text. Resizes the scroll child so the
+-- scrollbar reflects the actual content height. Text may include WoW color
+-- escapes (|cffRRGGBB...|r) which FontString renders natively.
+local function ShowLearnedAffixesWindow(bodyText)
+	bodyFS:SetText(bodyText or "")
+	-- Measure rendered height and size the scroll child to match so the
+	-- scrollbar's range is correct. Add a small bottom pad so the last line
+	-- isn't flush against the frame edge.
+	local h = bodyFS:GetStringHeight() + 8
+	if h < 1 then h = 1 end
+	content:SetHeight(h)
+	-- Anchor centered on first show; user can drag it after.
+	if not popup._everShown then
+		popup:ClearAllPoints()
+		popup:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+		popup._everShown = true
+	end
+	-- Reset scroll to top so a freshly-shown window starts at the summary.
+	scroll:SetVerticalScroll(0)
+	popup:Show()
+end
+
+_G.AutoDelete_LearnedAffixesPopup      = popup
+_G.AutoDelete_ShowLearnedAffixesWindow = ShowLearnedAffixesWindow
+
+-- Escape-to-close: WoW's stock UISpecialFrames mechanism scans this table on
+-- ESC and Hides any matching named frame. Our popup has a global name set
+-- via CreateFrame's second arg, so just append it once.
+tinsert(UISpecialFrames, "AutoDeleteLearnedAffixesPopup")
+
+end  -- end of Learned Affixes Popup `do` block
 
 -- ============================================================================
 -- Build UI
@@ -1625,12 +1902,11 @@ local function BuildUI(self)
 	local yOff = -36
 
 	-- ========================================================================
-	-- SECTION 1: Tabbed Settings (General / Goblin / AutoInv / Tracking / Profiles)
-	-- Container panel holds a horizontal tab strip at top + a fixed-height
-	-- content area below. The General tab's three cards are:
-	--   card 1: Enable (master toggle) + Auto-Delete Junk's parent description
-	--   card 2: Auto-Delete Junk + Auto-Delete Common + Auto-Sell Greens (3 rows)
-	--   card 3: Scan Speed dropdown
+	-- SECTION 1: Tabbed Settings (General / Pets / Filters / Keybinds /
+	-- Invites / Tracking / Profiles). Container panel holds a horizontal
+	-- tab strip at top + a fixed-height content area below. See each tab's
+	-- own header comment further down for the card-by-card breakdown of
+	-- that tab's layout.
 	-- ========================================================================
 	local CARD_TOP_PAD = 6
 	local CARD_BOT_PAD = 4
@@ -1761,8 +2037,12 @@ local function BuildUI(self)
 	end)
 
 	-- ========================================================================
-	-- GENERAL TAB: 4 cards horizontally (Enable, Summon, Auto-Delete Junk, Scan Speed)
-	-- Content area is 70px tall; cards occupy 62px centered vertically.
+	-- GENERAL TAB: 3 cards horizontally:
+	--   Card 1: Enable Addon + Auto-Add Equipped + Auto-Repair (+ guild bank
+	--           sub-toggle indented under Auto-Repair)
+	--   Card 2: Process Bags     (title + live count + Open Panel button)
+	--   Card 3: Scan Speed       (dropdown + help text + detailed tooltip)
+	-- Content area is 100px tall; cards occupy 92px with 4px top/bottom margins.
 	-- ========================================================================
 	local generalPage = tabPages.general
 	local CARD_GAP = 6
@@ -1787,42 +2067,97 @@ local function BuildUI(self)
 	local card2 = MakeGeneralCard(cardW + CARD_GAP)
 	local card3 = MakeGeneralCard((cardW + CARD_GAP) * 2)
 
-	local tglEnable = MakeToggle(card1, "Enable", C_ACCENT,
-		"Master switch for the item-handling features. When enabled, AutoDelete scans your bags for items on the Delete list, runs Auto-Delete Junk/Common, runs Auto-Sell Greens, performs Auto-Repair at vendors, runs the BoE Armor/BoP/BoE Weapons sell rules, and manages the Greedy Scavenger and Goblin Merchant pets. Auto-Invite and Hide Greedy Spam are independent and run regardless of this switch.")
+	-- Card 1 (Option B reorg per user request 2026-05-20):
+	--   Row 1: Enable Addon  (master toggle; description dropped from the
+	--          card to make room for Auto-Repair below -- the hover tooltip
+	--          still carries the full explanation)
+	--   Row 2: Auto-Add Equipped
+	--   Row 3: Auto-Repair      (master)
+	--   Row 3-sub: Use Guild Bank money (16px sub-toggle, indented)
+	-- 3 main rows + 1 sub-row fit in cardH=92 with 4px slack.
+	-- Sub-toggle indent matches MakeSubToggle convention (parent box+gap=32).
+	local SUBTGL_INDENT_GEN = CARD_INNER_PAD_X + 14 + 8
+
+	local tglEnable = MakeToggle(card1, "Enable Addon", C_ACCENT,
+		"Turns AutoDelete on or off. When off, nothing is auto-deleted or sold. Auto-Invite and Hide Greedy Spam still work no matter what.")
 	tglEnable:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglEnable:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	AddToggleDescription(tglEnable, "Allow AutoDelete to manage your items.",
-		cardW - CARD_INNER_PAD_X * 2 - 26)
 	self._tglEnable = tglEnable
 
-	-- Row 3: Auto-Add Equipped. Single toggle that drives both behaviours:
-	-- a one-time sync of currently equipped items into Keep on toggle-flip,
-	-- and reactive add-to-Keep on every PLAYER_EQUIPMENT_CHANGED. Description
-	-- omitted to fit in card1's 92px height under Enable + its description.
 	local tglAutoAddEquipped = MakeToggle(card1, "Auto-Add Equipped", C_ACCENT,
-		"When ON, every item you equip is added to the Keep list automatically. Toggling this on also syncs your currently equipped items to Keep as a one-time pass. Shirts and tabards are skipped.")
-	tglAutoAddEquipped:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
+		"Adds gear you equip to your Keep list so it won't be sold or deleted by mistake. Shirts and tabards are skipped.")
+	tglAutoAddEquipped:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 22))
 	tglAutoAddEquipped:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglAutoAddEquipped = tglAutoAddEquipped
 
-	-- card2: Auto-Repair (master) + Use Guild Bank money (sub). Moved here
-	-- from the old Goblin tab; Auto-Repair runs at any vendor, has nothing
-	-- to do with pets, and pairs more naturally with the General tab's
-	-- enable-and-globals theme.
-	-- Sub-toggle indent matches MakeSubToggle convention (parent box+gap=32).
-	local SUBTGL_INDENT_GEN = CARD_INNER_PAD_X + 14 + 8
-	local tglRepair = MakeToggle(card2, "Auto-Repair", C_ACCENT,
-		"Repair your gear automatically when you open a vendor.")
-	tglRepair:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
+	local tglRepair = MakeToggle(card1, "Auto-Repair", C_ACCENT,
+		"Fixes your gear when you talk to a vendor. Turn on the sub-toggle below to pay from your guild bank first.")
+	tglRepair:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
 	tglRepair:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglRepair = tglRepair
 
-	local tglRepairGuild = MakeSubToggle(card2, "Use Guild Bank money", C_DK_RED)
-	tglRepairGuild:SetPoint("TOPLEFT", SUBTGL_INDENT_GEN, -(CARD_INNER_PAD_Y + 22))
+	local tglRepairGuild = MakeSubToggle(card1, "Use Guild Bank money", C_DK_RED)
+	tglRepairGuild:SetPoint("TOPLEFT", SUBTGL_INDENT_GEN, -(CARD_INNER_PAD_Y + 66))
 	tglRepairGuild:SetWidth(cardW - SUBTGL_INDENT_GEN - CARD_INNER_PAD_X)
 	self._tglRepairGuild = tglRepairGuild
 
-	-- Scan Speed card (moved here from the old Scan Options left card)
+	-- Card 2: Process Bags launcher (moved from Filters -> Card 3 per the
+	-- Option B reorg). General tab now carries the "I want to actively run
+	-- something" feature; the Filters tab is purely about which auto-rules
+	-- apply. Same layout as the old Process Bags card -- title, live count
+	-- summary that refreshes on BAG_UPDATE + panel Refresh, and an Open
+	-- Panel action button.
+	--
+	-- Wrapped in `do ... end` so the title/count/button locals don't bump
+	-- BuildUI past Lua 5.1's 200-local cap. The count FontString is
+	-- exported on `self._processCount` (read by self:_refreshProcessCount
+	-- below), so the wrapper's locals can vanish on block exit.
+	do
+		local card2Title = MakeText(card2, 11, C_ACCENT, "OUTLINE")
+		card2Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+		card2Title:SetText("Process Bags")
+
+		local processCount = MakeText(card2, 9, C_DIM)
+		processCount:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+		processCount:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -24)
+		processCount:SetJustifyH("LEFT")
+		processCount:SetWordWrap(true)
+		processCount:SetText("...")
+		self._processCount = processCount
+
+		-- Open Panel: launches the standalone Process Bags window. C_BLUE
+		-- (change/transform class). Sits at y=-68 to match the Audit Lists
+		-- button on Filters Card 2 (uniform row geometry across tabs).
+		local launchBtn = MakeActionButton(card2, "Open Panel", C_BLUE, function()
+			if _G.AutoDelete_ToggleProcessPanel then _G.AutoDelete_ToggleProcessPanel() end
+		end, cardW - CARD_INNER_PAD_X * 2, 20)
+		launchBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -68)
+	end
+
+	function self:_refreshProcessCount()
+		if not self._processCount then return end
+		local getter = _G.AutoDelete_ProcessScanCounts
+		if not getter then return end
+		local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
+		local c = getter(profile)
+		if not c or c.total == 0 then
+			self._processCount:SetText("No eligible items")
+			return
+		end
+		local parts = {}
+		if c.disenchant > 0 then table.insert(parts, c.disenchant .. " DE") end
+		if c.mill       > 0 then table.insert(parts, c.mill       .. " Mill") end
+		if c.prospect   > 0 then table.insert(parts, c.prospect   .. " Prospect") end
+		if c.open       > 0 then table.insert(parts, c.open       .. " Open") end
+		self._processCount:SetText(c.total .. " items: " .. table.concat(parts, ", "))
+	end
+
+	-- Card 3: Scan Speed (dot toggles moved to Filters -> Affix Display per
+	-- the Option B reorg). Card now has just the dropdown + a couple of
+	-- help lines + a detailed hover tooltip explaining the trade-off.
+	-- "Nobody knows what it does" was the original feedback that triggered
+	-- this rewrite -- the in-card description spells out concretely what
+	-- the scan does and the hover tooltip spells out the trade-off.
 	local scanSpeedCard = card3
 	local speedLabel = MakeText(scanSpeedCard, 10, C_TEXT, "OUTLINE")
 	speedLabel:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y - 2)
@@ -1842,18 +2177,31 @@ local function BuildUI(self)
 	speedDD:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 14))
 	self._speedDD = speedDD
 
-	local speedHelp = MakeText(scanSpeedCard, 9, C_DIM, "OUTLINE")
-	speedHelp:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 40))
-	speedHelp:SetPoint("TOPRIGHT", scanSpeedCard, "TOPRIGHT", -CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 40))
-	speedHelp:SetJustifyH("LEFT")
-	speedHelp:SetText("How often bags are scanned.")
+	-- Hover tooltip on the dropdown explaining the trade-off in detail.
+	-- The dropdown's main button is the OnEnter/OnLeave target -- the
+	-- arrow texture and bg both live under it so hovering anywhere on
+	-- the dropdown surfaces the tip. Mirrors the affixFloorRow pattern
+	-- used elsewhere in this file.
+	local SCAN_TIP_TITLE = "Scan Speed"
+	local SCAN_TIP_BODY  = "How often AutoDelete checks your bags for items on the Delete and Sell lists.\n\n|cffffd200Fast (0.5-1 sec):|r items disappear almost instantly. Tiny CPU cost.\n\n|cffffd200Slow (5-30 sec):|r quieter in the background. Short delay before items go.\n\n|cffffd200Very slow (1-5 min):|r runs once in a while. Good if you only want vendor cleanup.\n\nVendor selling always fires right when you open a merchant, no matter this setting."
+	speedDD:EnableMouse(true)
+	speedDD:SetScript("OnEnter", function(s)
+		GameTooltip:SetOwner(s, "ANCHOR_TOP")
+		GameTooltip:SetText(SCAN_TIP_TITLE, 1, 1, 1)
+		GameTooltip:AddLine(SCAN_TIP_BODY, C_DIM[1], C_DIM[2], C_DIM[3], true)
+		GameTooltip:Show()
+	end)
+	speedDD:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-	-- Toggle: show the affix dot indicator on bag slots. On by default.
-	local tglShowAffixDot = MakeToggle(scanSpeedCard, "Show affix dot", C_ACCENT,
-		"Display a small cyan dot in the bottom-left corner of bag slots that contain items with PE's @affix@ tooltip marker. Works on default Blizzard bags and on ElvUI bags.")
-	tglShowAffixDot:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 60))
-	tglShowAffixDot:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglShowAffixDot = tglShowAffixDot
+	-- In-card description (2 lines, dim, wrapped) summarizing what the
+	-- option controls. Sits below the dropdown so the card visually
+	-- balances and the user has a hint without needing to hover.
+	local speedHelp = MakeText(scanSpeedCard, 9, C_DIM, "OUTLINE")
+	speedHelp:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 42))
+	speedHelp:SetPoint("TOPRIGHT", scanSpeedCard, "TOPRIGHT", -CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 42))
+	speedHelp:SetJustifyH("LEFT")
+	speedHelp:SetWordWrap(true)
+	speedHelp:SetText("How often bags are checked against your Delete and Sell lists. Hover for the full trade-off.")
 
 	-- ========================================================================
 	-- GOBLIN TAB: 3 cards (Auto-Repair, Summon Scavenger, Hide Greedy Spam)
@@ -1888,7 +2236,7 @@ local function BuildUI(self)
 	-- toggle + 3 sub-toggles. Moved here from the old Goblin Card 2 so the
 	-- Scavenger pet feature lives in the leftmost slot of the Pets tab.
 	local tglScav = MakeToggle(gCard1, "Summon Scavenger", C_ACCENT,
-		"Master toggle for Greedy Scavenger pet management. When enabled, the addon dismisses your Scavenger when you mount and re-summons on dismount, and re-summons it if it gets stuck or despawns. The summon itself is triggered by the After sell or After vendor close sub-toggles below. Gated by the AutoDelete master Enable on the General tab.")
+		"Manages your Greedy Scavenger pet. Brings it back when it gets stuck or after you mount up. Use the sub-toggles below to pick when to summon.")
 	tglScav:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglScav:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglScav = tglScav
@@ -1915,7 +2263,7 @@ local function BuildUI(self)
 	-- name truncated on the ~175px card width. Tooltip still names the
 	-- Goblin Merchant explicitly.
 	local tglSummonMerchant = MakeToggle(gCard2, "Summon Merchant", C_ACCENT,
-		"Automatically summon your Goblin Merchant companion when your bags reach zero free slots and stay full for 3 seconds. The 3-second wait avoids stray summons from transient fills (e.g. stacks that auto-merge a moment later). You still need to target the merchant and press your Interact With Target keybind to open the vendor window. Gated by the Summon Scavenger master toggle and by the AutoDelete master Enable.")
+		"Summons your Goblin Merchant when your bags stay full for 2 seconds. Target the merchant and press your Interact key to open the shop.")
 	tglSummonMerchant:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglSummonMerchant:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	AddToggleDescription(tglSummonMerchant,
@@ -1930,7 +2278,7 @@ local function BuildUI(self)
 	-- the chat notification only; Goblin Merchant summon triggers at zero
 	-- free slots independently.
 	local tglBagSpaceWarn = MakeToggle(gCard3, "Bag warning", C_ACCENT,
-		"Prints a chat warning the first time free bag slots drop to or below the Warn threshold below. Re-arms once slots rise back above the threshold.")
+		"Tells you in chat when your free bag slots drop to the number below. Only warns once until your bags fill up again.")
 	tglBagSpaceWarn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglBagSpaceWarn:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglBagSpaceWarn = tglBagSpaceWarn
@@ -1981,10 +2329,10 @@ local function BuildUI(self)
 	self._tglHideSpam = tglHideSpam
 
 	-- ========================================================================
-	-- TOOLS TAB: utility features.
-	-- Card 1: reserved (placeholder; next feature lands here)
-	-- Card 2: Affix Protection (skip auto-rules on @affix@ items above iLvl floor)
-	-- Card 3: Bag Space (warn + summon-merchant threshold)
+	-- FILTERS TAB (internal key "tools" -- kept stable for SV migration):
+	--   Card 1: Quality Filters     (Auto-Delete Junk/Common, Auto-Sell Greens)
+	--   Card 2: Affix Protection    (No Auto-Sell + Min iLvl + Audit Lists)
+	--   Card 3: Affix Display       (Show affix dot + Only missing affixes)
 	-- ========================================================================
 	local toolsPage = tabPages.tools
 
@@ -2002,32 +2350,127 @@ local function BuildUI(self)
 	local tCard2 = MakeToolsCard(cardW + CARD_GAP)
 	local tCard3 = MakeToolsCard((cardW + CARD_GAP) * 2)
 
-	-- Filters Card 1: Quality Filters (Auto-Delete Junk / Auto-Delete
-	-- Common / Auto-Sell Greens). Moved here from the General tab so
-	-- all auto-rule filters live on the Filters tab. The BoE Armor /
-	-- BoP / BoE Weapons sections below the tabs are the per-category
-	-- companion to these global quality filters.
+	-- Filters Card 1: Auto Actions. Each quality (Junk / Common / Greens)
+	-- is an independent segmented control showing Del / Sell pills (Greens
+	-- shows Sell only -- deleting greens by quality is rarely the intended
+	-- outcome; if a user wants that they can put a specific green on the
+	-- Delete list explicitly). The default state for every row is "off"
+	-- (no pill highlighted). Clicking a pill activates that action;
+	-- clicking the active pill again deselects (back to off). Colors
+	-- follow the semantic palette: red for delete, blue for sell.
+	-- Migration from the old three-checkbox layout (autoGray /
+	-- autoDeleteCommon / autoSellGreens booleans) runs at PLAYER_LOGIN
+	-- in RunDBMigrations v3. v4 normalizes any legacy
+	-- qualityActionGreens=="delete" back to "off" since Greens has no
+	-- Delete pill in this UI -- without the migration the stored "delete"
+	-- would render as no-pill-active (visually equivalent to off), but
+	-- it's cleaner to normalize the data than leave the gotcha lying.
+	--
+	-- Wrapped in `do ... end` so the per-state tables, helper, and three
+	-- pill locals don't bump BuildUI past Lua 5.1's 200-local cap. The
+	-- segmented controls themselves survive on self._pillJunk/_pillCommon/
+	-- _pillGreens for state restore in Refresh and the OnClick handlers
+	-- below.
+	do
 	local card1Title = MakeText(tCard1, 11, C_ACCENT, "OUTLINE")
 	card1Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
-	card1Title:SetText("Quality Filters")
+	card1Title:SetText("Auto Actions")
 
-	local tglGray = MakeToggle(tCard1, "Auto-Delete Junk", C_ACCENT,
-		"Automatically destroy poor (gray) quality items. Quest items, shirts, and tabards are protected. Items on the Keep list are also protected.")
-	tglGray:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
-	tglGray:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglGray = tglGray
+	-- State definitions. Active appearance only; the segmented control
+	-- paints inactive segments with its own neutral-gray treatment so the
+	-- "all gray until you click one" visual works automatically. Labels
+	-- stay short because segments are narrow. 3-color semantic palette
+	-- HARD RULE (conventions §11): C_RED for destructive, C_BLUE for
+	-- transformational.
+	local QSTATE_DEL = {
+		value = "delete",
+		label = "Del",
+		tooltip = "Auto-deletes items of this quality. Click again to turn off. Keep-list items, quest items, shirts, and tabards are safe.",
+		bg     = { C_RED[1], C_RED[2], C_RED[3], 0.85 },
+		border = C_RED,
+		fg     = { 1, 1, 1, 1 },
+	}
+	local QSTATE_SELL = {
+		value = "sell",
+		label = "Sell",
+		tooltip = "Auto-sells items of this quality at vendors. Click again to turn off. Keep-list items and quest items are safe.",
+		bg     = { C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.85 },
+		border = C_BLUE,
+		fg     = { 1, 1, 1, 1 },
+	}
+	local QUALITY_STATES_DEL_SELL  = { QSTATE_DEL, QSTATE_SELL }
+	local QUALITY_STATES_SELL_ONLY = { QSTATE_SELL }
 
-	local tglDelCommon = MakeToggle(tCard1, "Auto-Delete Common", C_ACCENT,
-		"Automatically destroy Common (white) quality equippable gear. Quest items, reagents, consumables, shirts, tabards, and items on the Keep list are protected.")
-	tglDelCommon:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
-	tglDelCommon:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglDelCommon = tglDelCommon
+	-- Helper that builds one row inside the card: [label LEFT, segments RIGHT].
+	-- Returns the segmented control so BuildUI can wire up state restore.
+	-- Profile-field arg is captured by the OnChange closure so a single
+	-- helper covers all three rows without per-row glue code.
+	--
+	-- Per-segment width is fixed (SEG_W) -- both 2-segment and 1-segment
+	-- rows use the same pill size. The control's total width grows with
+	-- segment count, and since each row anchors its RIGHT edge to the same
+	-- card boundary, the rightmost pill (Sell) always lines up vertically
+	-- across rows.
+	local SEG_W = 42
+	local SEG_H = 18
+	local function MakeQualityRow(label, profileField, states, tooltip, y)
+		local txt = MakeText(tCard1, 10, C_TEXT, "OUTLINE")
+		txt:SetPoint("LEFT", tCard1, "TOPLEFT", CARD_INNER_PAD_X, y - SEG_H/2)
+		txt:SetText(label)
+		local seg = MakeSegmentedControl(tCard1, SEG_W, SEG_H, states, "off", function(newValue)
+			-- Write the new value to the active profile and refresh the
+			-- cached-profile upvalue used by the hot path. No bag refresh
+			-- needed -- the next DeleteItems / SellItems tick reads the
+			-- new value naturally.
+			GetActiveProfile(GetDB())[profileField] = newValue
+			if _G.AutoDelete_RefreshCachedProfile then
+				_G.AutoDelete_RefreshCachedProfile()
+			end
+		end)
+		seg:SetPoint("RIGHT", tCard1, "TOPRIGHT", -CARD_INNER_PAD_X, y - SEG_H/2)
+		-- Tooltip on the label-side area (hover the row label for an
+		-- explanation of what the quality covers; segments have their own
+		-- per-action tooltips wired inside MakeSegmentedControl).
+		local tipFrame = CreateFrame("Frame", nil, tCard1)
+		tipFrame:SetPoint("TOPLEFT", txt, "TOPLEFT", 0, 0)
+		tipFrame:SetPoint("BOTTOMRIGHT", seg, "BOTTOMLEFT", -4, 0)
+		tipFrame:EnableMouse(true)
+		tipFrame:SetScript("OnEnter", function(self)
+			GameTooltip:SetOwner(self, "ANCHOR_TOP")
+			GameTooltip:SetText(label, 1, 1, 1)
+			GameTooltip:AddLine(tooltip, C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		tipFrame:SetScript("OnLeave", function() GameTooltip:Hide() end)
+		return seg
+	end
 
-	local tglSellGreensGen = MakeToggle(tCard1, "Auto-Sell Greens", C_ACCENT,
-		"Automatically sell Uncommon (green) gear at vendors. Equippable gear only. Quest items and items on the Keep list are protected.")
-	tglSellGreensGen:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -68)
-	tglSellGreensGen:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglSellGreensGen = tglSellGreensGen
+	-- Three rows, anchored at the standard CARD_ROW1/2/3 y-positions so
+	-- they line up with widgets on Cards 2 and 3 (uniformity rule).
+	local pillJunk = MakeQualityRow(
+		"Junk",
+		"qualityActionJunk",
+		QUALITY_STATES_DEL_SELL,
+		"Gray-quality (poor) items. Quest items, shirts, tabards, and Keep-list items are always safe.",
+		-24)
+	self._pillJunk = pillJunk
+
+	local pillCommon = MakeQualityRow(
+		"Common",
+		"qualityActionCommon",
+		QUALITY_STATES_DEL_SELL,
+		"White-quality gear only. Reagents, consumables, quest items, and Keep-list items are always safe.",
+		-46)
+	self._pillCommon = pillCommon
+
+	local pillGreens = MakeQualityRow(
+		"Greens",
+		"qualityActionGreens",
+		QUALITY_STATES_SELL_ONLY,
+		"Green-quality gear. Quest items and Keep-list items are safe. Greens can't be bulk-deleted by quality on purpose -- put a specific green on the Delete list if you want it gone.",
+		-68)
+	self._pillGreens = pillGreens
+	end  -- /Filters Card 1: Auto Actions
 
 	-- Filters Card 2: Affix Protection. Layout:
 	--   y=-6   title
@@ -2043,7 +2486,7 @@ local function BuildUI(self)
 	card2Title:SetText("Affix Protection")
 
 	local tglProtectAffixFromSell = MakeToggle(tCard2, "No Auto-Sell", C_ACCENT,
-		"When checked, items carrying PE's @affix@ tooltip marker skip Auto-Sell. Items below Min iLvl are NOT protected, so low-iLvl affix junk can still be sold.")
+		"Stops Auto-Sell from selling items with a Project Ebonhold affix. Low-iLvl affix items below the number on the next row can still be sold.")
 	tglProtectAffixFromSell:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
 	tglProtectAffixFromSell:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglProtectAffixFromSell = tglProtectAffixFromSell
@@ -2063,7 +2506,7 @@ local function BuildUI(self)
 	-- explains what the value does. Same text mirrored on the input box
 	-- below so hovering the editbox surface also shows the tip.
 	local AFFIX_FLOOR_TOOLTIP_TITLE = "Min iLvl"
-	local AFFIX_FLOOR_TOOLTIP_BODY  = "Affixed items at or above this iLvl are protected by the toggles above. Items below this iLvl are NOT protected and can still be auto-deleted or auto-sold by normal rules. Set to 0 to protect every affixed item regardless of iLvl."
+	local AFFIX_FLOOR_TOOLTIP_BODY  = "Affix items at this iLvl or higher are protected. Lower iLvl affix items can still be sold or deleted normally. Set to 0 to protect every affix item."
 	affixFloorRow:EnableMouse(true)
 	affixFloorRow:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_TOP")
@@ -2107,31 +2550,22 @@ local function BuildUI(self)
 	end)
 	self._affixIlvlEdit = affixFloorEdit
 
-	-- Standard card row geometry (uniformity rule). Every card on the
-	-- Filters tab uses these positions so widgets line up across cards
-	-- regardless of how full each card is. Card title sits at y=-6;
-	-- three content rows at the y-anchors below; 4px bottom pad in
-	-- cardH=92. Matches the Quality Filters (Card 1) toggle pattern.
-	local CARD_ROW_H   = 20
-	local CARD_ROW1_Y  = -24
-	local CARD_ROW2_Y  = -46
-	local CARD_ROW3_Y  = -68
-
 	-- Audit button: scans the user's Delete + Sell lists for items that
 	-- carry the @affix@ tooltip marker and prints a chat summary. Doesn't
 	-- modify the lists -- explicit user-list entries are user intent --
 	-- just surfaces "you have N affixed items on your Sell list" so the
-	-- user can review. Sits in the standard ROW 3 slot, identical
-	-- position and size to Card 3's Open Panel button so the two cards
-	-- read as a uniform row. C_BLUE (change/transform class) per the
-	-- 3-color semantic palette: this button reports/transforms a view of
-	-- the user's lists, it does not add or remove entries.
+	-- user can review. Sits in the bottom slot (y=-68) so this card's
+	-- final row aligns with the Process Bags button position on the
+	-- General tab and the Affix Display toggles on Filters Card 3.
+	-- C_BLUE (change/transform class) per the 3-color semantic palette:
+	-- this button reports/transforms a view of the user's lists, it does
+	-- not add or remove entries.
 	local auditBtn = MakeActionButton(tCard2, "Audit Lists for Affix Items", C_BLUE, function()
 		if _G.AutoDelete_AuditAffixOnLists then
 			_G.AutoDelete_AuditAffixOnLists(GetActiveProfile(db))
 		end
-	end, cardW - CARD_INNER_PAD_X * 2, CARD_ROW_H)
-	auditBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, CARD_ROW3_Y)
+	end, cardW - CARD_INNER_PAD_X * 2, 20)
+	auditBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -68)
 	auditBtn:SetScript("OnEnter", function(btn)
 		-- Hover backdrop comes from MakeActionButton (C_BLUE tint).
 		-- Layer the tooltip on top so the user sees the explanation.
@@ -2140,7 +2574,7 @@ local function BuildUI(self)
 		btn._text:SetTextColor(1, 1, 1)
 		GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 		GameTooltip:SetText("Audit Lists", 1, 1, 1)
-		GameTooltip:AddLine("Scans your Delete and Sell lists for items that carry PE's @affix@ tooltip marker. Prints a chat summary with item links. Doesn't change the lists.",
+		GameTooltip:AddLine("Checks your Delete and Sell lists for items with a Project Ebonhold affix. Prints what it finds in chat. Doesn't change your lists.",
 			C_DIM[1], C_DIM[2], C_DIM[3], true)
 		GameTooltip:Show()
 	end)
@@ -2150,50 +2584,68 @@ local function BuildUI(self)
 		GameTooltip:Hide()
 	end)
 
-	-- Filters Card 3: Process Bags launcher. Moved here from Tools Card 1
-	-- so the Filters tab's middle card (Affix Protection) reads as the
-	-- focal point and the launcher sits in the trailing slot. Card shows
-	-- a title, a live count summary, and a button that toggles the
-	-- standalone AutoDeleteProcessPanel. The count refreshes on panel
-	-- Refresh and on BAG_UPDATE via the hook in AutoDelete.lua.
-	local card3Title = MakeText(tCard3, 11, C_ACCENT, "OUTLINE")
-	card3Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
-	card3Title:SetText("Process Bags")
+	-- Filters Card 3: Affix Display (Option B reorg per user request
+	-- 2026-05-20). The dot-display toggles moved here from General -> Card 3
+	-- so all affix-related controls live together on the Filters tab.
+	-- Two tightly-coupled toggles + a diagnostic button:
+	--   Row 1: Show affix dot              (master gate for any dot display)
+	--   Row 2: Only missing affixes        (collection mode, gated by Row 1)
+	--   Row 3: Scan Learned Affixes        (refresh PE mirror + print roster)
+	--
+	-- The Scan button shares the bottom-of-card slot with the Audit Lists
+	-- button on Card 2 (y=-68) so the two diagnostic actions line up
+	-- visually across the Filters tab.
+	--
+	-- Wrapped in `do ... end` so the card-internal locals (title FS,
+	-- toggle frames, scan button) don't bump BuildUI past Lua 5.1's
+	-- 200-local cap. The toggles are exported on self._tglShowAffixDot /
+	-- self._tglAffixCollection -- OnClick handlers and state restoration
+	-- below reach them through `self` so the bare locals can vanish.
+	do
+		local card3Title = MakeText(tCard3, 11, C_ACCENT, "OUTLINE")
+		card3Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+		card3Title:SetText("Affix Display")
 
-	local processCount = MakeText(tCard3, 9, C_DIM)
-	processCount:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
-	processCount:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -24)
-	processCount:SetJustifyH("LEFT")
-	processCount:SetWordWrap(true)
-	processCount:SetText("...")
-	self._processCount = processCount
+		local tglShowAffixDot = MakeToggle(tCard3, "Show affix dot", C_ACCENT,
+			"Puts a small dot on bag items that have a Project Ebonhold affix. Dot color shows the tier (I white, II green, III blue, IV purple, V orange). Gold dot means an affix you haven't learned yet. Works on default bags and ElvUI bags.")
+		tglShowAffixDot:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+		tglShowAffixDot:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+		self._tglShowAffixDot = tglShowAffixDot
 
-	-- Open Panel: launches the standalone Process Bags window. C_BLUE
-	-- (change/transform class) per the 3-color semantic palette: opening
-	-- a sub-window transforms the user's view, it does not add or remove
-	-- data. Uses the standard ROW3 anchor so this button sits at the same
-	-- size and same y as the Audit Lists button on tCard2.
-	local launchBtn = MakeActionButton(tCard3, "Open Panel", C_BLUE, function()
-		if _G.AutoDelete_ToggleProcessPanel then _G.AutoDelete_ToggleProcessPanel() end
-	end, cardW - CARD_INNER_PAD_X * 2, CARD_ROW_H)
-	launchBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, CARD_ROW3_Y)
+		local tglAffixCollection = MakeToggle(tCard3, "Only missing affixes", C_ACCENT,
+			"Only puts a gold dot on items with affixes you haven't learned yet. Items with affixes you already have stay clean. Also protects unknown affixes from being sold or deleted. Needs Show affix dot turned on.")
+		tglAffixCollection:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
+		tglAffixCollection:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+		self._tglAffixCollection = tglAffixCollection
 
-	function self:_refreshProcessCount()
-		if not self._processCount then return end
-		local getter = _G.AutoDelete_ProcessScanCounts
-		if not getter then return end
-		local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
-		local c = getter(profile)
-		if not c or c.total == 0 then
-			self._processCount:SetText("No eligible items")
-			return
-		end
-		local parts = {}
-		if c.disenchant > 0 then table.insert(parts, c.disenchant .. " DE") end
-		if c.mill       > 0 then table.insert(parts, c.mill       .. " Mill") end
-		if c.prospect   > 0 then table.insert(parts, c.prospect   .. " Prospect") end
-		if c.open       > 0 then table.insert(parts, c.open       .. " Open") end
-		self._processCount:SetText(c.total .. " items: " .. table.concat(parts, ", "))
+		-- Scan Learned Affixes button. Calls _G.AutoDelete_ScanLearnedAffixes
+		-- which refreshes the addon's owned-affix mirror from PE and prints
+		-- a tier-grouped roster to chat. C_BLUE (change/transform class) per
+		-- the 3-color semantic palette: this button reports/refreshes data,
+		-- it doesn't add or remove anything.
+		local scanBtn = MakeActionButton(tCard3, "Scan Learned Affixes", C_BLUE, function()
+			if _G.AutoDelete_ScanLearnedAffixes then
+				_G.AutoDelete_ScanLearnedAffixes()
+			end
+		end, cardW - CARD_INNER_PAD_X * 2, 20)
+		scanBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -68)
+		scanBtn:SetScript("OnEnter", function(btn)
+			-- Hover backdrop comes from MakeActionButton (C_BLUE tint).
+			-- Layer the tooltip on top so the user sees the explanation.
+			btn:SetBackdropColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.3)
+			btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
+			btn._text:SetTextColor(1, 1, 1)
+			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+			GameTooltip:SetText("Scan Learned Affixes", 1, 1, 1)
+			GameTooltip:AddLine("Opens a window showing every affix you have learned, grouped by tier.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		scanBtn:SetScript("OnLeave", function(btn)
+			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+			btn._text:SetTextColor(unpack(C_TEXT))
+			GameTooltip:Hide()
+		end)
 	end
 
 	-- ========================================================================
@@ -2534,7 +2986,7 @@ local function BuildUI(self)
 
 	-- CARD 1: Auto-Invite master toggle + keyword text input
 	local tglAutoInvite = MakeToggle(aCard1, "Auto-Invite", C_ACCENT,
-		"Whispers containing any configured keyword trigger auto-invite. Requires you to be group leader or raid assistant.")
+		"When someone whispers you one of the keywords below, you invite them to your group. You need to be the leader or a raid assistant.")
 	tglAutoInvite:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglAutoInvite:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglAutoInvite = tglAutoInvite
@@ -2597,7 +3049,7 @@ local function BuildUI(self)
 
 	-- CARD 2: Apply loot rule (main toggle) + dropdown
 	local tglLootRule = MakeToggle(aCard2, "Apply loot rule", C_ACCENT,
-		"After auto-inviting, set the party's loot rule to your chosen method.")
+		"After someone is auto-invited, sets the party's loot rule to the one you pick below.")
 	tglLootRule:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglLootRule:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglLootRule = tglLootRule
@@ -3253,15 +3705,15 @@ local function BuildUI(self)
 
 	-- Card 1: BoE Armor
 	local boeArmor = MakeSellCategoryCard(self, "BoE Armor", yOff, CARD_H, {
-		enableTooltip = "Sell Bind-on-Equip armor and accessories (rings, necks, trinkets, etc.) that match the Rare/Epic toggles and fall inside the iLvl range. Excludes weapons and other Hand Affix Enchant eligible items, which have their own section. Quest items and items on the Keep list are protected.",
-		rarityNoun    = "BoE armor (excludes weapons and Hand-Affix targets)",
+		enableTooltip = "Sells Bind-on-Equip armor and accessories (rings, necks, trinkets) that match the Rare/Epic toggles and the iLvl range below. Weapons go in the BoE Weapons section. Keep-list and quest items are safe.",
+		rarityNoun    = "BoE armor (no weapons)",
 	})
 	self._boeArmor = boeArmor
 	yOff = yOff - 16 - CARD_H - SECTION_GAP
 
 	-- Card 2: BoP
 	local bop = MakeSellCategoryCard(self, "BoP", yOff, CARD_H, {
-		enableTooltip = "Sell Bind-on-Pickup gear (any slot, including weapons) that matches the Rare/Epic toggles and falls inside the iLvl range. Quest items and items on the Keep list are protected.",
+		enableTooltip = "Sells Bind-on-Pickup gear (any slot, including weapons) that matches the Rare/Epic toggles and the iLvl range below. Keep-list and quest items are safe.",
 		rarityNoun    = "BoP gear",
 	})
 	self._bop = bop
@@ -3269,7 +3721,7 @@ local function BuildUI(self)
 
 	-- Card 3: BoE Weapons
 	local boeWeapons = MakeSellCategoryCard(self, "BoE Weapons", yOff, CARD_H, {
-		enableTooltip = "Sell Bind-on-Equip weapon-slot items (weapons, shields, holdables, ranged, thrown, relics) that match the Rare/Epic toggles and fall inside the iLvl range. Quest items and items on the Keep list are protected. Takes priority over BoE Armor for items that match both.",
+		enableTooltip = "Sells Bind-on-Equip weapons, shields, ranged, thrown, and relics that match the Rare/Epic toggles and the iLvl range below. Wins over BoE Armor when an item fits both. Keep-list and quest items are safe.",
 		rarityNoun    = "BoE weapon-slot items",
 	})
 	self._boeWeapons = boeWeapons
@@ -3970,23 +4422,10 @@ local function BuildUI(self)
 		end
 	end)
 
-	tglGray:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).autoGray = btn._checked
-	end)
-
-	tglDelCommon:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).autoDeleteCommon = btn._checked
-	end)
-
-	tglSellGreensGen:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).autoSellGreens = btn._checked
-	end)
+	-- (Old tglGray / tglDelCommon / tglSellGreensGen OnClick wiring
+	-- removed -- Filters Card 1 now uses cycle pills. The pill's
+	-- onChange closure writes to the profile directly, so no separate
+	-- wiring block is needed here. See MakeQualityRow above.)
 
 	-- =========================================================================
 	-- Sell-rule wiring (v3.02 category-based schema)
@@ -4298,10 +4737,12 @@ local function BuildUI(self)
 		end
 	end)
 
-	-- General tab: Show affix dot toggle (sits next to Scan Speed). Forces
-	-- an immediate dot refresh so the visual state matches the toggle
-	-- without waiting for a natural bag event.
-	tglShowAffixDot:SetScript("OnClick", function(btn)
+	-- Filters tab -> Affix Display: Show affix dot toggle. Forces an
+	-- immediate dot refresh so the visual state matches the toggle
+	-- without waiting for a natural bag event. Accessed through `self`
+	-- because the toggle's local scope was wrapped in a `do/end` to
+	-- relieve BuildUI's 200-local cap.
+	self._tglShowAffixDot:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
 		GetActiveProfile(db).showAffixDot = btn._checked
@@ -4310,6 +4751,45 @@ local function BuildUI(self)
 		end
 		if _G.AutoDelete_RefreshAffixDots then
 			_G.AutoDelete_RefreshAffixDots()
+		end
+	end)
+
+	-- Filters tab -> Affix Display: Collection Mode toggle. Mirrors the
+	-- `/del collection` slash command. On toggle-on we re-pull PE's
+	-- learned-affix table (it may have grown since the player last
+	-- reloaded) and force a dot refresh so existing bag slots reflect
+	-- the new owned/missing partition immediately. Accessed through
+	-- `self` for the same do/end-scope reason as Show affix dot above.
+	self._tglAffixCollection:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		local p = GetActiveProfile(db)
+		p.affixCollectionMode = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+		-- Re-mirror PE's learned-affix map so the next dot evaluation
+		-- sees current data. Safe no-op if PE isn't loaded.
+		if _G.AutoDelete_RefreshOwnedAffixes then
+			_G.AutoDelete_RefreshOwnedAffixes()
+		end
+		if _G.AutoDelete_RefreshAffixDots then
+			_G.AutoDelete_RefreshAffixDots()
+		end
+		-- Chat confirmation matching the slash-command output so the user
+		-- gets the same "37 owned affixes mirrored from PE" signal whether
+		-- they toggle via UI or slash.
+		if btn._checked then
+			local count = 0
+			for _ in pairs(_G.AutoDelete_OwnedAffixes or {}) do
+				count = count + 1
+			end
+			print("|cffff8000[AutoDelete]|r affix collection mode |cff00ff00ON|r. "
+				.. count .. " owned affixes mirrored from PE. Dots will now "
+				.. "show ONLY for missing affixes (in gold).")
+		else
+			print("|cffff8000[AutoDelete]|r affix collection mode |cffff5555OFF|r. "
+				.. "Dots show on all affixed items, colored by tier.")
 		end
 	end)
 
@@ -4447,6 +4927,10 @@ local function BuildUI(self)
 		tglRaw:SetChecked(false)
 		rawBoxHolder:Hide()
 		listBox:Show()
+		-- Switching lists -> the previous page index belongs to the OLD list
+		-- and means nothing in the new one. Reset before Refresh so the user
+		-- lands on page 1 of whatever they switched to.
+		self._currentPage = 1
 		self:Refresh()
 	end
 	deleteTab:SetScript("OnClick", function() SwitchTab("delete") end)
@@ -4479,6 +4963,10 @@ local function BuildUI(self)
 		if self._searchClear then
 			if text ~= "" then self._searchClear:Show() else self._searchClear:Hide() end
 		end
+		-- Filter changed -> the visible set is now a different identity, so
+		-- the user's previous page index is no longer meaningful. Reset to
+		-- page 1 so they see results from the top of the filtered list.
+		self._currentPage = 1
 		self:Refresh()
 	end)
 
@@ -4655,9 +5143,12 @@ local function BuildUI(self)
 		boeWeapons.maxBox:SetText(tostring(p.boeWeaponsIlvlMax or 199))
 
 		-- Filters tab: Quality Filters (Card 1, moved from General tab)
-		tglGray:SetChecked(p.autoGray)
-		tglDelCommon:SetChecked(p.autoDeleteCommon)
-		tglSellGreensGen:SetChecked(p.autoSellGreens)
+		-- Quality Filters card now uses cycle pills, not checkboxes.
+		-- Read the tri-state enum field; default to "off" if the migration
+		-- somehow hasn't run yet (defensive; shouldn't happen post-v3).
+		self._pillJunk:SetValue(p.qualityActionJunk or "off")
+		self._pillCommon:SetValue(p.qualityActionCommon or "off")
+		self._pillGreens:SetValue(p.qualityActionGreens or "off")
 
 		-- General tab: Auto-Repair (Card 2, moved from Goblin tab)
 		tglRepair:SetChecked(p.autoRepair)
@@ -4677,7 +5168,8 @@ local function BuildUI(self)
 		lootDD:SetValue(p.autoInviteLootRule or "freeforall")
 		tglConvertRaid:SetChecked(p.autoInviteConvertToRaid)
 		speedDD:SetValue((p.scanInterval and p.scanInterval >= 0.5) and p.scanInterval or 0.5)
-		tglShowAffixDot:SetChecked(p.showAffixDot ~= false)  -- default true if nil
+		self._tglShowAffixDot:SetChecked(p.showAffixDot ~= false)  -- default true if nil
+		self._tglAffixCollection:SetChecked(p.affixCollectionMode == true)  -- default false if nil
 		UpdateTabColors()
 
 		-- Also refresh tracking stats if the Tracking tab is currently shown.
@@ -4703,10 +5195,15 @@ local function BuildUI(self)
 					table.insert(self._filtered, e)
 				end
 			end
-			-- Reset to page 1 when filter/text changes
-			self._currentPage = 1
-			-- Tell FauxScrollFrame about the items in the current page so scrollbar
-			-- appears and can scroll through the items within the page.
+			-- DO NOT reset self._currentPage here. Refresh runs on every
+			-- list mutation (X-button delete, drag-add, cache poll), and
+			-- a blanket reset jumps the user off whatever page they were
+			-- viewing -- exactly the bug we hit when deleting from page 2+.
+			-- Page-1 resets are triggered explicitly at the two call sites
+			-- where the visible set genuinely changes identity: search-box
+			-- OnTextChanged (filter applied) and SwitchTab (list switched).
+			-- The UpdateListRows clamp below handles the "deleted the last
+			-- item on the page" edge case by stepping back one page.
 			local pageItemCount = math.min(self._pageSize, #self._filtered)
 			FauxScrollFrame_Update(scroll, pageItemCount, NUM_ROWS, ROW_HEIGHT)
 			self:UpdateListRows()

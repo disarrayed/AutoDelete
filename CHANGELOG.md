@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.20] - 2026-05-22
+
+### Added
+
+- **Scan Learned Affixes button** on the Filters tab (Affix Display card). Opens a themed scrollable window listing every Project Ebonhold affix you've learned, grouped by tier. Affix names without a tier suffix (e.g. weapon affixes) appear under a separate "Weapon Affix" section.
+
+### Changed
+
+- **Quality Filters card renamed to Auto Actions.** The Off / Delete / Sell cycle pill is replaced with a Del / Sell segmented control: click a pill to light it up, click the lit pill again to turn it off (= no auto-action). Greens shows only Sell to prevent accidental bulk-delete of green gear. Existing settings carry over via a silent migration.
+- **Tooltips across the settings panel rewritten** for clarity. Shorter, plain-language, less jargon.
+- **Affix Display tier-color reference moved** into the "Show affix dot" toggle's tooltip — the inline footer that listed the color key is gone.
+
+### Fixed
+
+- **Deleting an item with the X button from page 2 or later no longer kicks the list back to page 1.** The page index is preserved across deletes; the list automatically steps back one page only if you delete the last item on the last page.
+- **Loot bursts no longer pop the Goblin Merchant before deletes can clear bags.** Delete throughput raised from 5 to 8 items per scanner tick (~16 items/sec at the default 0.5s interval), and the bags-full debounce before the merchant summons raised from 1.5s to 2.0s. Combined effect: ~32 deletable items can be absorbed during a loot burst before the merchant fires, up from ~15.
+
 ## [3.19] - 2026-05-13
 
 ### Added
