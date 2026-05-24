@@ -2,11 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [3.20] - 2026-05-22
+## [3.20] - 2026-05-24
 
 ### Added
 
 - **Scan Learned Affixes button** on the Filters tab (Affix Display card). Opens a themed scrollable window listing every Project Ebonhold affix you've learned, grouped by tier. Affix names without a tier suffix (e.g. weapon affixes) appear under a separate "Weapon Affix" section.
+- **Keybinds tab** with One-Key Disenchant, Open, Mill, and Prospect. Bind a key to each in the in-panel capture row; each row has a "Filters" button to tune what that one-key action targets.
+- **Process Bags panel.** Standalone window showing what AutoDelete would do to each item in your bags (delete / sell / keep / leave alone). Open via the Tools tab "Open Panel" button or `/del process`.
+- **Audit Lists button** on the Affix Protection card. Scans your Delete and Sell lists for affixed items that would now be protected by Affix Protection.
+- **`/del bench`, `/del spike`, `/del goblin`** — power-user diagnostic commands for measuring loot-burst performance and the auto-summon decision. See in-game help via `/del`.
 
 ### Changed
 
@@ -14,10 +18,25 @@ All notable changes to this project will be documented in this file.
 - **Tooltips across the settings panel rewritten** for clarity. Shorter, plain-language, less jargon.
 - **Affix Display tier-color reference moved** into the "Show affix dot" toggle's tooltip — the inline footer that listed the color key is gone.
 
+### Improved
+
+- **Delete bursts no longer freeze the frame.** The delete pipeline now processes items at a steady throttle (~9/sec) instead of bursting 8 at a time. Per-frame cost dropped from ~41 ms to under 10 ms — no more visible chug when AutoDelete is clearing loot.
+- **Goblin Merchant won't pop too early during a loot storm.** The bag-full timer now waits until AutoDelete has actually had a chance to scan and start clearing before counting down. Only fires the Merchant when drain genuinely can't keep up.
+- **Safer mid-burst Keep-list changes.** Items are re-checked against your Keep list and Affix Protection one final time right before being deleted. Add an item to Keep while a burst is clearing and it gets skipped, not deleted under the old decision.
+- **Disable mid-burst now stops the queue.** Re-enabling does a fresh scan; it doesn't resume deleting items queued under prior conditions.
+
 ### Fixed
 
 - **Deleting an item with the X button from page 2 or later no longer kicks the list back to page 1.** The page index is preserved across deletes; the list automatically steps back one page only if you delete the last item on the last page.
-- **Loot bursts no longer pop the Goblin Merchant before deletes can clear bags.** Delete throughput raised from 5 to 8 items per scanner tick (~16 items/sec at the default 0.5s interval), and the bags-full debounce before the merchant summons raised from 1.5s to 2.0s. Combined effect: ~32 deletable items can be absorbed during a loot burst before the merchant fires, up from ~15.
+- **Open Panel and Filters buttons on the Tools tab now show a hover tooltip** explaining what they do.
+- **Bag-space warning no longer spams chat** when bags hover around the threshold. The warning was removed entirely — the Goblin Merchant arriving is the visible "bags filling up" signal now.
+- **Process Bags window now opens in front of the settings panel** instead of behind it. Was caused by a frame-strata mismatch on the launcher button.
+
+### Performance note — ElvUI bag UI at high loot rates
+
+If you still see pickup stutter with v3.20 and use ElvUI, the cost is in ElvUI's bag UI rather than AutoDelete. ElvUI's "Show Bind on Equip/Use Text" option runs a hidden tooltip scan on every bag slot every time bags update. At loot-bot or AOE-farm rates that's hundreds of tooltip scans per frame.
+
+**Fix:** open `/ec` → Bags and uncheck **Show Bind on Equip/Use Text**. In our testing this dropped worst-frame stutter by ~10× during heavy loot bursts. AutoDelete's own measured contribution during those frames was ~1% of frame time.
 
 ## [3.19] - 2026-05-13
 

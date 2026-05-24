@@ -65,6 +65,947 @@ local API = {
 _G.AutoDelete_PerfEnabled = _G.AutoDelete_PerfEnabled or false
 _G.AutoDelete_PerfStats   = _G.AutoDelete_PerfStats or {}
 
+-- ============================================================================
+-- Spike debug (v3.20)
+-- ============================================================================
+-- Frame-level diagnostic for catching pickup-time stutter. When enabled, the
+-- scanner OnUpdate watches `elapsed` (the previous frame's duration) and -- if it exceeds a threshold -- snapshots per-frame counters into a ring
+-- buffer and rate-limits a chat print. The goal is to attribute spikes to
+-- specific work (BAG_UPDATE storm, ElvUI repaint, tooltip scans, our own
+-- walks/drain, etc.) without depending on a fixed list of perf phases.
+--
+-- attribMs is the sum of every AutoDelete_PerfEnd duration during the
+-- frame. If a spike has frameMs=47 and attribMs=3, only 3ms is accounted
+-- for by AutoDelete's instrumented phases -- the remaining 44ms came from
+-- somewhere else (Blizzard internals, another addon, ElvUI rebuild
+-- between our hook calls, etc.). Trustworthy ONLY when every pickup path
+-- is wrapped in PerfBegin/PerfEnd; see the audit comment in
+-- AutoDelete_SpikeRecord for the current list.
+--
+-- All state lives on _G to dodge Lua 5.1's 200-local cap on the main chunk.
+_G.AutoDelete_SpikeDebug          = _G.AutoDelete_SpikeDebug          or false
+-- Threshold default 33ms (was 20ms). At 20ms the chronological ring was
+-- dominated by baseline server frame jitter (~17-22ms native), evicting
+-- the actually-bad frames during a burst. 33ms catches real stutters
+-- (dropped frames at 30fps) while leaving baseline jitter in the noise
+-- floor. The worst-N ring (below) captures the actually-worst frames
+-- regardless of when they happened in the session.
+_G.AutoDelete_SpikeThresholdMs    = _G.AutoDelete_SpikeThresholdMs    or 33
+_G.AutoDelete_SpikeAttribMs       = _G.AutoDelete_SpikeAttribMs       or 0
+_G.AutoDelete_SpikeCounters       = _G.AutoDelete_SpikeCounters       or {}
+_G.AutoDelete_SpikeRing           = _G.AutoDelete_SpikeRing           or {}
+_G.AutoDelete_SpikeRingCap        = _G.AutoDelete_SpikeRingCap        or 20
+_G.AutoDelete_SpikeRingNext       = _G.AutoDelete_SpikeRingNext       or 1
+-- Worst-N ring (v3.20): top frames by frameMs, never evicted unless beaten.
+-- Solves "post-burst quiet period floods the chronological ring with
+-- baseline jitter, evicting the burst frames we actually wanted to see."
+_G.AutoDelete_SpikeWorstRing      = _G.AutoDelete_SpikeWorstRing      or {}
+_G.AutoDelete_SpikeWorstCap       = _G.AutoDelete_SpikeWorstCap       or 20
+_G.AutoDelete_SpikeChatLastAt     = _G.AutoDelete_SpikeChatLastAt     or 0
+_G.AutoDelete_SpikeChatCooldown   = _G.AutoDelete_SpikeChatCooldown   or 2.0
+_G.AutoDelete_SpikeSuppressedCount = _G.AutoDelete_SpikeSuppressedCount or 0
+
+-- v3.20 Goblin defer tracking. Used by the bag-full check below to
+-- decide WHEN it's fair to start the BAGS_FULL_DELAY countdown. The
+-- old logic started the timer the moment free slots dropped below
+-- threshold, which fired Goblin even when AutoDelete hadn't yet had
+-- a chance to walk + drain (e.g. during a sustained loot storm where
+-- BAG_QUIESCENCE never settles). New logic distinguishes:
+--   State 1: bags below threshold, pipeline has NOT scanned yet
+--            -> defer Goblin, do NOT start the timer
+--   State 2: bags below threshold, pipeline is active (queue has items,
+--            or drain/enqueue recent)
+--            -> start timer, reset on queue-shrink, fire if queue
+--               stops shrinking for BAGS_FULL_DELAY
+--   State 3: bags below threshold, last walk found NO deletable
+--            candidates
+--            -> start timer immediately, fire after BAGS_FULL_DELAY
+-- Tracking fields:
+_G.AutoDelete_LastDeleteWalkAt        = _G.AutoDelete_LastDeleteWalkAt        or 0
+_G.AutoDelete_LastDeleteWalkEnqueued  = _G.AutoDelete_LastDeleteWalkEnqueued  or 0
+_G.AutoDelete_LastDrainPopAt          = _G.AutoDelete_LastDrainPopAt          or 0
+_G.AutoDelete_LastEnqueueAt           = _G.AutoDelete_LastEnqueueAt           or 0
+_G.AutoDelete_BagsBelowAt             = _G.AutoDelete_BagsBelowAt             or 0
+-- Last fire / defer reason for /del goblin diagnostic.
+_G.AutoDelete_GoblinLastFireAt        = _G.AutoDelete_GoblinLastFireAt        or 0
+_G.AutoDelete_GoblinLastFireReason    = _G.AutoDelete_GoblinLastFireReason    or "none"
+_G.AutoDelete_GoblinLastDeferReason   = _G.AutoDelete_GoblinLastDeferReason   or "none"
+-- Recency window for "drain/enqueue happened recently" (seconds). Tied
+-- to BAG_QUIESCENCE: if drain or enqueue fired within 2 seconds, the
+-- pipeline counts as "busy" regardless of current queue length.
+_G.AutoDelete_GoblinRecencyS          = _G.AutoDelete_GoblinRecencyS          or 2.0
+
+-- v3.20 ElvUI hook A/B gate. When true, the ElvUI:UpdateSlot hook
+-- counts the call (updSlot counter) then returns immediately -- no
+-- DecideDot, no SetButtonAffixDot, no PerfBegin. Used by /del elvuihook
+-- to isolate whether AutoDelete's per-slot work is amplifying ElvUI's
+-- own per-pickup stutter, without reloading. Default false (hook
+-- active). Not persisted -- resets to false on /reload, which matches
+-- the "diagnostic flag, opt in per session" semantic.
+_G.AutoDelete_ElvUIHookDisabled = _G.AutoDelete_ElvUIHookDisabled or false
+
+-- ============================================================================
+-- Spike session counters (v3.20)
+-- ============================================================================
+-- Cumulative totals across an entire spike-debug session. Per-frame counters
+-- in _G.AutoDelete_SpikeCounters get wiped every OnUpdate tick; these
+-- accumulate so we can answer "how much work happened in this bench window?"
+-- Used by /del bench finalize to attach session totals to saved benches.
+--
+-- Reset by /del spike on, /del spike clear, and /del bench arm. Otherwise
+-- they keep growing until the user explicitly clears.
+_G.AutoDelete_SpikeSession = _G.AutoDelete_SpikeSession or {
+	startedAt      = 0,
+	bagUpd         = 0,
+	bagUpdDel      = 0,
+	updSlot        = 0,
+	slotsWalked    = 0,
+	ttScanRan      = 0,
+	axQueued       = 0,
+	axRan          = 0,
+	dWalk          = 0,
+	dEarly         = 0,
+	drain          = 0,
+	drainSkip      = 0,
+	sell           = 0,
+	find           = 0,
+	itemsEnqueued  = 0,
+	itemsDeleted   = 0,
+	spikesCaptured = 0,
+}
+
+function _G.AutoDelete_SpikeSessionReset()
+	local s = _G.AutoDelete_SpikeSession
+	s.startedAt      = GetTime()
+	s.bagUpd         = 0
+	s.bagUpdDel      = 0
+	s.updSlot        = 0
+	s.slotsWalked    = 0
+	s.ttScanRan      = 0
+	s.axQueued       = 0
+	s.axRan          = 0
+	s.dWalk          = 0
+	s.dEarly         = 0
+	s.drain          = 0
+	s.drainSkip      = 0
+	s.sell           = 0
+	s.find           = 0
+	s.itemsEnqueued  = 0
+	s.itemsDeleted   = 0
+	s.spikesCaptured = 0
+end
+
+-- ============================================================================
+-- Bench harness (v3.20)
+-- ============================================================================
+-- Auto-arming benchmark runner. State machine: IDLE -> ARMED (waiting for
+-- first BAG_UPDATE) -> ACTIVE (collecting) -> finalized (saved to SV +
+-- report shown) -> IDLE. Transitions:
+--   /del bench           IDLE   -> ARMED (snapshot config, reset counters)
+--                        ARMED  -> IDLE  (cancel, never saw activity)
+--                        ACTIVE -> FORCE-FINALIZE (manual stop)
+--   BAG_UPDATE arrives   ARMED  -> ACTIVE (record startedAt)
+--   5s of bag-quiet      ACTIVE -> AUTO-FINALIZE
+--
+-- Finalize captures:
+--   * config snapshot (elvuiHookDisabled, spike threshold, profile)
+--   * session counter totals
+--   * spike ring buffer (deep copy)
+--   * perf stats for the AutoDelete phases we care about
+--   * start/end timestamps + duration
+-- Stored in AutoDeleteDB.benches[name], capped at BenchMaxSaved.
+_G.AutoDelete_Bench = _G.AutoDelete_Bench or {
+	state            = nil,   -- nil = idle, "armed", "active"
+	name             = nil,
+	armedAt          = 0,
+	startedAt        = 0,
+	lastBagUpdateAt  = 0,
+	configSnap       = nil,
+}
+_G.AutoDelete_BenchQuietSeconds = _G.AutoDelete_BenchQuietSeconds or 5.0
+_G.AutoDelete_BenchMaxSaved     = _G.AutoDelete_BenchMaxSaved     or 20
+
+-- Auto-name format: bench-<N>-<hookon|hookoff>. N auto-increments. Suffix
+-- captures the most important variable so the list is self-describing.
+function _G.AutoDelete_BenchAutoName()
+	_G.AutoDeleteDB = _G.AutoDeleteDB or {}
+	_G.AutoDeleteDB.benches = _G.AutoDeleteDB.benches or {}
+	_G.AutoDeleteDB.benchCounter = (_G.AutoDeleteDB.benchCounter or 0) + 1
+	local suffix = _G.AutoDelete_ElvUIHookDisabled and "hookoff" or "hookon"
+	return string.format("bench-%d-%s", _G.AutoDeleteDB.benchCounter, suffix)
+end
+
+-- Snapshot the config that affects test interpretation. Captures both
+-- AutoDelete-side state AND the ElvUI bag-display settings whose
+-- toggling can dramatically change bench results (showBindType is the
+-- canonical example -- disabling it dropped worst-frame stutter ~10x
+-- in PE testing 2026-05-23). Without these in the snapshot, you can't
+-- tell from saved bench data which test had which ElvUI config.
+function _G.AutoDelete_BenchSnapConfig()
+	local profileKey = (cachedProfile and cachedProfile._profileKey) or "?"
+	-- ElvUI bag settings. Wrapped in pcall because the ElvUI module
+	-- structure may not be initialized if the addon is loaded but the
+	-- module hasn't run its Initialize yet, and we don't want a bench
+	-- snapshot to ever throw.
+	local elvBags = nil
+	if _G.ElvUI then
+		pcall(function()
+			local E = _G.ElvUI[1]
+			if E and E.db and E.db.bags then
+				local db = E.db.bags
+				elvBags = {
+					showBindType        = db.showBindType        and true or false,
+					itemLevel           = db.itemLevel           and true or false,
+					itemLevelThreshold  = db.itemLevelThreshold,
+					junkIcon            = db.junkIcon            and true or false,
+					junkDesaturate      = db.junkDesaturate      and true or false,
+					qualityColors       = db.qualityColors       and true or false,
+					questIcon           = db.questIcon           and true or false,
+					questItemColors     = db.questItemColors     and true or false,
+					professionBagColors = db.professionBagColors and true or false,
+				}
+			end
+			-- Whether the Bags module itself is enabled (E.private.bags.enable
+			-- on the live install; falls back to true if we can't read it).
+			if E and E.private and E.private.bags then
+				elvBags = elvBags or {}
+				elvBags.moduleEnabled = E.private.bags.enable and true or false
+			end
+		end)
+	end
+	return {
+		elvuiHookDisabled   = _G.AutoDelete_ElvUIHookDisabled and true or false,
+		spikeThresholdMs    = _G.AutoDelete_SpikeThresholdMs,
+		profileKey          = profileKey,
+		elvuiLoaded         = _G.ElvUI and true or false,
+		elvuiBags           = elvBags,  -- nil if ElvUI not loaded / not ready
+		realmTime           = date and date("%Y-%m-%d %H:%M:%S") or "unknown",
+	}
+end
+
+function _G.AutoDelete_BenchArm(name)
+	local B = _G.AutoDelete_Bench
+	if B.state then
+		print("|cffff8000[AutoDelete BENCH]|r already " .. B.state .. " ('" .. tostring(B.name) .. "'). Re-issue /del bench to cancel/finalize.")
+		return
+	end
+	name = name or _G.AutoDelete_BenchAutoName()
+	-- Auto-enable spike if not on. Without spike data the bench is empty.
+	if not _G.AutoDelete_SpikeDebug then
+		_G.AutoDelete_SetSpikeDebug(true)
+	end
+	-- Clear ring + counters so the bench window starts clean.
+	if _G.AutoDelete_SpikeReset then _G.AutoDelete_SpikeReset() end
+	_G.AutoDelete_SpikeRing = {}
+	_G.AutoDelete_SpikeRingNext = 1
+	_G.AutoDelete_SpikeWorstRing = {}
+	_G.AutoDelete_SpikeSuppressedCount = 0
+	if _G.AutoDelete_SpikeSessionReset then _G.AutoDelete_SpikeSessionReset() end
+	-- Reset perf stats too so /del perf report at finalize is bench-scoped.
+	_G.AutoDelete_PerfStats = {}
+
+	B.state           = "armed"
+	B.name            = name
+	B.armedAt         = GetTime()
+	B.startedAt       = 0
+	B.lastBagUpdateAt = 0
+	B.configSnap      = _G.AutoDelete_BenchSnapConfig()
+	print(string.format(
+		"|cffff8000[AutoDelete BENCH]|r |cff00ff00ARMED|r '%s'. Loot a burst -- auto-finalizes %.0fs after bag activity stops.",
+		name, _G.AutoDelete_BenchQuietSeconds
+	))
+end
+
+-- Called by /del bench when state is non-nil. Branches on state.
+function _G.AutoDelete_BenchToggle()
+	local B = _G.AutoDelete_Bench
+	if not B.state then
+		_G.AutoDelete_BenchArm()
+	elseif B.state == "armed" then
+		print("|cffff8000[AutoDelete BENCH]|r |cffff5555CANCELED|r '" .. tostring(B.name) .. "' -- no activity captured.")
+		B.state = nil
+		B.name = nil
+	elseif B.state == "active" then
+		print("|cffff8000[AutoDelete BENCH]|r force-finalizing '" .. tostring(B.name) .. "' (manual stop).")
+		_G.AutoDelete_BenchFinalize()
+	end
+end
+
+-- Called by BAG_UPDATE handler. Transitions ARMED -> ACTIVE on first event;
+-- otherwise just refreshes the quiet timer.
+function _G.AutoDelete_BenchOnBagUpdate(now)
+	local B = _G.AutoDelete_Bench
+	if not B.state then return end
+	if B.state == "armed" then
+		B.state     = "active"
+		B.startedAt = now
+		print(string.format(
+			"|cffff8000[AutoDelete BENCH]|r |cff00ff00STARTED|r '%s' -- bag activity detected.",
+			B.name
+		))
+	end
+	B.lastBagUpdateAt = now
+end
+
+-- Called every scanner OnUpdate when bench is non-idle. Detects auto-stop.
+function _G.AutoDelete_BenchTick(now)
+	local B = _G.AutoDelete_Bench
+	if B.state ~= "active" then return end
+	if B.lastBagUpdateAt > 0
+		and (now - B.lastBagUpdateAt) >= _G.AutoDelete_BenchQuietSeconds then
+		_G.AutoDelete_BenchFinalize()
+	end
+end
+
+-- Save the bench to SV, evict oldest if over cap, show report popup.
+function _G.AutoDelete_BenchFinalize()
+	local B = _G.AutoDelete_Bench
+	if not B.state then return end
+	local now = GetTime()
+	local durationSec = (B.startedAt > 0) and (now - B.startedAt) or 0
+
+	-- Deep-copy the ring snapshots so subsequent /del spike runs don't
+	-- mutate this bench's saved data. Both the chronological ring AND
+	-- the worst-N ring -- the worst ring is what surfaces the actual
+	-- burst frames; the chronological ring is "what just happened".
+	local ringCopy = {}
+	for i, s in ipairs(_G.AutoDelete_SpikeRing) do
+		ringCopy[i] = {}
+		for k, v in pairs(s) do ringCopy[i][k] = v end
+	end
+	local worstCopy = {}
+	for i, s in ipairs(_G.AutoDelete_SpikeWorstRing or {}) do
+		worstCopy[i] = {}
+		for k, v in pairs(s) do worstCopy[i][k] = v end
+	end
+	-- Sort worst copy by frameMs desc so the saved data is display-ready.
+	table.sort(worstCopy, function(a, c) return (a.frameMs or 0) > (c.frameMs or 0) end)
+	-- Session counter snapshot.
+	local sessionCopy = {}
+	for k, v in pairs(_G.AutoDelete_SpikeSession) do sessionCopy[k] = v end
+	-- Subset of perf stats (only AutoDelete phases, keep payload small).
+	local perfCopy = {}
+	for phase, stats in pairs(_G.AutoDelete_PerfStats or {}) do
+		if phase:find("DeleteItems") or phase:find("AutoDelete") or phase:find("BAG_UPDATE")
+			or phase:find("ElvUI") or phase:find("UpdateAffixDot")
+			or phase:find("deferred") or phase:find("Find") then
+			perfCopy[phase] = {
+				count   = stats.count,
+				totalMs = stats.totalMs,
+				maxMs   = stats.maxMs,
+				isCounter = stats.isCounter,
+			}
+		end
+	end
+
+	_G.AutoDeleteDB = _G.AutoDeleteDB or {}
+	_G.AutoDeleteDB.benches = _G.AutoDeleteDB.benches or {}
+	_G.AutoDeleteDB.benches[B.name] = {
+		name        = B.name,
+		finishedAt  = time and time() or 0,
+		durationSec = durationSec,
+		config      = B.configSnap,
+		session     = sessionCopy,
+		ring        = ringCopy,
+		worstRing   = worstCopy,
+		perf        = perfCopy,
+		goblin      = {
+			lastFireAt        = _G.AutoDelete_GoblinLastFireAt or 0,
+			lastFireReason    = _G.AutoDelete_GoblinLastFireReason or "none",
+			lastDeferReason   = _G.AutoDelete_GoblinLastDeferReason or "none",
+		},
+	}
+
+	-- FIFO eviction if over cap. Order preserved via benchOrder list.
+	_G.AutoDeleteDB.benchOrder = _G.AutoDeleteDB.benchOrder or {}
+	-- Remove this name if already in the order (re-finalize case), then append.
+	for i = #_G.AutoDeleteDB.benchOrder, 1, -1 do
+		if _G.AutoDeleteDB.benchOrder[i] == B.name then
+			table.remove(_G.AutoDeleteDB.benchOrder, i)
+		end
+	end
+	table.insert(_G.AutoDeleteDB.benchOrder, B.name)
+	while #_G.AutoDeleteDB.benchOrder > _G.AutoDelete_BenchMaxSaved do
+		local evict = table.remove(_G.AutoDeleteDB.benchOrder, 1)
+		_G.AutoDeleteDB.benches[evict] = nil
+	end
+
+	local finalName = B.name
+	-- Reset bench state BEFORE printing so a quick repeat works.
+	B.state           = nil
+	B.name            = nil
+	B.armedAt         = 0
+	B.startedAt       = 0
+	B.lastBagUpdateAt = 0
+	B.configSnap      = nil
+
+	print(string.format(
+		"|cffff8000[AutoDelete BENCH]|r |cff00ff00FINALIZED|r '%s' -- %.1fs, %d items enqueued, %d deleted, %d spikes. Opening report.",
+		finalName, durationSec,
+		sessionCopy.itemsEnqueued or 0, sessionCopy.itemsDeleted or 0,
+		sessionCopy.spikesCaptured or 0
+	))
+
+	-- Render the report and open the popup.
+	if _G.AutoDelete_ShowBenchReport then
+		_G.AutoDelete_ShowBenchReport(finalName)
+	end
+end
+
+-- Render a single saved bench as a multi-line text block and show the popup.
+function _G.AutoDelete_ShowBenchReport(name)
+	_G.AutoDeleteDB = _G.AutoDeleteDB or {}
+	local b = (_G.AutoDeleteDB.benches or {})[name]
+	if not b then
+		print("|cffff8000[AutoDelete BENCH]|r '" .. tostring(name) .. "' not found.")
+		return
+	end
+	local lines = {}
+	table.insert(lines, "=== Bench: " .. b.name .. " ===")
+	if b.config then
+		table.insert(lines, string.format(
+			"  config: elvuiHookDisabled=%s spikeThresholdMs=%d profile=%s elvuiLoaded=%s when=%s",
+			tostring(b.config.elvuiHookDisabled), b.config.spikeThresholdMs or 0,
+			tostring(b.config.profileKey), tostring(b.config.elvuiLoaded),
+			tostring(b.config.realmTime)
+		))
+		-- ElvUI bag-display settings snapshot (added 2026-05-23). Without
+		-- this row, benches can't be told apart when only an ElvUI setting
+		-- changed between tests. showBindType ON vs OFF is a ~10x worst-
+		-- frame difference, so this is critical context.
+		if b.config.elvuiBags then
+			local eb = b.config.elvuiBags
+			table.insert(lines, string.format(
+				"  elvuiBags: showBindType=%s itemLevel=%s ilvlThresh=%s junkIcon=%s junkDesat=%s qualityColors=%s questIcon=%s questItemColors=%s professionBagColors=%s moduleEnabled=%s",
+				tostring(eb.showBindType), tostring(eb.itemLevel), tostring(eb.itemLevelThreshold or "?"),
+				tostring(eb.junkIcon), tostring(eb.junkDesaturate),
+				tostring(eb.qualityColors), tostring(eb.questIcon), tostring(eb.questItemColors),
+				tostring(eb.professionBagColors), tostring(eb.moduleEnabled)
+			))
+		end
+	end
+	table.insert(lines, string.format("  duration: %.1fs", b.durationSec or 0))
+	local s = b.session or {}
+	table.insert(lines, "  --- session counters ---")
+	table.insert(lines, string.format(
+		"  items: enqueued=%d deleted=%d   throughput=%.1f/sec",
+		s.itemsEnqueued or 0, s.itemsDeleted or 0,
+		(b.durationSec and b.durationSec > 0) and ((s.itemsDeleted or 0) / b.durationSec) or 0
+	))
+	table.insert(lines, string.format(
+		"  bag events: bagUpd=%d bagUpdDel=%d   ElvUI updSlot=%d   slotsWalked=%d",
+		s.bagUpd or 0, s.bagUpdDel or 0, s.updSlot or 0, s.slotsWalked or 0
+	))
+	table.insert(lines, string.format(
+		"  AutoDelete: dWalk=%d dEarly=%d   drain=%d drainSkip=%d   sell=%d find=%d",
+		s.dWalk or 0, s.dEarly or 0, s.drain or 0, s.drainSkip or 0,
+		s.sell or 0, s.find or 0
+	))
+	table.insert(lines, string.format(
+		"  scans: ttScan=%d axQueued=%d axRan=%d   spikesCaptured=%d",
+		s.ttScanRan or 0, s.axQueued or 0, s.axRan or 0, s.spikesCaptured or 0
+	))
+	-- Perf summary: top 10 by total ms.
+	local perfRows = {}
+	for phase, stats in pairs(b.perf or {}) do
+		if not stats.isCounter then
+			table.insert(perfRows, { name = phase, total = stats.totalMs or 0, max = stats.maxMs or 0, count = stats.count or 0 })
+		end
+	end
+	table.sort(perfRows, function(a, c) return a.total > c.total end)
+	if #perfRows > 0 then
+		table.insert(lines, "  --- top perf phases (total ms) ---")
+		for i = 1, math.min(10, #perfRows) do
+			local r = perfRows[i]
+			table.insert(lines, string.format(
+				"    %-32s n=%-5d total=%7.1fms max=%6.1fms",
+				r.name, r.count, r.total, r.max
+			))
+		end
+	end
+	-- Goblin diagnostic.
+	if b.goblin then
+		table.insert(lines, "  --- goblin ---")
+		table.insert(lines, string.format(
+			"  lastFireReason=%s   lastDeferReason=%s",
+			tostring(b.goblin.lastFireReason or "none"),
+			tostring(b.goblin.lastDeferReason or "none")
+		))
+	end
+	-- Worst-N ring (sorted desc by frameMs).
+	if b.worstRing and #b.worstRing > 0 then
+		table.insert(lines, "  --- WORST " .. #b.worstRing .. " spikes (sorted by frameMs desc) ---")
+		for i, spike in ipairs(b.worstRing) do
+			local ourPct = spike.frameMs > 0 and math.floor((spike.attribMs or 0) / spike.frameMs * 100) or 0
+			table.insert(lines, string.format(
+				"  W%-2d frame=%.1fms attribMs=%.1fms ours=%d%% bagUpd=%d/%d updSlot=%d slotsWalked=%d ttScan=%d axQ=%d/%d dEarly=%d/%d drain=%d/%d sell=%d find=%d loot=%s",
+				i, spike.frameMs or 0, spike.attribMs or 0, ourPct,
+				spike.bagUpd or 0, spike.bagUpdDel or 0, spike.updSlot or 0,
+				spike.slotsWalked or 0, spike.ttScanRan or 0,
+				spike.axQueued or 0, spike.axRan or 0,
+				spike.dEarly or 0, spike.dWalk or 0,
+				spike.drain or 0, spike.drainSkip or 0,
+				spike.sell or 0, spike.find or 0,
+				(spike.lootEvts ~= "" and spike.lootEvts) or "none"
+			))
+		end
+	end
+	-- Chronological ring dump.
+	if b.ring and #b.ring > 0 then
+		table.insert(lines, "  --- LAST " .. #b.ring .. " spikes (chronological, oldest first) ---")
+		for i, spike in ipairs(b.ring) do
+			local ourPct = spike.frameMs > 0 and math.floor((spike.attribMs or 0) / spike.frameMs * 100) or 0
+			table.insert(lines, string.format(
+				"  #%-2d frame=%.1fms attribMs=%.1fms ours=%d%% bagUpd=%d/%d updSlot=%d slotsWalked=%d ttScan=%d axQ=%d/%d dEarly=%d/%d drain=%d/%d sell=%d find=%d loot=%s",
+				i, spike.frameMs or 0, spike.attribMs or 0, ourPct,
+				spike.bagUpd or 0, spike.bagUpdDel or 0, spike.updSlot or 0,
+				spike.slotsWalked or 0, spike.ttScanRan or 0,
+				spike.axQueued or 0, spike.axRan or 0,
+				spike.dEarly or 0, spike.dWalk or 0,
+				spike.drain or 0, spike.drainSkip or 0,
+				spike.sell or 0, spike.find or 0,
+				(spike.lootEvts ~= "" and spike.lootEvts) or "none"
+			))
+		end
+	end
+	local text = table.concat(lines, "\n")
+	if _G.AutoDelete_ShowSpikeReportWindow then
+		_G.AutoDelete_ShowSpikeReportWindow(text)
+	else
+		for _, ln in ipairs(lines) do print(ln) end
+	end
+end
+
+-- List saved benches (in order finished, oldest first).
+function _G.AutoDelete_BenchList()
+	_G.AutoDeleteDB = _G.AutoDeleteDB or {}
+	local order = _G.AutoDeleteDB.benchOrder or {}
+	if #order == 0 then
+		print("|cffff8000[AutoDelete BENCH]|r no saved benches. Run /del bench.")
+		return
+	end
+	print(string.format("|cffff8000[AutoDelete BENCH]|r %d saved bench(es):", #order))
+	for i = 1, #order do
+		local name = order[i]
+		local b = (_G.AutoDeleteDB.benches or {})[name]
+		if b then
+			local s = b.session or {}
+			-- Worst frame: prefer the worstRing (preserves real bursts),
+			-- fall back to chronological ring for older saved benches that
+			-- didn't have a worstRing.
+			local worst = 0
+			for _, spike in ipairs(b.worstRing or b.ring or {}) do
+				if (spike.frameMs or 0) > worst then worst = spike.frameMs end
+			end
+			-- Add showBindType state to the row so the list answers "which
+			-- bench was the no-bind-type-scan run?" at a glance.
+			local sbt = "?"
+			if b.config and b.config.elvuiBags then
+				sbt = tostring(b.config.elvuiBags.showBindType)
+			end
+			print(string.format(
+				"  %-30s %.0fs  items=%d  worst=%.0fms  hookDisabled=%s  showBindType=%s",
+				name, b.durationSec or 0,
+				s.itemsDeleted or 0, worst,
+				tostring((b.config or {}).elvuiHookDisabled),
+				sbt
+			))
+		end
+	end
+end
+
+-- Delete a saved bench by name.
+function _G.AutoDelete_BenchDelete(name)
+	_G.AutoDeleteDB = _G.AutoDeleteDB or {}
+	if not (_G.AutoDeleteDB.benches or {})[name] then
+		print("|cffff8000[AutoDelete BENCH]|r '" .. tostring(name) .. "' not found.")
+		return
+	end
+	_G.AutoDeleteDB.benches[name] = nil
+	for i = #(_G.AutoDeleteDB.benchOrder or {}), 1, -1 do
+		if _G.AutoDeleteDB.benchOrder[i] == name then
+			table.remove(_G.AutoDeleteDB.benchOrder, i)
+		end
+	end
+	print("|cffff8000[AutoDelete BENCH]|r deleted '" .. name .. "'.")
+end
+
+-- Compare two benches side-by-side. If no args, picks the two newest.
+function _G.AutoDelete_BenchCompare(nameA, nameB)
+	_G.AutoDeleteDB = _G.AutoDeleteDB or {}
+	local order = _G.AutoDeleteDB.benchOrder or {}
+	if not nameA or not nameB then
+		if #order < 2 then
+			print("|cffff8000[AutoDelete BENCH]|r need at least 2 saved benches. Have " .. #order .. ".")
+			return
+		end
+		nameB = order[#order]
+		nameA = order[#order - 1]
+	end
+	local a = (_G.AutoDeleteDB.benches or {})[nameA]
+	local b = (_G.AutoDeleteDB.benches or {})[nameB]
+	if not a or not b then
+		print("|cffff8000[AutoDelete BENCH]|r one or both benches not found: '" .. tostring(nameA) .. "', '" .. tostring(nameB) .. "'.")
+		return
+	end
+
+	-- Worst-N ring preferred for these aggregates so the comparison
+	-- reflects the actual burst frames, not post-burst baseline jitter.
+	local function pickSource(bench) return bench.worstRing or bench.ring or {} end
+	local function worstOf(bench)
+		local w = 0
+		for _, sp in ipairs(pickSource(bench)) do
+			if (sp.frameMs or 0) > w then w = sp.frameMs end
+		end
+		return w
+	end
+	local function attribOf(bench)
+		local tot = 0
+		for _, sp in ipairs(pickSource(bench)) do tot = tot + (sp.attribMs or 0) end
+		return tot
+	end
+	local function avgOursPct(bench)
+		local n, sum = 0, 0
+		for _, sp in ipairs(pickSource(bench)) do
+			if (sp.frameMs or 0) > 0 then
+				sum = sum + ((sp.attribMs or 0) / sp.frameMs * 100)
+				n = n + 1
+			end
+		end
+		return n > 0 and (sum / n) or 0
+	end
+
+	local lines = {}
+	table.insert(lines, string.format("=== COMPARE: %s vs %s ===", nameA, nameB))
+	local function rowStr(label, va, vb)
+		table.insert(lines, string.format("  %-24s %-18s %-18s", label, tostring(va), tostring(vb)))
+	end
+	local function rowNum(label, va, vb, fmt, unit)
+		fmt = fmt or "%.1f"
+		unit = unit or ""
+		local va_s = string.format(fmt, va) .. unit
+		local vb_s = string.format(fmt, vb) .. unit
+		local delta = vb - va
+		local delta_s = string.format("%+" .. (fmt:sub(2)), delta) .. unit
+		table.insert(lines, string.format("  %-24s %-18s %-18s %s", label, va_s, vb_s, delta_s))
+	end
+	table.insert(lines, string.format("  %-24s %-18s %-18s %s", "metric", nameA, nameB, "delta"))
+	-- Config rows (text, no delta)
+	local ca, cb = a.config or {}, b.config or {}
+	rowStr("elvuiHookDisabled", ca.elvuiHookDisabled, cb.elvuiHookDisabled)
+	rowStr("elvuiLoaded",       ca.elvuiLoaded, cb.elvuiLoaded)
+	rowNum("spikeThresholdMs",  ca.spikeThresholdMs or 0, cb.spikeThresholdMs or 0, "%d")
+	-- ElvUI bag-display settings -- critical context for diffing benches
+	-- where the only difference was an ElvUI option toggle.
+	local eba, ebb = ca.elvuiBags or {}, cb.elvuiBags or {}
+	rowStr("E.bags showBindType",        eba.showBindType,        ebb.showBindType)
+	rowStr("E.bags itemLevel",           eba.itemLevel,           ebb.itemLevel)
+	rowStr("E.bags junkIcon",            eba.junkIcon,            ebb.junkIcon)
+	rowStr("E.bags junkDesaturate",      eba.junkDesaturate,      ebb.junkDesaturate)
+	rowStr("E.bags qualityColors",       eba.qualityColors,       ebb.qualityColors)
+	rowStr("E.bags questIcon",           eba.questIcon,           ebb.questIcon)
+	rowStr("E.bags questItemColors",     eba.questItemColors,     ebb.questItemColors)
+	rowStr("E.bags professionBagColors", eba.professionBagColors, ebb.professionBagColors)
+	rowStr("E.bags moduleEnabled",       eba.moduleEnabled,       ebb.moduleEnabled)
+	-- Number rows
+	rowNum("duration (sec)",       a.durationSec or 0, b.durationSec or 0, "%.1f", "s")
+	rowNum("items enqueued",       (a.session or {}).itemsEnqueued or 0, (b.session or {}).itemsEnqueued or 0, "%d")
+	rowNum("items deleted",        (a.session or {}).itemsDeleted or 0,  (b.session or {}).itemsDeleted or 0,  "%d")
+	rowNum("worst frame",          worstOf(a), worstOf(b), "%.0f", "ms")
+	rowNum("spikes captured",      (a.session or {}).spikesCaptured or 0, (b.session or {}).spikesCaptured or 0, "%d")
+	rowNum("ring attribMs total",  attribOf(a), attribOf(b), "%.1f", "ms")
+	rowNum("ring ours% avg",       avgOursPct(a), avgOursPct(b), "%.0f", "%%")
+	rowNum("bagUpd",               (a.session or {}).bagUpd or 0, (b.session or {}).bagUpd or 0, "%d")
+	rowNum("bagUpdDel",            (a.session or {}).bagUpdDel or 0, (b.session or {}).bagUpdDel or 0, "%d")
+	rowNum("updSlot",              (a.session or {}).updSlot or 0, (b.session or {}).updSlot or 0, "%d")
+	rowNum("slotsWalked",          (a.session or {}).slotsWalked or 0, (b.session or {}).slotsWalked or 0, "%d")
+	rowNum("ttScanRan",            (a.session or {}).ttScanRan or 0, (b.session or {}).ttScanRan or 0, "%d")
+	rowNum("axQueued",             (a.session or {}).axQueued or 0, (b.session or {}).axQueued or 0, "%d")
+	rowNum("axRan",                (a.session or {}).axRan or 0, (b.session or {}).axRan or 0, "%d")
+	rowNum("drain pops",           (a.session or {}).drain or 0, (b.session or {}).drain or 0, "%d")
+	rowNum("dWalk",                (a.session or {}).dWalk or 0, (b.session or {}).dWalk or 0, "%d")
+	rowNum("dEarly",               (a.session or {}).dEarly or 0, (b.session or {}).dEarly or 0, "%d")
+	rowNum("find",                 (a.session or {}).find or 0, (b.session or {}).find or 0, "%d")
+	rowNum("sell",                 (a.session or {}).sell or 0, (b.session or {}).sell or 0, "%d")
+
+	local text = table.concat(lines, "\n")
+	if _G.AutoDelete_ShowSpikeReportWindow then
+		_G.AutoDelete_ShowSpikeReportWindow(text)
+	else
+		for _, ln in ipairs(lines) do print(ln) end
+	end
+end
+
+-- Wipe per-frame state. Called by scanner OnUpdate after recording any
+-- spike from the previous frame, before this frame's accumulators run.
+function _G.AutoDelete_SpikeReset()
+	local c = _G.AutoDelete_SpikeCounters
+	c.bagUpd      = 0
+	c.bagUpdDel   = 0
+	c.updSlot     = 0
+	c.slotsWalked = 0
+	c.ttScanRan   = 0
+	c.axQueued    = 0
+	c.axRan       = 0
+	c.dWalk       = 0
+	c.dEarly      = 0
+	c.drain       = 0
+	c.drainSkip   = 0
+	c.sell        = 0
+	c.find        = 0
+	c.lootEvts    = nil
+	_G.AutoDelete_SpikeAttribMs = 0
+end
+
+-- Cheap counter bump. Caller is expected to inline the SpikeDebug check
+-- when the hook is in a hot path (ElvUI:UpdateSlot, etc.); this helper
+-- exists for cold paths where the function-call cost is negligible.
+function _G.AutoDelete_SpikeBump(field, n)
+	if not _G.AutoDelete_SpikeDebug then return end
+	local c = _G.AutoDelete_SpikeCounters
+	c[field] = (c[field] or 0) + (n or 1)
+end
+
+-- Append a loot-event name to the current frame's loot-event list.
+function _G.AutoDelete_SpikeAddLootEvt(name)
+	if not _G.AutoDelete_SpikeDebug then return end
+	local c = _G.AutoDelete_SpikeCounters
+	if c.lootEvts then
+		c.lootEvts = c.lootEvts .. "," .. name
+	else
+		c.lootEvts = name
+	end
+end
+
+-- Record a spike: snapshot counters into the ring buffer and print a
+-- rate-limited chat summary. Called by scanner OnUpdate when the
+-- previous frame's elapsed exceeds SpikeThresholdMs.
+function _G.AutoDelete_SpikeRecord(elapsed)
+	local frameMs = elapsed * 1000
+	local attrib  = _G.AutoDelete_SpikeAttribMs or 0
+	local c = _G.AutoDelete_SpikeCounters
+
+	-- Snapshot for ring buffer (shallow-copy is enough; counters are scalars).
+	local snap = {
+		time        = GetTime(),
+		frameMs     = frameMs,
+		attribMs    = attrib,
+		bagUpd      = c.bagUpd or 0,
+		bagUpdDel   = c.bagUpdDel or 0,
+		updSlot     = c.updSlot or 0,
+		slotsWalked = c.slotsWalked or 0,
+		ttScanRan   = c.ttScanRan or 0,
+		axQueued    = c.axQueued or 0,
+		axRan       = c.axRan or 0,
+		dWalk       = c.dWalk or 0,
+		dEarly      = c.dEarly or 0,
+		drain       = c.drain or 0,
+		drainSkip   = c.drainSkip or 0,
+		sell        = c.sell or 0,
+		find        = c.find or 0,
+		lootEvts    = c.lootEvts or "",
+	}
+
+	-- Ring write (overwrites oldest entry when full).
+	local ring = _G.AutoDelete_SpikeRing
+	local idx  = _G.AutoDelete_SpikeRingNext
+	ring[idx]  = snap
+	_G.AutoDelete_SpikeRingNext = (idx % _G.AutoDelete_SpikeRingCap) + 1
+	-- v3.20 Worst-N ring write. Keep top SpikeWorstCap by frameMs so the
+	-- actually-worst frames survive even when post-burst baseline jitter
+	-- floods the chronological ring. Maintained unsorted; report sorts
+	-- at display time. Insert/replace cost is O(N) for N=20 = ~20 compares
+	-- per spike record, negligible.
+	local worst = _G.AutoDelete_SpikeWorstRing
+	if #worst < _G.AutoDelete_SpikeWorstCap then
+		worst[#worst + 1] = snap
+	else
+		-- Find current minimum frameMs; replace if new snap beats it.
+		local minIdx, minMs = 1, worst[1].frameMs
+		for i = 2, #worst do
+			if worst[i].frameMs < minMs then
+				minIdx, minMs = i, worst[i].frameMs
+			end
+		end
+		if snap.frameMs > minMs then
+			worst[minIdx] = snap
+		end
+	end
+	-- Session counter: how many spikes this session has captured. Helps
+	-- /del bench compare answer "did one test see more spikes than the other?"
+	if _G.AutoDelete_SpikeSession then
+		_G.AutoDelete_SpikeSession.spikesCaptured = (_G.AutoDelete_SpikeSession.spikesCaptured or 0) + 1
+	end
+
+	-- Chat-print gate (v3.20.x): the ring buffer captures every frame
+	-- over threshold (default 20ms), but baseline server frame jitter
+	-- around 17-22ms would flood chat. So chat only prints when the
+	-- spike is either:
+	--   (a) severe (frame > 50ms -- a perceptible stutter regardless of
+	--       attribution), OR
+	--   (b) moderate AND clearly ours (frame > 33ms AND ours >= 25%)
+	-- Below those thresholds the spike still lands in the ring; the
+	-- user reads it later via /del spike report.
+	--
+	-- Rate-limited on top of the gate so a sustained sub-second
+	-- repetition of the SAME spike doesn't double-spam.
+	local ourPct = frameMs > 0 and math.floor(attrib / frameMs * 100) or 0
+	local shouldPrintChat = (frameMs > 50) or (frameMs > 33 and ourPct >= 25)
+	local now = GetTime()
+	if shouldPrintChat
+		and now - (_G.AutoDelete_SpikeChatLastAt or 0) >= _G.AutoDelete_SpikeChatCooldown then
+		_G.AutoDelete_SpikeChatLastAt = now
+		local suppressed = _G.AutoDelete_SpikeSuppressedCount or 0
+		_G.AutoDelete_SpikeSuppressedCount = 0
+		local suffix = (suppressed > 0) and (" (+" .. suppressed .. " suppressed)") or ""
+		print(string.format(
+			"|cffff8000[AutoDelete SPIKE]|r frame=%.1fms attribMs=%.1fms ours=%d%%%s",
+			frameMs, attrib, ourPct, suffix
+		))
+		print(string.format(
+			"  bagUpd=%d/%d updSlot=%d slotsWalked=%d ttScan=%d axQ=%d/%d dEarly=%d/%d drain=%d/%d sell=%d find=%d loot=%s",
+			snap.bagUpd, snap.bagUpdDel, snap.updSlot, snap.slotsWalked, snap.ttScanRan,
+			snap.axQueued, snap.axRan, snap.dEarly, snap.dWalk,
+			snap.drain, snap.drainSkip, snap.sell, snap.find,
+			(snap.lootEvts ~= "" and snap.lootEvts or "none")
+		))
+	else
+		_G.AutoDelete_SpikeSuppressedCount = (_G.AutoDelete_SpikeSuppressedCount or 0) + 1
+	end
+end
+
+-- Spike report helpers are wrapped in a `do` block so the two locals
+-- (_CollectSpikeRing, _FormatSpikeLine) don't count against the main
+-- chunk's 200-local cap. Only the assignments to _G escape the block.
+do
+-- Collect the ring buffer in chronological order (oldest first). Returns
+-- an array of snapshots. Used by both SpikeReport (popup) and
+-- SpikeReportChat (chat fallback).
+local function _CollectSpikeRing()
+	local ring = _G.AutoDelete_SpikeRing
+	local entries = {}
+	local cap     = _G.AutoDelete_SpikeRingCap
+	local nextIdx = _G.AutoDelete_SpikeRingNext
+	-- Walk from nextIdx (oldest if wrapped), wrap to nextIdx - 1. Skip
+	-- nil slots (haven't wrapped yet).
+	for i = 0, cap - 1 do
+		local idx = ((nextIdx - 1 + i) % cap) + 1
+		if ring[idx] then table.insert(entries, ring[idx]) end
+	end
+	return entries
+end
+
+-- Format one snapshot into the standard one-line layout used by both
+-- the real-time chat print and the report dump. Kept here so the format
+-- stays in sync; if a counter is added/removed, only this string changes.
+local function _FormatSpikeLine(prefix, s)
+	local ourPct = s.frameMs > 0 and math.floor(s.attribMs / s.frameMs * 100) or 0
+	return string.format(
+		"%sframe=%.1fms attribMs=%.1fms ours=%d%% bagUpd=%d/%d updSlot=%d slotsWalked=%d ttScan=%d axQ=%d/%d dEarly=%d/%d drain=%d/%d sell=%d find=%d loot=%s",
+		prefix,
+		s.frameMs, s.attribMs, ourPct,
+		s.bagUpd, s.bagUpdDel, s.updSlot, s.slotsWalked, s.ttScanRan,
+		s.axQueued, s.axRan, s.dEarly, s.dWalk,
+		s.drain, s.drainSkip, s.sell, s.find,
+		(s.lootEvts ~= "" and s.lootEvts or "none")
+	)
+end
+
+-- Dump the ring buffer to the popup window. Called by /del spike report.
+-- Without ElvUI the default Blizzard chat is not selectable, so the popup
+-- is the primary surface for grabbing spike data. SpikeReportChat below
+-- is the chat fallback for users with chat-copy addons.
+function _G.AutoDelete_SpikeReport()
+	local entries = _CollectSpikeRing()
+	if #entries == 0 then
+		print("|cffff8000[AutoDelete SPIKE]|r ring empty -- no spikes captured. Enable with /del spike on and reproduce.")
+		return
+	end
+	local lines = {}
+	table.insert(lines, string.format(
+		"AutoDelete Spike Report -- last %d spike(s), oldest first (threshold %dms)",
+		#entries, _G.AutoDelete_SpikeThresholdMs
+	))
+	for i, s in ipairs(entries) do
+		table.insert(lines, _FormatSpikeLine(string.format("#%-2d ", i), s))
+	end
+	local text = table.concat(lines, "\n")
+	if _G.AutoDelete_ShowSpikeReportWindow then
+		_G.AutoDelete_ShowSpikeReportWindow(text)
+	else
+		-- Options.lua not loaded yet (shouldn't happen post-PLAYER_LOGIN,
+		-- but cheap insurance). Fall through to chat so the user isn't
+		-- left without data.
+		for _, ln in ipairs(lines) do print(ln) end
+	end
+end
+
+-- Chat fallback for /del spike chat. For users who prefer text in the
+-- chat frame (and have a chat-copy addon to read it back).
+function _G.AutoDelete_SpikeReportChat()
+	local entries = _CollectSpikeRing()
+	if #entries == 0 then
+		print("|cffff8000[AutoDelete SPIKE]|r ring empty -- no spikes captured.")
+		return
+	end
+	print(string.format(
+		"|cffff8000[AutoDelete SPIKE]|r last %d spike(s), oldest first (threshold %dms):",
+		#entries, _G.AutoDelete_SpikeThresholdMs
+	))
+	for i, s in ipairs(entries) do
+		print(_FormatSpikeLine(string.format("  #%-2d ", i), s))
+	end
+end
+end  -- end of spike report helpers `do` block
+
+-- Wipe ring buffer + counters. Called by /del spike clear.
+function _G.AutoDelete_SpikeClear()
+	_G.AutoDelete_SpikeRing = {}
+	_G.AutoDelete_SpikeRingNext = 1
+	_G.AutoDelete_SpikeWorstRing = {}
+	_G.AutoDelete_SpikeSuppressedCount = 0
+	if _G.AutoDelete_SpikeReset then _G.AutoDelete_SpikeReset() end
+	if _G.AutoDelete_SpikeSessionReset then _G.AutoDelete_SpikeSessionReset() end
+	print("|cffff8000[AutoDelete SPIKE]|r ring + counters cleared.")
+end
+
+-- Toggle. Registers/unregisters LOOT_* events so the "off" case has zero
+-- overhead from extra event traffic. Also flips PerfEnabled on so
+-- attribMs accumulates (the user can later disable perf separately if
+-- desired; this just guarantees the dependency is satisfied while
+-- spike debug is active).
+--
+-- `scanner` is forward-resolved at call time via _G.AutoDelete_ScannerFrame
+-- so this helper can live up here (before scanner is defined). The
+-- scanner sets that global once it's created.
+function _G.AutoDelete_SetSpikeDebug(on)
+	_G.AutoDelete_SpikeDebug = on and true or false
+	local sf = _G.AutoDelete_ScannerFrame
+	if on then
+		_G.AutoDelete_PerfEnabled = true
+		if _G.AutoDelete_SpikeReset then _G.AutoDelete_SpikeReset() end
+		if sf then
+			sf:RegisterEvent("LOOT_OPENED")
+			sf:RegisterEvent("LOOT_SLOT_CLEARED")
+			sf:RegisterEvent("LOOT_CLOSED")
+		end
+		print(string.format(
+			"|cffff8000[AutoDelete SPIKE]|r tracking |cff00ff00ON|r. Threshold: %dms. Use /del spike report after testing.",
+			_G.AutoDelete_SpikeThresholdMs
+		))
+	else
+		if sf then
+			sf:UnregisterEvent("LOOT_OPENED")
+			sf:UnregisterEvent("LOOT_SLOT_CLEARED")
+			sf:UnregisterEvent("LOOT_CLOSED")
+		end
+		print(string.format(
+			"|cffff8000[AutoDelete SPIKE]|r tracking |cffff5555OFF|r. Ring holds %d spike(s) -- /del spike report.",
+			(function() local n = 0 for _ in pairs(_G.AutoDelete_SpikeRing) do n = n + 1 end return n end)()
+		))
+	end
+end
+
 function AutoDelete_PerfBegin(phase)
 	if not _G.AutoDelete_PerfEnabled then return nil end
 	return debugprofilestop()
@@ -73,6 +1014,13 @@ end
 function AutoDelete_PerfEnd(phase, startMs)
 	if not startMs then return end
 	local elapsed = debugprofilestop() - startMs
+	-- v3.20 spike debug: accumulate every instrumented phase's duration
+	-- into the per-frame attribMs total. Trusted only when every pickup
+	-- path is wrapped in PerfBegin/PerfEnd; see _G.AutoDelete_SpikeRecord
+	-- for the audit list.
+	if _G.AutoDelete_SpikeDebug then
+		_G.AutoDelete_SpikeAttribMs = (_G.AutoDelete_SpikeAttribMs or 0) + elapsed
+	end
 	local s = _G.AutoDelete_PerfStats[phase]
 	if not s then
 		s = { count = 0, totalMs = 0, lastMs = 0, maxMs = 0 }
@@ -82,6 +1030,22 @@ function AutoDelete_PerfEnd(phase, startMs)
 	s.totalMs = s.totalMs + elapsed
 	s.lastMs  = elapsed
 	if elapsed > s.maxMs then s.maxMs = elapsed end
+end
+
+-- Counter-only perf phase: records item counts without timing. Used to
+-- separate "how often this branch was taken" from "how long it took". e.g.
+-- DeleteItems/items-deleted, DeleteItems/items-skipped-keep. PerfReport
+-- renders rows with totalMs=0 as "(counter)" so the user can tell them
+-- apart from timer rows at a glance.
+function AutoDelete_PerfCount(phase, n)
+	if not _G.AutoDelete_PerfEnabled then return end
+	n = n or 1
+	local s = _G.AutoDelete_PerfStats[phase]
+	if not s then
+		s = { count = 0, totalMs = 0, lastMs = 0, maxMs = 0, isCounter = true }
+		_G.AutoDelete_PerfStats[phase] = s
+	end
+	s.count = s.count + n
 end
 
 function AutoDelete_PerfReport()
@@ -102,13 +1066,29 @@ function AutoDelete_PerfReport()
 			max   = v.maxMs,
 		})
 	end
+	-- Timer rows sort by total ms desc (worst offender first). Counter
+	-- rows (totalMs == 0, recorded via AutoDelete_PerfCount) print AFTER
+	-- the timer block so they don't get lost at the bottom of a long
+	-- timer-heavy report. v3.20: counters tell us how often a branch
+	-- fired during the session (items deleted, items skipped, etc.).
 	table.sort(rows, function(a, b) return a.total > b.total end)
-	print("|cffff8000[AutoDelete PERF]|r report (sorted by total ms):")
-	print(string.format("  %-32s %7s %10s %8s %8s", "phase", "n", "total ms", "avg ms", "max ms"))
+	print("|cffff8000[AutoDelete PERF]|r timers (sorted by total ms):")
+	print(string.format("  %-36s %7s %10s %8s %8s", "phase", "n", "total ms", "avg ms", "max ms"))
+	local printedCounterHeader = false
 	for _, r in ipairs(rows) do
-		print(string.format(
-			"  %-32s %7d %10.1f %8.2f %8.1f",
-			r.name, r.count, r.total, r.avg, r.max))
+		local stats = _G.AutoDelete_PerfStats[r.name]
+		if stats and stats.isCounter then
+			if not printedCounterHeader then
+				print("|cffff8000[AutoDelete PERF]|r counters:")
+				print(string.format("  %-36s %10s", "phase", "count"))
+				printedCounterHeader = true
+			end
+			print(string.format("  %-36s %10d", r.name, r.count))
+		else
+			print(string.format(
+				"  %-36s %7d %10.1f %8.2f %8.1f",
+				r.name, r.count, r.total, r.avg, r.max))
+		end
 	end
 end
 
@@ -625,25 +1605,17 @@ local function RunDBMigrations(db)
 				"Your existing Delete/Sell choices were preserved.")
 		end
 	end
-	-- v4 (2026-05-22): Greens lost its Delete option in the Auto Actions UI
-	-- (deleting greens by quality was rarely the intended outcome; users who
-	-- want that can put specific greens on the Delete list explicitly). Any
-	-- profile carrying qualityActionGreens == "delete" gets normalized to
-	-- "off" here so the new segmented control's SetValue lands on a valid
-	-- segment instead of silently no-op'ing and leaving stale data behind.
+	-- v4 (2026-05-22, then NEUTRALIZED 2026-05-23): originally normalized
+	-- qualityActionGreens == "delete" -> "off" because the Auto Actions UI
+	-- briefly dropped Delete for Greens. The user reverted that decision
+	-- the same release cycle and asked for Greens-Delete back, so the
+	-- migration body is now a no-op -- we keep the version bump so any
+	-- stored db.version > 3 still advances cleanly, but we don't touch
+	-- any profile data here. Players whose data was clobbered during the
+	-- brief v4 window (i.e. anyone who tested between 2026-05-22 and the
+	-- restore) just need to re-pick Del on the Greens row.
 	if db.version < 4 and db.profiles then
-		local fixed = 0
-		for _, profile in pairs(db.profiles) do
-			if profile and profile.qualityActionGreens == "delete" then
-				profile.qualityActionGreens = "off"
-				fixed = fixed + 1
-			end
-		end
-		if fixed > 0 then
-			print("|cffff8000[AutoDelete]|r Greens no longer supports Delete-by-quality. " ..
-				fixed .. " profile(s) reset to Off. Add specific greens to the Delete list " ..
-				"if you want them deleted.")
-		end
+		-- intentionally empty -- see comment above.
 	end
 	db.version = AUTODELETE_DB_VERSION
 end
@@ -811,9 +1783,29 @@ end
 -- one keyed by item id, one keyed by lowercased+trimmed item name. The scan
 -- loop uses these for O(1) "is this item on the list" lookups.
 
-local function BuildWantedSets(listText)
+-- v3.20 (2026-05-23): added an optional cacheKey arg. Each DeleteItems /
+-- SellItems / HasPendingDeleteItems call previously re-parsed the delete
+-- list AND the keep list (two full O(n) walks per invocation, twice per
+-- scan tick). With cacheKey set, the parsed (nameSet, idSet) is memoized
+-- per logical list ("delete-list", "keep-list", "sell-list") and only
+-- rebuilt when the underlying text changes (string equality check is
+-- fast for interned listText strings). Cache lives on _G so its single
+-- table isn't a new file-scope local against Lua 5.1's 200-cap.
+-- Measured impact: ~3-4 ms saved per DeleteItems call on a list of ~100
+-- entries (user perf report 2026-05-23 had DeleteItems peaking at 41.5 ms
+-- avg 10.96 ms; this drops both numbers noticeably).
+_G.AutoDelete_WSCache = _G.AutoDelete_WSCache or {}
+
+local function BuildWantedSets(listText, cacheKey)
+	listText = listText or ""
+	if cacheKey then
+		local entry = _G.AutoDelete_WSCache[cacheKey]
+		if entry and entry.listText == listText then
+			return entry.names, entry.ids
+		end
+	end
 	local nameSet, idSet = {}, {}
-	for line in string.gmatch(listText or "", "[^\r\n]+") do
+	for line in string.gmatch(listText, "[^\r\n]+") do
 		local raw = Trim(line)
 		-- Strip comments
 		raw = string.gsub(raw, "%s*#.*$", "")
@@ -825,6 +1817,11 @@ local function BuildWantedSets(listText)
 		elseif raw ~= "" then
 			nameSet[Normalize(raw)] = true
 		end
+	end
+	if cacheKey then
+		_G.AutoDelete_WSCache[cacheKey] = {
+			listText = listText, names = nameSet, ids = idSet,
+		}
 	end
 	return nameSet, idSet
 end
@@ -1460,7 +2457,39 @@ local function RequestScan() scanRequested = true end
 -- At 8/tick × 2 ticks/sec (default scanInterval 0.5 s) = 16 items/sec,
 -- bagged against the 2.0 s BAGS_FULL_DELAY (~32 items absorbed before
 -- summon), which comfortably covers typical loot bursts.
-local DELETE_BATCH_SIZE = 8
+local DELETE_BATCH_SIZE = 32
+
+-- v3.20 (2026-05-23): Queue-throttled deletes. Inspired by Qloot
+-- (Skulltrail -- github.com/mmobrain/Qloot, see LootEngine.lua's
+-- LootQueue pattern). Before the refactor, DeleteItems executed
+-- DELETE_BATCH_SIZE PickupContainerItem + DeleteCursorItem pairs
+-- back-to-back inside a single scanner tick. With a batch of 8 the
+-- user's perf report showed a 41.5ms peak (~five dropped frames at
+-- 60fps) -- visible as a chug when a loot burst triggered the scan.
+--
+-- New model: DeleteItems WALKS the bags once and ENQUEUES every
+-- candidate it finds. A separate drain function (called from the
+-- scanner OnUpdate) pops one item per DELAY interval and executes
+-- the PickupContainerItem + DeleteCursorItem pair. Per-API cost
+-- (~4-6ms) is now spread across multiple frames -- no single frame
+-- exceeds budget, no chug.
+--
+-- Throughput tradeoff: previously 8 items per scan tick (every
+-- 0.25-0.5s) = ~16 items/sec. New steady-state at 110ms = ~9
+-- items/sec. For a typical scav burst of 20-30 items this is the
+-- difference between a 1.5s clean-up and a 2.5s clean-up -- well
+-- under the 5s BAG_QUIESCENCE_MAX_S anti-starvation cap.
+--
+-- Drain re-validates the slot link before executing: between walk
+-- and drain the user may have moved/used/swapped the item. Stale
+-- entries are silently dropped (counter: DeleteItems/queue-stale).
+-- Keep-list and Affix-Protection checks happen at WALK time, so
+-- the drain trusts the queue.
+_G.AutoDelete_DeleteQueue = _G.AutoDelete_DeleteQueue or {
+	items  = {},
+	lastAt = 0,
+	DELAY  = 0.11,  -- 110ms; matches Qloot default (tested against burst loot)
+}
 
 -- Cosmetic slots (shirts + tabards). Items in these slots are NEVER touched
 -- by the automatic rules (Auto-Delete Junk, Auto-Delete Common, Auto-Sell
@@ -1497,13 +2526,31 @@ local ComputeTotalFreeSlots
 local function DeleteItems()
 	local _p = AutoDelete_PerfBegin("DeleteItems")
 	if CursorHasItem() then AutoDelete_PerfEnd("DeleteItems", _p); return end
+	-- v3.20: Queue-throttled. If the previous walk's queue is still
+	-- draining, skip this walk -- otherwise we'd re-enqueue the same
+	-- slots and risk double-deletes once the drain catches up. The
+	-- drain re-runs every OnUpdate frame and pops at 110ms cadence, so
+	-- skipping here just defers until the queue is empty.
+	if #_G.AutoDelete_DeleteQueue.items > 0 then
+		-- v3.20 spike debug: count early-returns separately so the
+		-- per-frame counter shows queue activity vs full-walk activity.
+		if _G.AutoDelete_SpikeDebug then
+			local c = _G.AutoDelete_SpikeCounters
+			local sess = _G.AutoDelete_SpikeSession
+			c.dEarly    = (c.dEarly or 0) + 1
+			sess.dEarly = (sess.dEarly or 0) + 1
+		end
+		AutoDelete_PerfEnd("DeleteItems", _p)
+		return
+	end
 	-- Open a "self-update" suppression window so the BAG_UPDATE events
 	-- caused by our own PickupContainerItem + DeleteCursorItem calls
-	-- below don't restart the burst-quiescence wait in the scanner.
-	-- Without this, after every batch of 5 deletes the scanner would
-	-- see "BAG_UPDATE arrived <1s ago" and wait another full second --
-	-- turning a 1.5s clearing into a 7s crawl. 0.5s window covers the
-	-- typical 1-2 frame delay between API call and BAG_UPDATE arrival.
+	-- (now fired by the drain, not inline) don't restart the burst-
+	-- quiescence wait in the scanner. Without this, after every drain
+	-- pop the scanner would see "BAG_UPDATE arrived <1s ago" and wait
+	-- another full second -- turning the queue drain into a crawl.
+	-- 0.5s window covers the typical 1-2 frame delay between API call
+	-- and BAG_UPDATE arrival; the drain re-arms it on every pop.
 	_G.AutoDelete_SelfBagUpdateUntil = GetTime() + 0.5
 	local db = GetDB()
 	local profile = GetActiveProfile(db)
@@ -1520,20 +2567,30 @@ local function DeleteItems()
 	end
 	_G._AutoDelete_DebugDelGateLogged = false
 
-	local wantedNames, wantedIDs = BuildWantedSets(profile.listText)
+	-- v3.20 perf instrumentation: separate parse / walk / api sub-phases
+	-- so /del perf report can pinpoint where the per-call cost goes.
+	-- Pre-cached BuildWantedSets (added 2026-05-23) should make "parse"
+	-- near-zero on a 2nd+ call against the same list text.
+	local _pParse = AutoDelete_PerfBegin("DeleteItems/parse")
+	local wantedNames, wantedIDs = BuildWantedSets(profile.listText, "delete-list")
 	local hasWanted = next(wantedNames) or next(wantedIDs)
 	-- Pre-built Keep-list hash sets so the inner loop doesn't re-parse
 	-- the whitelist text per-item. See IsWhitelistedFast for the perf
 	-- rationale (the slow path was the dominant cost in DeleteItems).
-	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText)
+	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	AutoDelete_PerfEnd("DeleteItems/parse", _pParse)
 	-- Tri-state quality filter: only "delete" is a delete-path trigger.
 	-- "sell" is handled in SellItems; "off" is a no-op for both paths.
 	local doGray = (profile.qualityActionJunk == "delete")
 	local doCommon = (profile.qualityActionCommon == "delete")
+	-- v3.20 (post-spec change 2026-05-23): Greens can now be auto-deleted
+	-- too, but ONLY for equippable gear (same gate as doCommon). Reagents,
+	-- consumables, bags, and quest items stay safe.
+	local doGreens = (profile.qualityActionGreens == "delete")
 
-	if not hasWanted and not doGray and not doCommon then
+	if not hasWanted and not doGray and not doCommon and not doGreens then
 		if _G.AutoDelete_DebugSell and not _G._AutoDelete_DebugDelEmptyLogged then
-			print("|cffff8000[AutoDelete DEBUG]|r delete scan: no work - Delete list empty AND Junk/Common quality filters not in delete mode.")
+			print("|cffff8000[AutoDelete DEBUG]|r delete scan: no work - Delete list empty AND Junk/Common/Greens quality filters not in delete mode.")
 			_G._AutoDelete_DebugDelEmptyLogged = true
 		end
 		AutoDelete_PerfEnd("DeleteItems", _p)
@@ -1541,13 +2598,52 @@ local function DeleteItems()
 	end
 	_G._AutoDelete_DebugDelEmptyLogged = false
 
-	local deleted = 0
+	local enqueued = 0
+	local Q = _G.AutoDelete_DeleteQueue
+
+	-- v3.20 perf instrumentation: time the whole bag-walk + per-item
+	-- decision pass as "DeleteItems/loop". Per-API cost (now paid by
+	-- the drain, not this walk) is recorded as "DeleteItems/api-delete"
+	-- in AutoDelete_DrainDeleteQueue. So the addon-side walk cost
+	-- IS DeleteItems/loop; api-delete is the drain's per-pop cost.
+	-- Slot/item counters give the user a sense of how much work the walk
+	-- did (slots-walked is per-non-empty-slot, separate counters for
+	-- enqueue / keep-skip / affix-skip outcomes; items-deleted is
+	-- bumped by the drain when the API call actually executes).
+	local _pLoop = AutoDelete_PerfBegin("DeleteItems/loop")
+	-- v3.20 spike debug: count this as a full DeleteItems walk (vs early-return).
+	if _G.AutoDelete_SpikeDebug then
+		local c = _G.AutoDelete_SpikeCounters
+		local sess = _G.AutoDelete_SpikeSession
+		c.dWalk    = (c.dWalk or 0) + 1
+		sess.dWalk = (sess.dWalk or 0) + 1
+	end
 
 	for bag = 0, 4 do
 		for slot = 1, GetContainerNumSlots(bag) do
-			if deleted >= DELETE_BATCH_SIZE then AutoDelete_PerfEnd("DeleteItems", _p); return end
+			if enqueued >= DELETE_BATCH_SIZE then
+				AutoDelete_PerfEnd("DeleteItems/loop", _pLoop)
+				-- v3.20 Goblin defer: stamp walk completion + enqueue count
+				-- on the batch-full early-return path too. Goblin logic
+				-- uses these to decide if the pipeline has had a chance
+				-- to scan since bags went below threshold.
+				_G.AutoDelete_LastDeleteWalkAt       = GetTime()
+				_G.AutoDelete_LastDeleteWalkEnqueued = enqueued
+				AutoDelete_PerfEnd("DeleteItems", _p)
+				return
+			end
 			local _, _, locked, _, _, _, itemLink = GetContainerItemInfo(bag, slot)
 			if itemLink and not locked then
+				AutoDelete_PerfCount("DeleteItems/slots-walked", 1)
+				-- v3.20 spike debug: count per-frame slots-touched by AutoDelete's
+				-- own walk loops (separate from updSlot, which counts external
+				-- bag-repaint hook fires).
+				if _G.AutoDelete_SpikeDebug then
+					local _sc = _G.AutoDelete_SpikeCounters
+					local _ss = _G.AutoDelete_SpikeSession
+					_sc.slotsWalked = (_sc.slotsWalked or 0) + 1
+					_ss.slotsWalked = (_ss.slotsWalked or 0) + 1
+				end
 				-- 6th return = itemType. Quest items (itemType "Quest") are
 				-- normally protected from auto-rules - but the Delete list is
 				-- explicit user intent and overrides quest protection. Auto
@@ -1591,6 +2687,20 @@ local function DeleteItems()
 							shouldDelete = true
 						end
 					end
+
+					-- v3.20: Check Greens (uncommon, quality 2) auto-delete.
+					-- Mirrors the Common branch: only equippable gear, never
+					-- bags or cosmetic slots. Reagents/consumables are safe
+					-- because they have no equipSlot. Spec: 2026-05-23, user
+					-- explicitly asked for Greens to support Delete again
+					-- (was Sell-only earlier this cycle).
+					if not shouldDelete and doGreens and itemQuality and itemQuality == 2
+						and not IsCosmeticSlot(itemLink) then
+						local _, _, _, _, _, _, _, _, equipSlot = GetItemInfo(itemLink)
+						if equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG" then
+							shouldDelete = true
+						end
+					end
 				end
 
 				-- Execute the delete. Keep list always overrides - even Delete
@@ -1599,32 +2709,360 @@ local function DeleteItems()
 				-- meets the iLvl floor) is the second safety net. Uses
 				-- IsWhitelistedFast against pre-built keepNames/keepIDs to
 				-- avoid the per-item re-parse of the entire whitelist text.
-				if shouldDelete and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
-					and not IsAffixProtected(profile, bag, slot, itemLink, "delete") then
-					if _G.AutoDelete_DebugSell then
-						local reason = onDeleteList and "DeleteList" or "auto"
-						local questNote = (onDeleteList and isQuestItem) and " [QUEST ITEM, overridden by Delete list]" or ""
-						print(string.format(
-							"|cffff8000[AutoDelete DEBUG]|r DELETING: %s (id=%s) | quality=%s | reason=%s%s",
-							tostring(itemName), tostring(itemId), tostring(itemQuality), reason, questNote
-						))
+				--
+				-- v3.20 perf: split the gating check so we can count
+				-- skipped-by-keep vs skipped-by-affix separately. Same
+				-- semantic outcome as the single combined `if`, just
+				-- with diagnostic counters.
+				if shouldDelete then
+					local keepBlocked = _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
+					local affixBlocked = (not keepBlocked) and IsAffixProtected(profile, bag, slot, itemLink, "delete")
+					if not keepBlocked and not affixBlocked then
+						if _G.AutoDelete_DebugSell then
+							local reason = onDeleteList and "DeleteList" or "auto"
+							local questNote = (onDeleteList and isQuestItem) and " [QUEST ITEM, overridden by Delete list]" or ""
+							print(string.format(
+								"|cffff8000[AutoDelete DEBUG]|r ENQUEUE: %s (id=%s) | quality=%s | reason=%s%s",
+								tostring(itemName), tostring(itemId), tostring(itemQuality), reason, questNote
+							))
+						end
+						-- v3.20 queue-throttled deletes: enqueue instead of
+						-- executing the API call now. AutoDelete_DrainDeleteQueue
+						-- (called from the scanner OnUpdate) pops one item per
+						-- DELAY (110ms) and runs PickupContainerItem +
+						-- DeleteCursorItem then. Capture link+name+id so the
+						-- drain can re-validate the slot before acting (the
+						-- user may move/use/swap the item between walk and
+						-- drain). items-deleted counter + BumpStat happen at
+						-- drain time when the API call actually executes.
+						Q.items[#Q.items + 1] = {
+							bag   = bag,
+							slot  = slot,
+							link  = itemLink,
+							name  = itemName,
+							id    = itemId,
+							-- Retry counter for the drain's locked-slot
+							-- deferral. Incremented when the slot is briefly
+							-- locked (server-lag race, mid-flight BAG_UPDATE)
+							-- and the entry is requeued. Dropped after
+							-- QUEUE_MAX_TRIES (4) so a permanently stuck
+							-- slot can't wedge the queue.
+							tries = 0,
+						}
+						AutoDelete_PerfCount("DeleteItems/items-enqueued", 1)
+						enqueued = enqueued + 1
+						-- v3.20 spike session: cumulative itemsEnqueued total.
+						if _G.AutoDelete_SpikeDebug then
+							local _ss = _G.AutoDelete_SpikeSession
+							_ss.itemsEnqueued = (_ss.itemsEnqueued or 0) + 1
+						end
+						-- v3.20 Goblin defer: stamp when an enqueue happened.
+						-- Bag-full check counts an enqueue within the recency
+						-- window as "pipeline busy."
+						_G.AutoDelete_LastEnqueueAt = GetTime()
+					elseif keepBlocked then
+						AutoDelete_PerfCount("DeleteItems/items-skipped-keep", 1)
+						if _G.AutoDelete_DebugSell then
+							print(string.format(
+								"|cffff8000[AutoDelete DEBUG]|r delete BLOCKED by Keep list: %s (id=%s)",
+								tostring(itemName), tostring(itemId)
+							))
+						end
+					else  -- affixBlocked
+						AutoDelete_PerfCount("DeleteItems/items-skipped-affix", 1)
+						if _G.AutoDelete_DebugSell then
+							print(string.format(
+								"|cffff8000[AutoDelete DEBUG]|r delete BLOCKED by Affix Protection: %s (id=%s)",
+								tostring(itemName), tostring(itemId)
+							))
+						end
 					end
-					ClearCursor()
-					PickupContainerItem(bag, slot)
-					if CursorHasItem() then DeleteCursorItem(); ClearCursor() end
-					deleted = deleted + 1
-					BumpStat("itemsDeleted", 1)
-				elseif shouldDelete and _G.AutoDelete_DebugSell then
-					-- Matched a delete rule but the Keep list overrode it.
-					print(string.format(
-						"|cffff8000[AutoDelete DEBUG]|r delete BLOCKED by Keep list: %s (id=%s)",
-						tostring(itemName), tostring(itemId)
-					))
 				end
 			end
 		end
 	end
+	AutoDelete_PerfEnd("DeleteItems/loop", _pLoop)
+	-- v3.20 Goblin defer: stamp WHEN the walk finished and HOW MANY items
+	-- it enqueued. Bag-full check reads these to decide whether to defer
+	-- (pipeline busy or just-scanned) vs fire (scanned and found nothing).
+	-- See _G.AutoDelete_BagsBelowAt / LastDeleteWalkAt / LastDeleteWalkEnqueued.
+	_G.AutoDelete_LastDeleteWalkAt       = GetTime()
+	_G.AutoDelete_LastDeleteWalkEnqueued = enqueued
 	AutoDelete_PerfEnd("DeleteItems", _p)
+end
+
+-- v3.20 queue drain. Called once per scanner OnUpdate tick. Pops at most
+-- one entry from _G.AutoDelete_DeleteQueue.items per DELAY interval and
+-- runs the actual PickupContainerItem + DeleteCursorItem pair. Cheap
+-- early-out when the queue is empty or the throttle hasn't elapsed.
+--
+-- Re-validates the slot link before acting: between walk and drain the
+-- user may have moved/swapped/used the item (slot now empty, holding a
+-- different item, or item locked because they're dragging).
+--
+-- Three outcomes:
+--   1. Link matches, slot not locked -> execute delete, advance lastAt.
+--   2. Link matches, slot LOCKED (server-lag race, mid-flight bag
+--      update, etc.) -> defer by re-queueing to the tail with an
+--      entry.tries counter. Drop only after QUEUE_MAX_TRIES (4), so
+--      transient locks don't lose us an item. Drop-after-cap is
+--      counted as DeleteItems/queue-stale.
+--   3. Link mismatch (item really moved/used/destroyed) -> drop
+--      immediately, count as DeleteItems/queue-stale, let the next
+--      scan tick re-enqueue from the new slot if still applicable.
+--
+-- Throttle clamp (Qloot pattern): instead of "Q.lastAt = now" (which
+-- after a long stall like a loading screen could in theory let a
+-- subsequent change to the loop pop multiple items per frame), we
+-- advance lastAt by EXACTLY Q.DELAY, capped at now. That way even if
+-- some future change consolidates multiple pops into a single tick,
+-- the throttle cadence is preserved.
+--
+-- Self-update suppression: re-arms _G.AutoDelete_SelfBagUpdateUntil on
+-- every successful pop so the BAG_UPDATE handler keeps treating our
+-- own deletes as not-a-real-loot and the burst-quiescence wait
+-- doesn't restart.
+-- Locked-slot retry cap. Lives on _G (not file-local) because the main
+-- chunk is at Lua 5.1's 200-local ceiling; adding a file-local here
+-- triggers "main function has more than 200 local variables".
+_G.AutoDelete_QueueMaxTries = _G.AutoDelete_QueueMaxTries or 4
+
+-- v3.20 drain-time re-validation. The walk filters at enqueue time, but
+-- between enqueue and drain (up to a few seconds for a 32-item queue
+-- at 110ms throttle) the user may have:
+--   * Added the item to the Keep list
+--   * Toggled Affix Protection on / raised its iLvl floor
+--   * Changed quality-action filters (e.g. Greens delete -> off)
+--   * Removed the item from the Delete list
+--   * Switched to a different profile entirely
+-- All of those should void the queued delete. We re-run the same gates
+-- the walk used, against the CURRENT cachedProfile, before calling
+-- PickupContainerItem. Cost per call is small: GetItemInfo on a warm
+-- cache + cached BuildWantedSets hash lookups + cached affix check.
+--
+-- Returns (eligible, reason) where reason on the false branch is one
+-- of: "rule-changed" / "keep-blocked" / "affix-blocked". Counters with
+-- the same suffix are bumped by the drain.
+--
+-- Lives on _G to dodge the 200-local cap. Closure still captures the
+-- file-local upvalues (BuildWantedSets, Normalize, IsCosmeticSlot,
+-- IsAffixProtected) so the helper behaves identically to inline code.
+_G.AutoDelete_ValidateDrainEntry = function(profile, entry, currentLink)
+	-- GetItemInfo on a warm cache is near-free; we need name + quality
+	-- + itemClass for quest detection + equipSlot for the auto-rule
+	-- gates that only fire on equippable gear.
+	local itemName, _, itemQuality, _, _, itemClass, _, _, equipSlot = GetItemInfo(currentLink)
+	if not itemName then
+		-- Cache went cold somehow (extreme edge case). Refuse to act;
+		-- next walk will re-enqueue if the item still qualifies.
+		return false, "rule-changed"
+	end
+	local isQuestItem = (itemClass == "Quest")
+
+	-- Re-read lists from the CURRENT profile. BuildWantedSets is cached
+	-- by listText pointer so an unchanged list returns the prior tables
+	-- in O(1); a changed list rebuilds once and caches the new tables.
+	local wantedNames, wantedIDs = BuildWantedSets(profile.listText,      "delete-list")
+	local keepNames,   keepIDs   = BuildWantedSets(profile.whitelistText, "keep-list")
+
+	-- Step 1: still on the Delete list? (overrides quest protection)
+	local onDeleteList = false
+	if entry.id and wantedIDs[entry.id] then onDeleteList = true end
+	if not onDeleteList and itemName and wantedNames[Normalize(itemName)] then
+		onDeleteList = true
+	end
+
+	-- Step 2: still matches an auto-rule? (only when not on Delete list
+	-- AND not a quest item).
+	local stillMatches = false
+	if onDeleteList then
+		stillMatches = true
+	elseif not isQuestItem then
+		if profile.qualityActionJunk == "delete"
+			and itemQuality == 0
+			and not IsCosmeticSlot(currentLink) then
+			stillMatches = true
+		end
+		if not stillMatches
+			and profile.qualityActionCommon == "delete"
+			and itemQuality == 1
+			and not IsCosmeticSlot(currentLink)
+			and equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG" then
+			stillMatches = true
+		end
+		if not stillMatches
+			and profile.qualityActionGreens == "delete"
+			and itemQuality == 2
+			and not IsCosmeticSlot(currentLink)
+			and equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG" then
+			stillMatches = true
+		end
+	end
+
+	if not stillMatches then return false, "rule-changed" end
+
+	-- Step 3: NOW on the Keep list? (was checked at walk time, but the
+	-- user may have just added it via drag-and-drop or the override
+	-- popup's "Take off Keep list" path).
+	if _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, entry.id, itemName) then
+		return false, "keep-blocked"
+	end
+
+	-- Step 4: NOW affix-protected? (Affix Protection toggle or iLvl
+	-- floor change between enqueue and drain).
+	if IsAffixProtected(profile, entry.bag, entry.slot, currentLink, "delete") then
+		return false, "affix-blocked"
+	end
+
+	return true, nil
+end
+
+function _G.AutoDelete_DrainDeleteQueue(now)
+	local Q = _G.AutoDelete_DeleteQueue
+	local n = #Q.items
+	if n == 0 then return end
+	if now - Q.lastAt < Q.DELAY then
+		-- v3.20 spike debug: count throttle-skipped tick (queue has work,
+		-- but DELAY hasn't elapsed). Helps distinguish "drain idle" from
+		-- "drain throttle-waiting" in the per-frame breakdown.
+		if _G.AutoDelete_SpikeDebug then
+			local c = _G.AutoDelete_SpikeCounters
+			local sess = _G.AutoDelete_SpikeSession
+			c.drainSkip    = (c.drainSkip or 0) + 1
+			sess.drainSkip = (sess.drainSkip or 0) + 1
+		end
+		return
+	end
+	-- Cursor busy: user is dragging or another action holds it. Skip
+	-- this tick; the queue waits and we try again next frame.
+	if CursorHasItem() then
+		if _G.AutoDelete_SpikeDebug then
+			local c = _G.AutoDelete_SpikeCounters
+			local sess = _G.AutoDelete_SpikeSession
+			c.drainSkip    = (c.drainSkip or 0) + 1
+			sess.drainSkip = (sess.drainSkip or 0) + 1
+		end
+		return
+	end
+
+	local _pDrain = AutoDelete_PerfBegin("DeleteItems/drain")
+	-- v3.20 spike debug: count actual drain pops (one item processed).
+	if _G.AutoDelete_SpikeDebug then
+		local c = _G.AutoDelete_SpikeCounters
+		local sess = _G.AutoDelete_SpikeSession
+		c.drain    = (c.drain or 0) + 1
+		sess.drain = (sess.drain or 0) + 1
+	end
+	-- Pop head. Small max length (DELETE_BATCH_SIZE = 32) so the O(n)
+	-- table.remove at index 1 isn't a concern; a ring-buffer head
+	-- index would add bookkeeping for no measurable win.
+	local entry = table.remove(Q.items, 1)
+
+	-- Re-validate against current slot state.
+	local _, _, locked, _, _, _, currentLink = GetContainerItemInfo(entry.bag, entry.slot)
+	local linkMatches = (currentLink == entry.link)
+
+	if linkMatches and not locked then
+		-- v3.20 drain-time re-validation: trust nothing the walk decided.
+		-- Between enqueue and now (up to several seconds for a full
+		-- queue at 110ms throttle) the user may have changed Keep list,
+		-- Affix Protection, quality filters, or the Delete list itself.
+		-- The validator returns (eligible, reason). Drop with the
+		-- matching counter on any failure; the item stays out of bags
+		-- until the next walk reconfirms it under current settings.
+		local profile = cachedProfile  -- master-enable already gated by OnUpdate
+		local eligible, reason = _G.AutoDelete_ValidateDrainEntry(profile, entry, currentLink)
+		if not eligible then
+			AutoDelete_PerfCount("DeleteItems/queue-" .. reason, 1)
+			if _G.AutoDelete_DebugSell then
+				print(string.format(
+					"|cffff8000[AutoDelete DEBUG]|r drain BLOCKED (%s): %s",
+					reason, tostring(entry.name)
+				))
+			end
+			-- Advance lastAt so this validation tick counts; next entry
+			-- gets its 110ms window like any successful or stale pop.
+			Q.lastAt = math.max(now, Q.lastAt + Q.DELAY)
+			AutoDelete_PerfEnd("DeleteItems/drain", _pDrain)
+			return
+		end
+
+		-- Outcome 1: execute the delete (all gates re-confirmed).
+		_G.AutoDelete_SelfBagUpdateUntil = now + 0.5
+		local _pApi = AutoDelete_PerfBegin("DeleteItems/api-delete")
+		ClearCursor()
+		PickupContainerItem(entry.bag, entry.slot)
+		if CursorHasItem() then DeleteCursorItem(); ClearCursor() end
+		AutoDelete_PerfEnd("DeleteItems/api-delete", _pApi)
+		AutoDelete_PerfCount("DeleteItems/items-deleted", 1)
+		BumpStat("itemsDeleted", 1)
+		-- v3.20 spike session: cumulative itemsDeleted total.
+		if _G.AutoDelete_SpikeDebug then
+			local _ss = _G.AutoDelete_SpikeSession
+			_ss.itemsDeleted = (_ss.itemsDeleted or 0) + 1
+		end
+		-- v3.20 Goblin defer: stamp when a drain pop succeeded. Bag-full
+		-- check counts a drain within the recency window as "pipeline busy."
+		_G.AutoDelete_LastDrainPopAt = now
+		if _G.AutoDelete_DebugSell then
+			print(string.format(
+				"|cffff8000[AutoDelete DEBUG]|r DELETED (queued): %s",
+				tostring(entry.name)
+			))
+		end
+		-- Throttle clamp: advance lastAt by EXACTLY one DELAY. After a
+		-- long stall (loading screen, alt-tab) lastAt may be way in the
+		-- past; advancing to now+DELAY would skip the next several pop
+		-- windows we'd otherwise be entitled to, but we don't want a
+		-- burst either. math.max keeps lastAt at or after `now` so the
+		-- next pop is at least DELAY away in real time.
+		Q.lastAt = math.max(now, Q.lastAt + Q.DELAY)
+	elseif linkMatches and locked then
+		-- Outcome 2: locked-slot deferral. Server-lag race or mid-flight
+		-- BAG_UPDATE briefly locked the slot. Re-queue to the tail with
+		-- an incremented tries counter so other items get a turn while
+		-- this one waits for the lock to clear. Drop only after the
+		-- retry cap, which is high enough to ride out normal latency
+		-- but low enough that a stuck slot eventually frees the queue.
+		entry.tries = (entry.tries or 0) + 1
+		if entry.tries < _G.AutoDelete_QueueMaxTries then
+			Q.items[#Q.items + 1] = entry
+			AutoDelete_PerfCount("DeleteItems/queue-deferred", 1)
+			if _G.AutoDelete_DebugSell then
+				print(string.format(
+					"|cffff8000[AutoDelete DEBUG]|r drain DEFERRED (slot locked, try %d/%d): %s",
+					entry.tries, _G.AutoDelete_QueueMaxTries, tostring(entry.name)
+				))
+			end
+		else
+			AutoDelete_PerfCount("DeleteItems/queue-stale", 1)
+			if _G.AutoDelete_DebugSell then
+				print(string.format(
+					"|cffff8000[AutoDelete DEBUG]|r drain DROPPED (locked past %d tries): %s",
+					_G.AutoDelete_QueueMaxTries, tostring(entry.name)
+				))
+			end
+		end
+		-- Still advance lastAt: deferring a locked entry counts as a
+		-- "tick spent" so we don't burn through the rest of the queue
+		-- back-to-back while this one cycles.
+		Q.lastAt = math.max(now, Q.lastAt + Q.DELAY)
+	else
+		-- Outcome 3: link mismatch. Item really moved/used/destroyed.
+		-- Drop immediately; the next scan tick will re-enqueue from
+		-- the new slot if the item is still in bags and still matches
+		-- a delete rule.
+		AutoDelete_PerfCount("DeleteItems/queue-stale", 1)
+		if _G.AutoDelete_DebugSell then
+			print(string.format(
+				"|cffff8000[AutoDelete DEBUG]|r drain DROPPED stale entry: %s (slot changed)",
+				tostring(entry.name)
+			))
+		end
+		Q.lastAt = math.max(now, Q.lastAt + Q.DELAY)
+	end
+
+	AutoDelete_PerfEnd("DeleteItems/drain", _pDrain)
 end
 
 -- ============================================================================
@@ -1657,7 +3095,7 @@ function AutoDelete_HasPendingDeleteItems(profile)
 	-- mirrors DeleteItems' canonical "is the user's Delete list non-empty"
 	-- check via next(); it's the cheap way to skip the per-slot list
 	-- match when the list has zero entries.
-	local wantedNames, wantedIDs = BuildWantedSets(profile.listText)
+	local wantedNames, wantedIDs = BuildWantedSets(profile.listText, "delete-list")
 	local hasWanted = next(wantedNames) or next(wantedIDs)
 	-- Bail early if there's nothing to look for. Saves the full bag walk
 	-- in the common case of a brand-new profile with no rules enabled.
@@ -1665,8 +3103,9 @@ function AutoDelete_HasPendingDeleteItems(profile)
 
 	-- Pre-built Keep-list sets so the inner loop's up-to-3 IsWhitelisted
 	-- calls per slot become 3 hash lookups instead of 3 full whitelist
-	-- re-parses. Same optimization as DeleteItems' hot path.
-	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText)
+	-- re-parses. Same optimization as DeleteItems' hot path. Shares the
+	-- "keep-list" cache slot with DeleteItems / SellItems.
+	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
 
 	for bag = 0, 4 do
 		for slot = 1, (GetContainerNumSlots(bag) or 0) do
@@ -1841,6 +3280,14 @@ end
 -- bypass this function so the per-marker debug prints still work.
 function AutoDelete_ScanBagItemMarkers(bag, slot, link)
 	local _p = AutoDelete_PerfBegin("AutoDelete_ScanBagItemMarkers")
+	-- v3.20 spike debug: count cold tooltip scans (this function is
+	-- the unified entry for affix + soulbound + BoE marker scans).
+	if _G.AutoDelete_SpikeDebug then
+		local c = _G.AutoDelete_SpikeCounters
+		local sess = _G.AutoDelete_SpikeSession
+		c.ttScanRan    = (c.ttScanRan or 0) + 1
+		sess.ttScanRan = (sess.ttScanRan or 0) + 1
+	end
 	boeTip:Hide()
 	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
 	boeTip:ClearLines()
@@ -2593,6 +4040,13 @@ function AutoDelete_QueueAffixScan(link, bag, slot, button)
 		if entry.button == button and entry.link == link then return end
 	end
 	table.insert(AutoDelete_affixScanQueue, { link = link, bag = bag, slot = slot, button = button })
+	-- v3.20 spike debug: count items queued for cold affix scan this frame.
+	if _G.AutoDelete_SpikeDebug then
+		local c = _G.AutoDelete_SpikeCounters
+		local sess = _G.AutoDelete_SpikeSession
+		c.axQueued    = (c.axQueued or 0) + 1
+		sess.axQueued = (sess.axQueued or 0) + 1
+	end
 end
 
 -- Called from scanner:OnUpdate every frame. No-op when the queue is
@@ -2607,6 +4061,14 @@ function AutoDelete_ProcessAffixScanQueue(now)
 	while budget > 0 and #AutoDelete_affixScanQueue > 0 do
 		local entry = table.remove(AutoDelete_affixScanQueue, 1)
 		budget = budget - 1
+		-- v3.20 spike debug: count actual cold affix scans this frame
+		-- (separate from axQueued so we can see the queue's drain rate).
+		if _G.AutoDelete_SpikeDebug then
+			local c = _G.AutoDelete_SpikeCounters
+			local sess = _G.AutoDelete_SpikeSession
+			c.axRan    = (c.axRan or 0) + 1
+			sess.axRan = (sess.axRan or 0) + 1
+		end
 		-- Validate: did the slot's occupant change while queued? If so,
 		-- skip the scan (the new occupant has its own queue entry from
 		-- the natural ContainerFrame_Update / B:UpdateSlot path).
@@ -2795,6 +4257,16 @@ end
 
 local function UpdateAffixDotForFrame(frame)
 	local _p = AutoDelete_PerfBegin("UpdateAffixDotForFrame")
+	-- v3.20 spike debug: count Blizzard ContainerFrame_Update hook fires
+	-- against updSlot so the per-frame counter reflects total bag-slot
+	-- work from ALL sources (ours + Blizzard + ElvUI). Inline check
+	-- because this fires per-slot during bag rebuilds.
+	if _G.AutoDelete_SpikeDebug then
+		local c = _G.AutoDelete_SpikeCounters
+		local sess = _G.AutoDelete_SpikeSession
+		c.updSlot    = (c.updSlot or 0) + 1
+		sess.updSlot = (sess.updSlot or 0) + 1
+	end
 	if not frame then AutoDelete_PerfEnd("UpdateAffixDotForFrame", _p); return end
 	-- Visibility short-circuit. Blizzard fires ContainerFrame_Update on
 	-- ALL default container frames during a bag refresh storm, even if
@@ -2893,6 +4365,24 @@ local function InstallElvUIAffixDotHook()
 		if not ok or not B or not B.UpdateSlot then return end   -- (3)
 
 		hooksecurefunc(B, "UpdateSlot", function(self, frame, bagID, slotID)
+			-- v3.20 spike debug: count ElvUI per-slot repaint fires.
+			-- Bumped BEFORE the disabled-gate below so the counter still
+			-- reflects how often ElvUI calls UpdateSlot during the test,
+			-- regardless of whether we do any AutoDelete work.
+			if _G.AutoDelete_SpikeDebug then
+				local c = _G.AutoDelete_SpikeCounters
+				local sess = _G.AutoDelete_SpikeSession
+				c.updSlot    = (c.updSlot or 0) + 1
+				sess.updSlot = (sess.updSlot or 0) + 1
+			end
+			-- v3.20 A/B gate (set via /del elvuihook off): skip ALL
+			-- AutoDelete work in this hook to isolate whether our
+			-- per-slot DecideDot/SetButtonAffixDot work is amplifying
+			-- ElvUI's per-pickup stutter. Placed BEFORE PerfBegin so
+			-- attribMs doesn't include the skipped path; the test
+			-- frame's attribMs reflects only the work we actually did.
+			if _G.AutoDelete_ElvUIHookDisabled then return end
+
 			local _p = AutoDelete_PerfBegin("ElvUI:UpdateSlot hook")
 			if not frame or not frame.Bags then AutoDelete_PerfEnd("ElvUI:UpdateSlot hook", _p); return end
 			local bagFrame = frame.Bags[bagID]
@@ -2944,6 +4434,20 @@ end
 -- above DeleteItems so the scanner can capture it as an upvalue.
 IsAffixProtected = function(profile, bag, slot, itemLink, action)
 	if action ~= "delete" and action ~= "sell" then return false end
+	-- (Fix C, 2026-05-23) Early exit when NO affix gate is active for the
+	-- action. Without this we still entered the collection-mode HasAffix
+	-- tooltip-scan branch below even when neither collection mode nor the
+	-- per-action protection toggle was on. Per-item in the DeleteItems
+	-- hot loop, that turned every delete-eligible item into a tooltip scan
+	-- the user couldn't disable. The branches below preserve the original
+	-- behavior when ANY gate is active; this just skips the work when none
+	-- is. The visible delete-loop hiccups the user reported in 2026-05-23
+	-- traced back to here.
+	local protectThisAction = (action == "delete" and profile.protectAffixFromDelete)
+		or (action == "sell" and profile.protectAffixFromSell)
+	if not profile.affixCollectionMode and not protectThisAction then
+		return false
+	end
 	-- Collection-mode hard-protect: when collection mode is ON, items
 	-- carrying an UNKNOWN affix are NEVER auto-sold or auto-deleted,
 	-- regardless of the per-action toggles AND regardless of the iLvl
@@ -3586,16 +5090,23 @@ local function SellItems(silent)
 		return
 	end
 	if CursorHasItem() then return end
+	if _G.AutoDelete_SpikeDebug then
+		local _sc = _G.AutoDelete_SpikeCounters
+		local _ss = _G.AutoDelete_SpikeSession
+		_sc.sell = (_sc.sell or 0) + 1
+		_ss.sell = (_ss.sell or 0) + 1
+	end
 
 	local db = GetDB()
 	local profile = GetActiveProfile(db)
 
-	local sellNames, sellIDs = BuildWantedSets(profile.sellListText)
+	local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
 	-- Pre-built Keep-list sets so the per-slot Keep-list short-circuit
 	-- below is an O(1) hash lookup instead of a full whitelist re-parse.
 	-- Same optimization as DeleteItems' hot path -- /del perf showed the
 	-- old IsWhitelisted re-parse was the dominant cost in scan loops.
-	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText)
+	-- "keep-list" cache key is shared with DeleteItems / HasPendingDeleteItems.
+	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
 
 	local batchCount = 0
 
@@ -4199,7 +5710,18 @@ local openLastTarget      = nil    -- { bag, slot, link, name } or nil
 -- One-Key Open feature should target. Profile flags gate the answer so
 -- the Process Bags panel can call this with the live profile and get
 -- the same answer the keybind scanner would.
-local function IsOpenable(profile, bag, slot)
+-- IgnoringKeep variant: runs every eligibility check EXCEPT the Keep-list
+-- filter. The v3.20 Keep-list override popup needs to detect items that
+-- WOULD have been the next target if not for the Keep list, then offer
+-- the user a choice; that requires a predicate that ignores Keep. The
+-- public IsOpenable wrapper layers the Keep check back on so external
+-- callers (Process Bags panel, etc.) see the same "Keep wins" behavior
+-- as the other three actions.
+--
+-- Exposed on _G to keep the main chunk under Lua 5.1's 200-local cap
+-- (wiki §13.1). Same pattern the addon already uses for cross-file
+-- helpers like _G.AutoDelete_RefreshOwnedAffixes.
+function _G.AutoDelete_IsOpenable_IgnoringKeep(profile, bag, slot)
 	if not profile or not profile.autoOpenEnabled then return false end
 	local link = GetContainerItemLink(bag, slot)
 	if not link then return false end
@@ -4215,8 +5737,28 @@ local function IsOpenable(profile, bag, slot)
 	return not IsItemLocked(bag, slot)
 end
 
+local function IsOpenable(profile, bag, slot)
+	if not _G.AutoDelete_IsOpenable_IgnoringKeep(profile, bag, slot) then return false end
+	-- v3.20: Keep-list check added (was missing in prior versions; the gap
+	-- meant a clam on the Keep list could still be auto-opened by the
+	-- keybind, contradicting "Keep wins" behavior the other three actions
+	-- already had).
+	local link = GetContainerItemLink(bag, slot)
+	local id = GetItemIDFromLink(link)
+	local name = GetItemInfo(link)
+	if not name then return false end
+	if IsWhitelisted(profile, id, name) then return false end
+	return true
+end
+
 local function FindNextOpenable(profile)
 	if not profile or not profile.autoOpenEnabled then return nil end
+	if _G.AutoDelete_SpikeDebug then
+		local _sc = _G.AutoDelete_SpikeCounters
+		local _ss = _G.AutoDelete_SpikeSession
+		_sc.find = (_sc.find or 0) + 1
+		_ss.find = (_ss.find or 0) + 1
+	end
 	for bag = 0, NUM_BAG_SLOTS do
 		local slots = GetContainerNumSlots(bag) or 0
 		for slot = 1, slots do
@@ -4270,6 +5812,23 @@ local function UpdateOpenButton()
 	if InCombatLockdown and InCombatLockdown() then
 		openUpdatePending = true
 		return
+	end
+	-- v3.20 Keep-list override (see UpdateDisenchantButton for the pattern).
+	local _oo = _G.AutoDelete_KeepOverrideTargets and _G.AutoDelete_KeepOverrideTargets.open
+	if _oo then
+		local _oLink = GetContainerItemLink(_oo.bag, _oo.slot)
+		local _oId = _oLink and GetItemIDFromLink(_oLink) or nil
+		if _oId == _oo.id then
+			local _oName = GetItemInfo(_oLink)
+			openLastTarget = { bag = _oo.bag, slot = _oo.slot, link = _oLink, name = _oName }
+			ApplyOpenMacrotext(_oo.bag, _oo.slot)
+			local panel = _G.AutoDeleteOptionsPanel
+			if panel and panel.IsShown and panel:IsShown() and panel._refreshOpenStatus then
+				panel:_refreshOpenStatus()
+			end
+			return
+		end
+		_G.AutoDelete_KeepOverrideTargets.open = nil
 	end
 	local bag, slot, link, name = FindNextOpenable(profile)
 	if bag and slot then
@@ -4368,7 +5927,11 @@ end
 
 local function CharacterCanMill() return cachedMillKnown end
 
-local function IsMillable(profile, bag, slot)
+-- IgnoringKeep variant on _G to dodge Lua 5.1's 200-local cap (see
+-- AutoDelete_IsOpenable_IgnoringKeep for rationale). Same eligibility
+-- checks as IsMillable but skips IsWhitelisted so the Keep-override popup
+-- can detect blocked items.
+function _G.AutoDelete_IsMillable_IgnoringKeep(profile, bag, slot)
 	local link = GetContainerItemLink(bag, slot)
 	if not link then return false end
 	local id = GetItemIDFromLink(link)
@@ -4379,16 +5942,30 @@ local function IsMillable(profile, bag, slot)
 	if not count or count < 5 then return false end
 	local name, _, _, _, _, itemType, itemSubType = GetItemInfo(link)
 	if not name then return false end
-	if IsWhitelisted(profile, id, name) then return false end
 	-- Herb classification via localized strings. TODO: localize for non-enUS.
 	if itemType ~= "Trade Goods" then return false end
 	if itemSubType ~= "Herb" then return false end
 	return true
 end
 
+local function IsMillable(profile, bag, slot)
+	if not _G.AutoDelete_IsMillable_IgnoringKeep(profile, bag, slot) then return false end
+	local link = GetContainerItemLink(bag, slot)
+	local id = GetItemIDFromLink(link)
+	local name = GetItemInfo(link)
+	if IsWhitelisted(profile, id, name) then return false end
+	return true
+end
+
 local function FindMillTarget(profile)
 	if not profile or not profile.millEnabled then return nil end
 	if not CharacterCanMill() then return nil end
+	if _G.AutoDelete_SpikeDebug then
+		local _sc = _G.AutoDelete_SpikeCounters
+		local _ss = _G.AutoDelete_SpikeSession
+		_sc.find = (_sc.find or 0) + 1
+		_ss.find = (_ss.find or 0) + 1
+	end
 	for bag = 0, NUM_BAG_SLOTS do
 		local slots = GetContainerNumSlots(bag) or 0
 		for slot = 1, slots do
@@ -4434,6 +6011,23 @@ local function UpdateMillButton()
 	if InCombatLockdown and InCombatLockdown() then
 		millUpdatePending = true
 		return
+	end
+	-- v3.20 Keep-list override (see UpdateDisenchantButton for the pattern).
+	local _om = _G.AutoDelete_KeepOverrideTargets and _G.AutoDelete_KeepOverrideTargets.mill
+	if _om then
+		local _oLink = GetContainerItemLink(_om.bag, _om.slot)
+		local _oId = _oLink and GetItemIDFromLink(_oLink) or nil
+		if _oId == _om.id then
+			local _oName = GetItemInfo(_oLink)
+			millLastTarget = { bag = _om.bag, slot = _om.slot, link = _oLink, name = _oName }
+			ApplyMillMacrotext(_om.bag, _om.slot)
+			local panel = _G.AutoDeleteOptionsPanel
+			if panel and panel.IsShown and panel:IsShown() and panel._refreshMillStatus then
+				panel:_refreshMillStatus()
+			end
+			return
+		end
+		_G.AutoDelete_KeepOverrideTargets.mill = nil
 	end
 	local bag, slot, link, name = FindMillTarget(profile)
 	if bag and slot then
@@ -4515,7 +6109,8 @@ end
 
 local function CharacterCanProspect() return cachedProspectKnown end
 
-local function IsProspectable(profile, bag, slot)
+-- IgnoringKeep on _G for the local-cap reason.
+function _G.AutoDelete_IsProspectable_IgnoringKeep(profile, bag, slot)
 	local link = GetContainerItemLink(bag, slot)
 	if not link then return false end
 	local id = GetItemIDFromLink(link)
@@ -4525,7 +6120,6 @@ local function IsProspectable(profile, bag, slot)
 	if not count or count < 5 then return false end
 	local name, _, _, _, _, itemType, itemSubType = GetItemInfo(link)
 	if not name then return false end
-	if IsWhitelisted(profile, id, name) then return false end
 	if itemType ~= "Trade Goods" then return false end
 	-- "Metal & Stone" is the localized enUS string for the ore subtype.
 	-- TODO: localize for non-enUS.
@@ -4533,9 +6127,24 @@ local function IsProspectable(profile, bag, slot)
 	return true
 end
 
+local function IsProspectable(profile, bag, slot)
+	if not _G.AutoDelete_IsProspectable_IgnoringKeep(profile, bag, slot) then return false end
+	local link = GetContainerItemLink(bag, slot)
+	local id = GetItemIDFromLink(link)
+	local name = GetItemInfo(link)
+	if IsWhitelisted(profile, id, name) then return false end
+	return true
+end
+
 local function FindProspectTarget(profile)
 	if not profile or not profile.prospectEnabled then return nil end
 	if not CharacterCanProspect() then return nil end
+	if _G.AutoDelete_SpikeDebug then
+		local _sc = _G.AutoDelete_SpikeCounters
+		local _ss = _G.AutoDelete_SpikeSession
+		_sc.find = (_sc.find or 0) + 1
+		_ss.find = (_ss.find or 0) + 1
+	end
 	for bag = 0, NUM_BAG_SLOTS do
 		local slots = GetContainerNumSlots(bag) or 0
 		for slot = 1, slots do
@@ -4581,6 +6190,23 @@ local function UpdateProspectButton()
 	if InCombatLockdown and InCombatLockdown() then
 		prospectUpdatePending = true
 		return
+	end
+	-- v3.20 Keep-list override (see UpdateDisenchantButton for the pattern).
+	local _op = _G.AutoDelete_KeepOverrideTargets and _G.AutoDelete_KeepOverrideTargets.prospect
+	if _op then
+		local _oLink = GetContainerItemLink(_op.bag, _op.slot)
+		local _oId = _oLink and GetItemIDFromLink(_oLink) or nil
+		if _oId == _op.id then
+			local _oName = GetItemInfo(_oLink)
+			prospectLastTarget = { bag = _op.bag, slot = _op.slot, link = _oLink, name = _oName }
+			ApplyProspectMacrotext(_op.bag, _op.slot)
+			local panel = _G.AutoDeleteOptionsPanel
+			if panel and panel.IsShown and panel:IsShown() and panel._refreshProspectStatus then
+				panel:_refreshProspectStatus()
+			end
+			return
+		end
+		_G.AutoDelete_KeepOverrideTargets.prospect = nil
 	end
 	local bag, slot, link, name = FindProspectTarget(profile)
 	if bag and slot then
@@ -4703,17 +6329,23 @@ local DE_EPIC_FLOOR     = 95
 -- Returns true if (bag, slot) holds an item that the disenchant macro
 -- should target, given the current profile. Caller is responsible for
 -- the disenchantEnabled gate and the CharacterCanDisenchant check.
-local function IsDisenchantable(profile, bag, slot)
+--
+-- v3.20: split into a Keep-ignoring inner predicate + a wrapper that
+-- adds the Keep check, so the override popup can detect Keep-blocked
+-- items in a single bag walk. See AutoDelete_IsOpenable_IgnoringKeep above
+-- for the design rationale and the FindDisenchantTargetWithKeep two-pass
+-- function below for how this is consumed.
+--
+-- Exposed on _G to dodge Lua 5.1's 200-local cap (wiki §13.1).
+function _G.AutoDelete_IsDisenchantable_IgnoringKeep(profile, bag, slot)
 	local link = GetContainerItemLink(bag, slot)
 	if not link then return false end
 	local id = GetItemIDFromLink(link)
 	if not id then return false end
 	-- Quest items are never targets (consistent with every other auto-rule).
 	if IsQuestItem and IsQuestItem(bag, slot) then return false end
-	-- Keep list wins over disenchant.
 	local name, _, quality, ilvl, _, itemType = GetItemInfo(link)
 	if not name then return false end
-	if IsWhitelisted(profile, id, name) then return false end
 	-- Armor or Weapon. 3.3.5a's GetItemInfo returns the 6th value as the
 	-- localized itemType string, not a numeric classId (the numeric class
 	-- was added in later expansions and is unreliable on base 3.3.5a).
@@ -4766,31 +6398,52 @@ local function IsDisenchantable(profile, bag, slot)
 	return true
 end
 
+-- Wrapper: full disenchant eligibility INCLUDING Keep-list filter. Matches
+-- the pre-v3.20 IsDisenchantable behavior. External callers (Process Bags
+-- panel, etc.) hit this path; the override-aware Find function below uses
+-- AutoDelete_IsDisenchantable_IgnoringKeep + an explicit Keep check so it
+-- can detect the blocked-by-Keep case for the popup.
+local function IsDisenchantable(profile, bag, slot)
+	if not _G.AutoDelete_IsDisenchantable_IgnoringKeep(profile, bag, slot) then return false end
+	local link = GetContainerItemLink(bag, slot)
+	local id = GetItemIDFromLink(link)
+	local name = GetItemInfo(link)
+	if IsWhitelisted(profile, id, name) then return false end
+	return true
+end
+
 -- Scans bags for the next disenchant target. Returns (bag, slot, link, name)
--- or nil. Priority is lowest iLvl first so the user clears trash before they
--- chew through anything close to a usable item; ties broken by bag/slot
--- order for determinism. O(slot count * tooltip scan); only runs out of combat
--- on BAG_UPDATE_DELAYED, so the cost is bounded.
+-- or nil. Walks bag/slot in ascending order and returns the FIRST eligible
+-- item — matching FindMillTarget / FindProspectTarget / FindNextOpenable.
+-- v3.20: switched from "lowest iLvl wins" to bag-slot order per user
+-- feedback (2026-05-23). The old lowest-iLvl heuristic was meant to clear
+-- trash first, but it surprised users who expected the keybind to consume
+-- the item they were looking at — i.e. the topmost eligible item in their
+-- bag UI. Bag-slot order is consistent with the other three one-key
+-- actions and matches what the player sees in their bags.
 local function FindDisenchantTarget(profile)
 	if not profile or not profile.disenchantEnabled then return nil end
 	if not CharacterCanDisenchant() then return nil end
+	if _G.AutoDelete_SpikeDebug then
+		local _sc = _G.AutoDelete_SpikeCounters
+		local _ss = _G.AutoDelete_SpikeSession
+		_sc.find = (_sc.find or 0) + 1
+		_ss.find = (_ss.find or 0) + 1
+	end
 	local _p = AutoDelete_PerfBegin("FindDisenchantTarget")
-	local bestBag, bestSlot, bestLink, bestName, bestIlvl = nil, nil, nil, nil, nil
 	for bag = 0, NUM_BAG_SLOTS do
 		local count = GetContainerNumSlots(bag) or 0
 		for slot = 1, count do
 			if IsDisenchantable(profile, bag, slot) then
 				local link = GetContainerItemLink(bag, slot)
-				local name, _, _, ilvl = GetItemInfo(link)
-				ilvl = ilvl or 0
-				if not bestIlvl or ilvl < bestIlvl then
-					bestBag, bestSlot, bestLink, bestName, bestIlvl = bag, slot, link, name, ilvl
-				end
+				local name = GetItemInfo(link) or "?"
+				AutoDelete_PerfEnd("FindDisenchantTarget", _p)
+				return bag, slot, link, name
 			end
 		end
 	end
 	AutoDelete_PerfEnd("FindDisenchantTarget", _p)
-	return bestBag, bestSlot, bestLink, bestName
+	return nil
 end
 
 -- Created at PLAYER_LOGIN below. Public for the OnEnter tooltip in Options.
@@ -4836,6 +6489,27 @@ local function UpdateDisenchantButton()
 		disenchantUpdatePending = true
 		return
 	end
+	-- v3.20: honor active Keep-list override before the normal scan.
+	-- The popup's "Do it anyway" stashed { bag, slot, id }; we re-validate
+	-- by reading the slot's current item id (the user could have moved or
+	-- consumed the item between popup-accept and now). On match, arm to
+	-- that slot. On mismatch, clear and fall through to the normal Find.
+	local _od = _G.AutoDelete_KeepOverrideTargets and _G.AutoDelete_KeepOverrideTargets.disenchant
+	if _od then
+		local _oLink = GetContainerItemLink(_od.bag, _od.slot)
+		local _oId = _oLink and GetItemIDFromLink(_oLink) or nil
+		if _oId == _od.id then
+			local _oName = GetItemInfo(_oLink)
+			disenchantLastTarget = { bag = _od.bag, slot = _od.slot, link = _oLink, name = _oName }
+			ApplyDisenchantMacrotext(_od.bag, _od.slot)
+			local panel = _G.AutoDeleteOptionsPanel
+			if panel and panel.IsShown and panel:IsShown() and panel._refreshDisenchantStatus then
+				panel:_refreshDisenchantStatus()
+			end
+			return
+		end
+		_G.AutoDelete_KeepOverrideTargets.disenchant = nil
+	end
 	local bag, slot, link, name = FindDisenchantTarget(profile)
 	if bag and slot then
 		disenchantLastTarget = { bag = bag, slot = slot, link = link, name = name }
@@ -4850,6 +6524,357 @@ local function UpdateDisenchantButton()
 	local panel = _G.AutoDeleteOptionsPanel
 	if panel and panel.IsShown and panel:IsShown() and panel._refreshDisenchantStatus then
 		panel:_refreshDisenchantStatus()
+	end
+end
+
+-- ============================================================================
+-- v3.20: Keep-list Override Popup + Action Chat Notifier
+-- ============================================================================
+-- Two related additions:
+--
+-- A) Keep-list override popup. When a Keep-listed item passes every OTHER
+--    eligibility check for DE / Mill / Prospect / Open, the addon used to
+--    silently skip it. v3.20 raises a StaticPopup with three choices:
+--      * Do it anyway   -- sets an override target the matching Update*Button
+--                          uses INSTEAD of its normal Find* result, lasts until
+--                          the slot empties or the user moves the item
+--      * Skip this item -- per-character persistent memory so the popup
+--                          never re-asks about this (action, itemId) pair
+--      * Remove from Keep -- drops the item from profile.whitelistText AND
+--                          clears any stale Skip memory, so future re-adds
+--                          re-prompt cleanly
+--    Triggered once per BAG_UPDATE_DELAYED, suppressed if a popup is already
+--    open or the item is already permanently skipped.
+--
+-- B) Action chat notifier. Hooks UNIT_SPELLCAST_SUCCEEDED to print
+--    "[AutoDelete] Disenchanted [link]" / Milled / Prospected after the
+--    spell fires successfully. Open uses /use, not a spell, so it's
+--    detected separately via slot-change on BAG_UPDATE_DELAYED.
+--
+-- All new code lives on _G to keep the main chunk under Lua 5.1's 200-local
+-- cap (wiki §13.1). Cross-file accessors expose the per-action *LastTarget
+-- upvalues via closures so the chat printer can resolve them by action name.
+
+-- (A1) Accessor closures for the *LastTarget upvalues. Each closes over the
+-- file-local var so the chat printer can read the most-recently-armed
+-- target without us hoisting those vars to globals.
+function _G.AutoDelete_GetDisenchantLastTarget() return disenchantLastTarget end
+function _G.AutoDelete_GetCachedDisenchantName() return cachedDisenchantName end
+
+-- (A2) SavedVariables migration. AutoDeleteStatsDB is per-character; we add
+-- a keepSkip table whose subtables hold "permanently skipped" itemIds per
+-- action. Idempotent: safe to call on every PLAYER_LOGIN.
+function _G.AutoDelete_EnsureKeepSkipDB()
+	local sv = _G.AutoDeleteStatsDB
+	if not sv then return end
+	sv.keepSkip = sv.keepSkip or {}
+	sv.keepSkip.disenchant = sv.keepSkip.disenchant or {}
+	sv.keepSkip.mill       = sv.keepSkip.mill       or {}
+	sv.keepSkip.prospect   = sv.keepSkip.prospect   or {}
+	sv.keepSkip.open       = sv.keepSkip.open       or {}
+end
+
+function _G.AutoDelete_IsKeepSkipped(action, itemId)
+	local sv = _G.AutoDeleteStatsDB
+	if not sv or not sv.keepSkip or not sv.keepSkip[action] then return false end
+	return sv.keepSkip[action][itemId] == true
+end
+
+function _G.AutoDelete_MarkKeepSkipped(action, itemId)
+	local sv = _G.AutoDeleteStatsDB
+	if not sv or not action or not itemId then return end
+	sv.keepSkip = sv.keepSkip or {}
+	sv.keepSkip[action] = sv.keepSkip[action] or {}
+	sv.keepSkip[action][itemId] = true
+end
+
+function _G.AutoDelete_ClearKeepSkip(action, itemId)
+	local sv = _G.AutoDeleteStatsDB
+	if not sv or not sv.keepSkip or not sv.keepSkip[action] then return end
+	sv.keepSkip[action][itemId] = nil
+end
+
+-- (A3) Active overrides set by popup OnAccept. Keyed by action name. Each
+-- entry is { bag, slot, id }; the matching Update*Button consults it before
+-- running its normal Find* scan.
+_G.AutoDelete_KeepOverrideTargets = _G.AutoDelete_KeepOverrideTargets or {}
+
+-- (A4) Generic two-pass bag walker. Calls predicateIgnoringKeep for every
+-- slot; partitions matches into Keep-blocked vs unblocked; returns the best
+-- of each set per sortByIlvl. The parameter is retained for forward
+-- compatibility, but as of v3.20 (2026-05-23) all four actions pass
+-- sortByIlvl=false (bag-slot order, top-down) so the popup matches what
+-- the player sees in their bag UI. Both returns may be nil.
+function _G.AutoDelete_WalkBagsTwoPass(profile, predicateIgnoringKeep, sortByIlvl)
+	if not profile or type(predicateIgnoringKeep) ~= "function" then return nil, nil end
+	local bestNon, bestKeep = nil, nil
+	local bestNonKey, bestKeepKey = math.huge, math.huge
+	for bag = 0, NUM_BAG_SLOTS do
+		local slots = GetContainerNumSlots(bag) or 0
+		for slot = 1, slots do
+			if predicateIgnoringKeep(profile, bag, slot) then
+				local link = GetContainerItemLink(bag, slot)
+				local name, _, _, ilvl = GetItemInfo(link)
+				local id = GetItemIDFromLink(link)
+				ilvl = ilvl or 0
+				local sortKey = sortByIlvl and ilvl or (bag * 100 + slot)
+				local rec = { bag = bag, slot = slot, link = link, name = name, id = id, ilvl = ilvl }
+				if IsWhitelisted(profile, id, name) then
+					if sortKey < bestKeepKey then
+						bestKeep, bestKeepKey = rec, sortKey
+					end
+				else
+					if sortKey < bestNonKey then
+						bestNon, bestNonKey = rec, sortKey
+					end
+				end
+			end
+		end
+	end
+	return bestNon, bestKeep
+end
+
+-- (A5) StaticPopupDialog registration. Three buttons; button1's label is
+-- per-action (set in OnShow via the data field passed at Show time).
+-- The text uses %s for the item link (StaticPopup_Show formats it).
+--
+-- KEEP_OVERRIDE_VERBS on _G (not a local) to avoid bumping the main
+-- chunk's local count over Lua 5.1's 200 cap.
+_G.AutoDelete_KeepOverrideVerbs = {
+	disenchant = "Disenchant",
+	mill       = "Mill",
+	prospect   = "Prospect",
+	open       = "Open",
+}
+
+-- Popup body is built per-call by ShowKeepOverridePopup so the action verb
+-- ("Disenchant" / "Mill" / "Prospect" / "Open") and the item link both
+-- weave through the explanation. text=%s here just acts as the slot
+-- StaticPopup_Show fills with that pre-formatted string.
+--
+-- Button labels (2026-05-23 spec): button1 is the per-action verb only
+-- (no "anyway" suffix); button2 = "Ignore"; button3 = "Unprotect".
+-- Visual order on 3.3.5a's StaticPopup row is button1, button3, button2 ->
+-- Disenchant / Unprotect / Ignore, matching the user-supplied spec.
+StaticPopupDialogs["AUTODELETE_KEEP_OVERRIDE"] = {
+	text = "%s",
+	button1 = "Disenchant",
+	button2 = "Ignore",
+	button3 = "Remove",
+	OnShow = function(self)
+		-- Per-action verb on button1 (overrides the default "Disenchant"
+		-- placeholder above). data is set right after Show by our
+		-- ShowKeepOverridePopup helper.
+		if self.data and self.data.action and _G.AutoDelete_KeepOverrideVerbs[self.data.action] then
+			if self.button1 and self.button1.SetText then
+				self.button1:SetText(_G.AutoDelete_KeepOverrideVerbs[self.data.action])
+			end
+		end
+	end,
+	OnAccept = function(self)
+		local d = self.data
+		if not d then return end
+		_G.AutoDelete_KeepOverrideTargets[d.action] = { bag = d.bag, slot = d.slot, id = d.id }
+		-- Re-arm the relevant secure button so the user's next keypress
+		-- targets the override. Each Update* now consults the override
+		-- table before falling through to its normal Find*.
+		if d.action == "disenchant" and _G.AutoDelete_UpdateDisenchantButton then
+			_G.AutoDelete_UpdateDisenchantButton()
+		elseif d.action == "mill" and _G.AutoDelete_UpdateMillButton then
+			_G.AutoDelete_UpdateMillButton()
+		elseif d.action == "prospect" and _G.AutoDelete_UpdateProspectButton then
+			_G.AutoDelete_UpdateProspectButton()
+		elseif d.action == "open" and _G.AutoDelete_UpdateOpenButton then
+			_G.AutoDelete_UpdateOpenButton()
+		end
+	end,
+	OnCancel = function(self)
+		local d = self.data
+		if not d then return end
+		_G.AutoDelete_MarkKeepSkipped(d.action, d.id)
+		print("|cffff8000[AutoDelete]|r Ignoring " .. (d.link or "item") ..
+			" for " .. (_G.AutoDelete_KeepOverrideVerbs[d.action] or d.action) .. ".")
+	end,
+	OnAlt = function(self)
+		local d = self.data
+		if not d then return end
+		local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
+		if not profile then return end
+		-- Drop "item:<id>\n" (or trailing without newline) from whitelistText.
+		local id = d.id
+		local txt = profile.whitelistText or ""
+		txt = txt:gsub("item:" .. id .. "\r?\n?", "")
+		profile.whitelistText = txt
+		-- Clear any leftover skip memory for this item across all four
+		-- actions so re-adding to Keep later re-prompts cleanly.
+		_G.AutoDelete_ClearKeepSkip("disenchant", id)
+		_G.AutoDelete_ClearKeepSkip("mill",       id)
+		_G.AutoDelete_ClearKeepSkip("prospect",   id)
+		_G.AutoDelete_ClearKeepSkip("open",       id)
+		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+		print("|cffff8000[AutoDelete]|r Removed " .. (d.link or "item") ..
+			" from your Keep list.")
+	end,
+	timeout = 0,
+	whileDead = true,
+	hideOnEscape = true,
+	preferredIndex = 3,
+}
+
+-- (A6) ShowKeepOverridePopup. Suppress if already shown OR if the item is
+-- in skip memory. Otherwise build the verbose body (explains WHY the
+-- popup appeared and WHAT each button does in plain language so a new
+-- player isn't confused) and show.
+function _G.AutoDelete_ShowKeepOverridePopup(action, rec)
+	if not rec or not rec.id then return end
+	if _G.AutoDelete_IsKeepSkipped(action, rec.id) then return end
+	-- One popup at a time across all four actions to avoid stacking.
+	if StaticPopup_Visible and StaticPopup_Visible("AUTODELETE_KEEP_OVERRIDE") then return end
+	local verb = _G.AutoDelete_KeepOverrideVerbs[action] or action
+	local link = rec.link or rec.name or "this item"
+	-- 2026-05-23 spec: title on its own line (legendary orange), then two
+	-- short sentences explaining WHAT is happening and WHY this popup
+	-- appeared, then a per-button cheat-sheet so the user knows what each
+	-- choice does without guessing.
+	--
+	--   |cffff8000Auto-Disenchant Warning|r
+	--
+	--   AutoDelete wants to Disenchant <link>.
+	--   It's on your Keep list, so AutoDelete is asking first.
+	--
+	--   Disenchant = Disenchant this one item now.
+	--   Remove = Take this item off your Keep list.
+	--   Ignore = Never ask about this item again.
+	local body = string.format(
+		"|cffff8000Auto-%s Warning|r\n\n" ..
+		"AutoDelete wants to %s %s.\n" ..
+		"It's on your Keep list, so AutoDelete is asking first.\n\n" ..
+		"%s = %s this one item now.\n" ..
+		"Remove = Take this item off your Keep list.\n" ..
+		"Ignore = Never ask about this item again.",
+		verb, verb, link, verb, verb)
+	local dlg = StaticPopup_Show("AUTODELETE_KEEP_OVERRIDE", body)
+	if dlg then
+		dlg.data = { action = action, bag = rec.bag, slot = rec.slot,
+			link = rec.link, name = rec.name, id = rec.id }
+		-- Force-call OnShow so the button1 label updates immediately. Some
+		-- 3.3.5a clients fire OnShow before .data is attached; this re-runs
+		-- it after attachment.
+		if dlg.OnShow then dlg:OnShow() end
+	end
+end
+
+-- (A7) Periodic check. Walks bags for each enabled action; if a Keep-blocked
+-- candidate exists and isn't in skip memory, fires the popup. Called from
+-- BAG_UPDATE_DELAYED so it runs at most once per bag burst.
+-- Throttle window for the Keep-override check is 3 seconds (inlined below
+-- to avoid bumping the main-chunk 200-local cap). Each bag walk does up
+-- to 2 tooltip scans per slot (IsSoulbound + IsBindOnEquip for the DE
+-- predicate) multiplied by 4 enabled actions -- expensive enough that
+-- running on every BAG_UPDATE_DELAYED was a noticeable hiccup
+-- (user-reported 2026-05-23). The popup is informational/cosmetic, not
+-- real-time, so a 3 s latency is fine.
+
+function _G.AutoDelete_CheckKeepOverrides()
+	if InCombatLockdown and InCombatLockdown() then return end
+	-- (Fix F, 2026-05-23) Skip while our own DeleteItems / SellItems batch
+	-- is mid-flight. AutoDelete_SelfBagUpdateUntil is set by DeleteItems
+	-- when it starts a batch; running the keep-check inside that window
+	-- means we're re-walking bags after every PickupContainerItem call.
+	if GetTime() < (_G.AutoDelete_SelfBagUpdateUntil or 0) then return end
+	-- (Fix A, 2026-05-23) Hard debounce: at most one check per 3 seconds.
+	-- Reduces walk frequency by 10-20x during loot bursts (BAG_UPDATE_DELAYED
+	-- fires every ~150 ms during a 30-item burst; without throttling each
+	-- one triggered a full 4-action bag walk with ~120 tooltip scans).
+	local now = GetTime()
+	if now < (_G.AutoDelete_LastKeepCheckAt or 0) + 3.0 then
+		return
+	end
+	_G.AutoDelete_LastKeepCheckAt = now
+
+	local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
+	if not profile then return end
+	-- (Fix B, 2026-05-23) Empty Keep list -> nothing can ever be blocked.
+	-- Skip every bag walk. Most users have at least one Keep item but the
+	-- short-circuit is essentially free when the list isn't empty (just an
+	-- empty-string check) and saves the entire 4-walk cost when it is.
+	local whitelistText = profile.whitelistText
+	if not whitelistText or whitelistText == "" then return end
+
+	-- Each action runs independently; first popup to fire wins (StaticPopup
+	-- queue suppresses the rest until the user resolves it).
+	if profile.disenchantEnabled then
+		-- sortByIlvl=false: pick the topmost (lowest bag/slot) Keep-blocked
+		-- candidate so the popup matches what the player sees in their bag.
+		-- See FindDisenchantTarget for the ordering rationale (2026-05-23).
+		local _, blocked = _G.AutoDelete_WalkBagsTwoPass(profile,
+			_G.AutoDelete_IsDisenchantable_IgnoringKeep, false)
+		if blocked then _G.AutoDelete_ShowKeepOverridePopup("disenchant", blocked) end
+	end
+	if profile.millEnabled then
+		local _, blocked = _G.AutoDelete_WalkBagsTwoPass(profile,
+			_G.AutoDelete_IsMillable_IgnoringKeep, false)
+		if blocked then _G.AutoDelete_ShowKeepOverridePopup("mill", blocked) end
+	end
+	if profile.prospectEnabled then
+		local _, blocked = _G.AutoDelete_WalkBagsTwoPass(profile,
+			_G.AutoDelete_IsProspectable_IgnoringKeep, false)
+		if blocked then _G.AutoDelete_ShowKeepOverridePopup("prospect", blocked) end
+	end
+	if profile.autoOpenEnabled then
+		local _, blocked = _G.AutoDelete_WalkBagsTwoPass(profile,
+			_G.AutoDelete_IsOpenable_IgnoringKeep, false)
+		if blocked then _G.AutoDelete_ShowKeepOverridePopup("open", blocked) end
+	end
+end
+
+-- (B) Action chat notifier. Hooks UNIT_SPELLCAST_SUCCEEDED via the existing
+-- scanner OnEvent (event registration + dispatch case added separately).
+-- Matches the cached localized spell names captured at PLAYER_LOGIN.
+function _G.AutoDelete_OnSpellCastSucceeded(spellName)
+	if not spellName then return end
+	local lastTarget, verb = nil, nil
+	if spellName == (cachedDisenchantName or "Disenchant") then
+		verb = "Disenchanted"
+		lastTarget = disenchantLastTarget
+	elseif spellName == (cachedMillName or "Milling") then
+		verb = "Milled"
+		lastTarget = millLastTarget
+	elseif spellName == (cachedProspectName or "Prospecting") then
+		verb = "Prospected"
+		lastTarget = prospectLastTarget
+	end
+	if verb and lastTarget and lastTarget.link then
+		print("|cffff8000[AutoDelete]|r " .. verb .. " " .. lastTarget.link)
+		-- Clear any active override now that the action fired. The
+		-- BAG_UPDATE that follows will re-arm the secure button to whatever
+		-- comes next (or nothing if no eligible items remain).
+		if _G.AutoDelete_KeepOverrideTargets then
+			if verb == "Disenchanted" then _G.AutoDelete_KeepOverrideTargets.disenchant = nil
+			elseif verb == "Milled"    then _G.AutoDelete_KeepOverrideTargets.mill       = nil
+			elseif verb == "Prospected" then _G.AutoDelete_KeepOverrideTargets.prospect  = nil
+			end
+		end
+	end
+end
+
+-- Open uses /use, not a cast spell -- no UNIT_SPELLCAST_SUCCEEDED. Detect
+-- via slot-content change on BAG_UPDATE_DELAYED: if the slot we last armed
+-- now holds a different link (or nothing), the open happened.
+function _G.AutoDelete_CheckOpenSlotChange()
+	if not openLastTarget then return end
+	local t = openLastTarget
+	if not t.bag or not t.slot or not t.link then return end
+	local nowLink = GetContainerItemLink(t.bag, t.slot)
+	if nowLink ~= t.link then
+		-- The slot we armed now holds something else (or is empty). Print.
+		print("|cffff8000[AutoDelete]|r Opened " .. t.link)
+		-- Clear the cached target so we don't re-print on the next bag
+		-- update; UpdateOpenButton will repopulate it on its rescan.
+		openLastTarget = nil
+		if _G.AutoDelete_KeepOverrideTargets then
+			_G.AutoDelete_KeepOverrideTargets.open = nil
+		end
 	end
 end
 
@@ -5033,6 +7058,10 @@ _G.AutoDelete_ClearProcessIgnored = ClearProcessIgnored
 _G.AutoDelete_PROCESS_ACTIONS     = PROCESS_ACTIONS
 
 local scanner = CreateFrame("Frame")
+-- Expose to _G so _G.AutoDelete_SetSpikeDebug (which lives in the spike
+-- helper block at the top of the file, before scanner exists) can find
+-- this frame at toggle time for LOOT_* event register/unregister.
+_G.AutoDelete_ScannerFrame = scanner
 scanner:RegisterEvent("ADDON_LOADED")
 scanner:RegisterEvent("PLAYER_LOGIN")
 scanner:RegisterEvent("BAG_UPDATE")
@@ -5042,6 +7071,7 @@ scanner:RegisterEvent("MERCHANT_CLOSED")
 scanner:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 scanner:RegisterEvent("PLAYER_REGEN_ENABLED")    -- flush deferred disenchant updates
 scanner:RegisterEvent("SPELLS_CHANGED")          -- re-check Disenchant known status
+scanner:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED") -- v3.20: chat notify after DE / Mill / Prospect
 
 -- Note on BAG_UPDATE handling: v3.20 briefly tried event bracketing
 -- (LOOT_OPENED/CLOSED + merchant flags) to coalesce BAG_UPDATE bursts.
@@ -5592,10 +7622,27 @@ end
 -- MERCHANT_SHOW       -> sample inventory worth, then auto-repair + auto-sell
 -- MERCHANT_CLOSED     -> print sell summary, fire after-close summon if armed
 
-scanner:SetScript("OnEvent", function(self, event, arg1)
+scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
+	-- v3.20 spike debug: track LOOT_* events when active. These events
+	-- are only registered while SpikeDebug is on (see SetSpikeDebug),
+	-- so the dispatch cost is zero in the off case.
+	if event == "LOOT_OPENED" or event == "LOOT_SLOT_CLEARED" or event == "LOOT_CLOSED" then
+		if _G.AutoDelete_SpikeAddLootEvt then _G.AutoDelete_SpikeAddLootEvt(event) end
+		return
+	end
 	if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
 		GetDB()
 		RefreshCachedProfile()
+		return
+	end
+	-- v3.20 action chat notifier. UNIT_SPELLCAST_SUCCEEDED on 3.3.5a fires
+	-- (unit, spellName, rank, lineID, spellID) -- arg1 is unit, arg2 is
+	-- the spell name. We only care about player casts whose name matches
+	-- one of the cached localized DE / Mill / Prospect spells.
+	if event == "UNIT_SPELLCAST_SUCCEEDED" and arg1 == "player" then
+		if _G.AutoDelete_OnSpellCastSucceeded then
+			_G.AutoDelete_OnSpellCastSucceeded(arg2)
+		end
 		return
 	end
 	if event == "PLAYER_EQUIPMENT_CHANGED" then
@@ -5673,6 +7720,11 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 			if _G.AutoDelete_RefreshProspectKnown then _G.AutoDelete_RefreshProspectKnown() end
 			if _G.AutoDelete_UpdateProspectButton then _G.AutoDelete_UpdateProspectButton() end
 		end
+
+		-- v3.20: initialize per-character Keep-skip memory. Lazy and
+		-- idempotent; safe to call on every PLAYER_LOGIN regardless of
+		-- whether the SV table already has the keepSkip subtree.
+		if _G.AutoDelete_EnsureKeepSkipDB then _G.AutoDelete_EnsureKeepSkipDB() end
 
 		-- One-time notice: the v3.02 schema migration moved sell rules into
 		-- per-category sections. EnsureProfileFields sets this flag when it
@@ -5918,13 +7970,15 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 	--
 	-- DEFERRED (~150ms trailing-edge debounce, fires from OnUpdate):
 	--   * The four Update*Button calls. Each runs a Find*Target scan that
-	--     iterates every bag slot. FindDisenchantTarget in particular
-	--     scans EVERY slot looking for the lowest-iLvl candidate (no
-	--     early break) and does up to TWO tooltip scans per slot
-	--     (IsSoulbound + IsBindOnEquip). With 5+ BAG_UPDATEs in a loot
-	--     burst x 4 buttons x ~60 slots x ~2 tooltip ops, the cold-cache
-	--     case hit ~5000 tooltip operations concentrated in one frame
-	--     and produced 10-20s visible freezes. The user pressing the
+	--     iterates bag slots until a match is found (v3.20 onward: all four
+	--     Find functions short-circuit on the first eligible slot in
+	--     bag-slot order; FindDisenchantTarget no longer enumerates every
+	--     slot for a lowest-iLvl pick). Cold-cache tooltip scans
+	--     (IsSoulbound + IsBindOnEquip per slot for DE) can still cluster
+	--     into one frame during loot bursts -- with 5+ BAG_UPDATEs x 4
+	--     buttons x ~60 slots x ~2 tooltip ops the early-break is the
+	--     mitigation that prevents the 10-20s freezes the v3.19-era
+	--     "lowest-iLvl wins" scan produced. The user pressing the
 	--     bind key after looting can tolerate a 150ms button-rescan
 	--     delay; they can't tolerate the freeze.
 	--   * RefreshProcessPanel + the settings-panel process count: also
@@ -5948,6 +8002,22 @@ scanner:SetScript("OnEvent", function(self, event, arg1)
 	-- deadline out by 150ms; the actual fire happens 150ms after the
 	-- LAST BAG_UPDATE.
 	local _pBag = AutoDelete_PerfBegin("BAG_UPDATE handler")
+	-- v3.20 spike debug: count this frame's BAG_UPDATE / BAG_UPDATE_DELAYED
+	-- separately. Cheap when spike debug is off (one global lookup).
+	if _G.AutoDelete_SpikeDebug then
+		local c = _G.AutoDelete_SpikeCounters
+		local sess = _G.AutoDelete_SpikeSession
+		if event == "BAG_UPDATE_DELAYED" then
+			c.bagUpdDel    = (c.bagUpdDel or 0) + 1
+			sess.bagUpdDel = (sess.bagUpdDel or 0) + 1
+		else
+			c.bagUpd       = (c.bagUpd or 0) + 1
+			sess.bagUpd    = (sess.bagUpd or 0) + 1
+		end
+	end
+	-- v3.20 bench harness: refresh quiet timer + transition armed->active.
+	-- Cheap no-op when bench is idle.
+	if _G.AutoDelete_BenchOnBagUpdate then _G.AutoDelete_BenchOnBagUpdate(GetTime()) end
 	RefreshCachedProfile()
 	RequestScan()
 	local now = GetTime()
@@ -5980,6 +8050,20 @@ end)
 
 scanner:SetScript("OnUpdate", function(self, elapsed)
 	local now = GetTime()
+	-- v3.20 SPIKE DEBUG (off by default): if the previous frame ran
+	-- long, snapshot the counters that accumulated during it into the
+	-- ring buffer (rate-limited chat dump). Then reset for this frame's
+	-- accumulators. MUST be first so the counters reflect a clean
+	-- per-frame window. Cheap when off: single global hash lookup.
+	if _G.AutoDelete_SpikeDebug then
+		if elapsed * 1000 > _G.AutoDelete_SpikeThresholdMs then
+			_G.AutoDelete_SpikeRecord(elapsed)
+		end
+		_G.AutoDelete_SpikeReset()
+	end
+	-- v3.20 bench harness: tick the auto-finalize check. Cheap no-op when
+	-- bench state is nil (single global lookup + state check + return).
+	if _G.AutoDelete_BenchTick then _G.AutoDelete_BenchTick(now) end
 	-- Deferred affix-scan queue. Runs every frame but no-ops when the
 	-- queue is empty. When non-empty, processes a small batch of cold
 	-- tooltip scans (rate-limited to ~60 scans/sec) so they don't all
@@ -6002,6 +8086,15 @@ scanner:SetScript("OnUpdate", function(self, elapsed)
 		if _G.AutoDelete_UpdateOpenButton        then _G.AutoDelete_UpdateOpenButton() end
 		if _G.AutoDelete_UpdateMillButton        then _G.AutoDelete_UpdateMillButton() end
 		if _G.AutoDelete_UpdateProspectButton    then _G.AutoDelete_UpdateProspectButton() end
+		-- v3.20: piggyback the Keep-list override check on the same
+		-- trailing-edge debounce. Walks bags once per action; fires the
+		-- popup if a Keep-blocked candidate exists and isn't already
+		-- skipped. Also runs the Open slot-change detector so the chat
+		-- notifier prints "[AutoDelete] Opened [link]" after the user
+		-- presses the Open keybind (Open uses /use, not a spell, so
+		-- UNIT_SPELLCAST_SUCCEEDED doesn't fire for it).
+		if _G.AutoDelete_CheckKeepOverrides   then _G.AutoDelete_CheckKeepOverrides()   end
+		if _G.AutoDelete_CheckOpenSlotChange  then _G.AutoDelete_CheckOpenSlotChange()  end
 		AutoDelete_PerfEnd("deferred button refresh (all 4)", _pBR)
 	end
 	-- Deferred panel refresh: same debounce. RefreshProcessPanel itself
@@ -6017,7 +8110,36 @@ scanner:SetScript("OnUpdate", function(self, elapsed)
 		end
 		AutoDelete_PerfEnd("deferred panel refresh", _pPR)
 	end
-	if not cachedProfile or not cachedProfile.enabled then return end
+	if not cachedProfile or not cachedProfile.enabled then
+		-- v3.20: master disable wipes the delete queue. Re-enabling
+		-- later should NOT resume deleting items queued under prior
+		-- conditions -- between disable and re-enable the user may
+		-- have changed Keep list, Affix settings, or swapped profile.
+		-- A fresh walk after re-enable repopulates the queue under
+		-- the new rules. The counter queue-cleared-disable surfaces
+		-- this in /del perf report so the user can see when it fired.
+		local Q = _G.AutoDelete_DeleteQueue
+		if Q and #Q.items > 0 then
+			local cleared = #Q.items
+			for i = cleared, 1, -1 do Q.items[i] = nil end
+			AutoDelete_PerfCount("DeleteItems/queue-cleared-disable", cleared)
+			if _G.AutoDelete_DebugSell then
+				print(string.format(
+					"|cffff8000[AutoDelete DEBUG]|r queue CLEARED on disable: %d entries dropped",
+					cleared
+				))
+			end
+		end
+		return
+	end
+	-- v3.20: drain the throttled delete queue. One item per DELAY (110ms)
+	-- interval; cheap no-op when the queue is empty or the throttle hasn't
+	-- elapsed. Placed AFTER the master-enable gate so disabling the addon
+	-- mid-burst stops further deletes AND clears the queue (see above) so
+	-- re-enabling does a fresh walk under current settings.
+	if _G.AutoDelete_DrainDeleteQueue then
+		_G.AutoDelete_DrainDeleteQueue(now)
+	end
 	if now >= nextPeriodicAt then
 		nextPeriodicAt = now + periodicInterval
 		scanRequested = true
@@ -6115,6 +8237,15 @@ local dismissedDueToMount = nil
 -- the trigger.
 local bagsFullArmed       = true   -- true = next 'near full' will fire
 local bagsFullSince       = nil    -- GetTime() when bags first became near-full; reset when a slot frees
+-- v3.20 queue-aware Goblin defer: snapshot of #_G.AutoDelete_DeleteQueue.items
+-- at the moment bagsFullSince started accumulating. While the queue keeps
+-- SHRINKING from this snapshot the drain is winning and we re-arm the timer
+-- (no Goblin yet). If the queue plateaus or grows (loot rate >= drain rate),
+-- the timer accumulates normally and Goblin fires after BAGS_FULL_DELAY.
+-- Lives on _G (not a file-local) because the main chunk is already at
+-- Lua 5.1's 200-local cap; adding a file-local here triggers the
+-- "main function has more than 200 local variables" compile error.
+_G.AutoDelete_BagsFullQueueAtStart = _G.AutoDelete_BagsFullQueueAtStart or nil
 
 -- Bag-full auto-summon threshold fallback. The Goblin Merchant fires when
 -- free slots drop to or below this value. Default 3 so the merchant arrives
@@ -6141,12 +8272,20 @@ end
 -- summoned. Prevents transient fills (loot a stack that auto-merges with an
 -- existing stack a moment later) from triggering a stray summon.
 --
--- Tuned twice:
+-- Tuned three times:
 --   v3.17: 3.0 -> 1.5 (faster merchant pop when bags genuinely stuck full)
 --   v3.20: 1.5 -> 2.0 (give the delete scanner time to clear loot bursts
 --          before the merchant fires; with DELETE_BATCH_SIZE=8 and a 0.5 s
---          scan interval, 2.0 s absorbs ~32 deletable items before summon)
-local BAGS_FULL_DELAY = 2.0
+--          scan interval, 2.0 s absorbed ~32 deletable items before summon)
+--   v3.20: 2.0 -> 3.5 (queue-throttled deletes changed throughput from
+--          ~16 items/sec to ~9 items/sec, so the 2.0 s window only
+--          absorbed ~18 items. 3.5 s × ~9 items/sec restores parity at
+--          ~32 items. PLUS the bag-full check now defers when the delete
+--          queue is actively shrinking -- see _G.AutoDelete_BagsFullQueueAtStart logic
+--          in the auto-summon block below. The shrink-defer is the
+--          primary mechanism; this absolute cap is the anti-starvation
+--          backstop for when loot rate genuinely exceeds drain rate.)
+local BAGS_FULL_DELAY = 3.5
 
 -- ============================================================================
 -- User-dismiss vs leash classification (timing-based)
@@ -6389,6 +8528,7 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 				-- Re-arm the bag-full timer state since we just resummoned.
 				bagsFullArmed = false
 				bagsFullSince = nil
+				_G.AutoDelete_BagsFullQueueAtStart = nil
 			else
 				activeTracked = nil
 				-- Merchant despawned while bags are still near-full
@@ -6398,6 +8538,7 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= GetGoblinBagThreshold(p) then
 					bagsFullArmed = true
 					bagsFullSince = nil
+					_G.AutoDelete_BagsFullQueueAtStart = nil
 				end
 			end
 		end
@@ -6420,28 +8561,130 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 	-- was in bags. That broke the scav-looting-faster-than-deletes
 	-- case: with pending deletes always present during a sustained
 	-- loot burst, the timer never accumulated and Goblin never
-	-- summoned. Removed -- the existing 1.5s debounce + "rose above
-	-- threshold" reset together produce the right behavior.
+	-- summoned. Removed.
+	--
+	-- v3.20 queue-aware re-add: with queue-throttled deletes (drain at
+	-- ~9 items/sec vs old ~16/sec) the raw timer-based debounce could
+	-- fire Goblin BEFORE the drain finished a moderate burst. Fix is
+	-- a SHRINKING-QUEUE gate (not a "pending-exists" gate, which had
+	-- the old bug): snapshot queue length when bagsFullSince starts;
+	-- if the queue length is currently SMALLER than the snapshot, the
+	-- drain is winning and we re-arm the timer with the new (smaller)
+	-- snapshot. If the queue plateaus or grows (loot rate >= drain
+	-- rate), the timer accumulates normally and Goblin fires after
+	-- BAGS_FULL_DELAY. Edge cases:
+	--   - Queue empty AND free still under threshold: snapshot starts
+	--     at 0, current is 0, no shrink possible, timer accumulates,
+	--     Goblin fires. Correct (nothing left to auto-delete).
+	--   - Loot rate > drain rate: queue grows past snapshot, no
+	--     shrink, timer accumulates. Goblin fires. Correct.
+	--   - Drain catches up before timer hits cap: queue shrinks each
+	--     tick, timer keeps resetting, eventually free rises past
+	--     threshold and the else-branch fires the FULL reset (re-arm).
 	if p.summonMerchantWhenBagsFull then
 		local free = ComputeTotalFreeSlots()
-		if free <= GetGoblinBagThreshold(p) then
-			if bagsFullArmed and combatOk then
+		local qLen = #_G.AutoDelete_DeleteQueue.items
+		local threshold = GetGoblinBagThreshold(p)
+		local now = GetTime()
+
+		if free > threshold then
+			-- Bags above threshold: full reset. Drain caught up OR loot
+			-- stopped on its own.
+			bagsFullSince = nil
+			_G.AutoDelete_BagsFullQueueAtStart = nil
+			_G.AutoDelete_BagsBelowAt = 0
+			bagsFullArmed = true
+		elseif bagsFullArmed and combatOk then
+			-- Bags below threshold. Record WHEN they first dropped (used
+			-- to compare against LastDeleteWalkAt to detect "has pipeline
+			-- scanned since bags filled?").
+			if (_G.AutoDelete_BagsBelowAt or 0) == 0 then
+				_G.AutoDelete_BagsBelowAt = now
+			end
+			local bagsBelowAt = _G.AutoDelete_BagsBelowAt
+			local lastDrain   = _G.AutoDelete_LastDrainPopAt or 0
+			local lastEnq     = _G.AutoDelete_LastEnqueueAt or 0
+			local lastWalk    = _G.AutoDelete_LastDeleteWalkAt or 0
+			local lastWalkEnq = _G.AutoDelete_LastDeleteWalkEnqueued or 0
+			local recency     = _G.AutoDelete_GoblinRecencyS or 2.0
+
+			-- "Pipeline is busy" = anything in queue, OR drain/enqueue
+			-- happened within the last `recency` seconds. Captures the
+			-- case where queue just emptied but more loot is coming.
+			local pipelineBusy = (qLen > 0)
+				or (lastDrain > 0 and (now - lastDrain) < recency)
+				or (lastEnq   > 0 and (now - lastEnq)   < recency)
+			-- "Walk happened since bags went below" = AutoDelete has had
+			-- at least one chance to scan since this near-full started.
+			local walkSinceBelow = (lastWalk >= bagsBelowAt)
+			-- "Last walk found nothing" = scanned bags, enqueued zero
+			-- candidates. Goblin must be allowed to fire here, otherwise
+			-- it would wait forever on full bags of non-deletable items.
+			local foundNothingLastWalk = walkSinceBelow and lastWalkEnq == 0
+
+			if pipelineBusy then
+				-- State 2: pipeline actively working. Use queue-shrink
+				-- timer (preserved from prior implementation).
 				if not bagsFullSince then
-					bagsFullSince = GetTime()
-				elseif (GetTime() - bagsFullSince) >= BAGS_FULL_DELAY then
-					-- Bags have stayed near-full for 1.5s straight; fire.
+					bagsFullSince = now
+					_G.AutoDelete_BagsFullQueueAtStart = qLen
+				elseif _G.AutoDelete_BagsFullQueueAtStart
+					and qLen > 0
+					and qLen < _G.AutoDelete_BagsFullQueueAtStart then
+					-- Queue shrunk: drain is winning, reset + re-snapshot.
+					bagsFullSince = now
+					_G.AutoDelete_BagsFullQueueAtStart = qLen
+					_G.AutoDelete_GoblinLastDeferReason = "pipeline-busy-shrinking"
+				elseif (now - bagsFullSince) >= BAGS_FULL_DELAY then
+					-- Queue stopped shrinking for the full delay window
+					-- = loot rate > drain rate. Fire.
 					bagsFullArmed = false
 					bagsFullSince = nil
+					_G.AutoDelete_BagsFullQueueAtStart = nil
+					_G.AutoDelete_BagsBelowAt = 0
+					_G.AutoDelete_GoblinLastFireAt = now
+					_G.AutoDelete_GoblinLastFireReason = "queue-stopped-shrinking"
 					SummonGoblinMerchant()
 					activeTracked = "merchant"
+				else
+					_G.AutoDelete_GoblinLastDeferReason = "pipeline-busy-waiting"
 				end
+			elseif not walkSinceBelow then
+				-- State 1: pipeline has NOT scanned yet since bags went
+				-- below threshold (sustained loot storm preventing
+				-- DeleteItems from running). Defer. DO NOT start timer.
+				bagsFullSince = nil
+				_G.AutoDelete_BagsFullQueueAtStart = nil
+				_G.AutoDelete_GoblinLastDeferReason = "no-walk-yet"
+			elseif foundNothingLastWalk then
+				-- State 3: pipeline scanned, found NO deletable items.
+				-- Start timer immediately; Goblin is the right answer.
+				if not bagsFullSince then
+					bagsFullSince = now
+					_G.AutoDelete_BagsFullQueueAtStart = qLen
+				elseif (now - bagsFullSince) >= BAGS_FULL_DELAY then
+					bagsFullArmed = false
+					bagsFullSince = nil
+					_G.AutoDelete_BagsFullQueueAtStart = nil
+					_G.AutoDelete_BagsBelowAt = 0
+					_G.AutoDelete_GoblinLastFireAt = now
+					_G.AutoDelete_GoblinLastFireReason = "no-deletable-candidates"
+					SummonGoblinMerchant()
+					activeTracked = "merchant"
+				else
+					_G.AutoDelete_GoblinLastDeferReason = "found-nothing-waiting"
+				end
+			else
+				-- Transitional state: walked, enqueued items, but the
+				-- recency windows for drain/enqueue have elapsed AND
+				-- queue is empty (everything drained). Bags are still
+				-- below threshold so more loot must have arrived after
+				-- our last activity but didn't trigger a fresh walk yet.
+				-- Treat as "no walk yet for the NEW state": defer.
+				bagsFullSince = nil
+				_G.AutoDelete_BagsFullQueueAtStart = nil
+				_G.AutoDelete_GoblinLastDeferReason = "transitional-no-recent-activity"
 			end
-		else
-			-- Free slots rose above the threshold: reset the timer and
-			-- re-arm. This is what handles the "AutoDelete cleared up
-			-- in time" case -- no special gate needed.
-			bagsFullSince = nil
-			bagsFullArmed = true
 		end
 	end
 end)
@@ -6562,6 +8805,7 @@ companionEventFrame:SetScript("OnEvent", function(_, event)
 				SummonGoblinMerchant()
 				bagsFullArmed = false
 				bagsFullSince = nil
+				_G.AutoDelete_BagsFullQueueAtStart = nil
 			else
 				activeTracked = nil
 				-- Keep bag-full re-arm semantics consistent with the polling tick:
@@ -6569,6 +8813,7 @@ companionEventFrame:SetScript("OnEvent", function(_, event)
 				if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= GetGoblinBagThreshold(p) then
 					bagsFullArmed = true
 					bagsFullSince = nil
+					_G.AutoDelete_BagsFullQueueAtStart = nil
 				end
 			end
 		end
@@ -7151,6 +9396,187 @@ SlashCmdList["AUTODELETE"] = function(msg)
 	if arg == "perf reset" then
 		AutoDelete_PerfReset()
 		return
+	end
+	-- v3.20 frame-level spike debug. /del spike [on|off|<ms>|report|clear]
+	-- with no arg, prints current state. See _G.AutoDelete_SetSpikeDebug
+	-- and AutoDelete_SpikeRecord for the underlying mechanism.
+	if arg == "spike" then
+		print(string.format(
+			"|cffff8000[AutoDelete SPIKE]|r state=%s threshold=%dms ring=%d/%d cooldown=%.1fs",
+			_G.AutoDelete_SpikeDebug and "|cff00ff00ON|r" or "|cffff5555OFF|r",
+			_G.AutoDelete_SpikeThresholdMs,
+			(function() local n = 0 for _ in pairs(_G.AutoDelete_SpikeRing) do n = n + 1 end return n end)(),
+			_G.AutoDelete_SpikeRingCap,
+			_G.AutoDelete_SpikeChatCooldown
+		))
+		print("  /del spike on | off | <ms> | report | chat | clear")
+		return
+	end
+	if arg == "spike on" then
+		_G.AutoDelete_SetSpikeDebug(true)
+		return
+	end
+	if arg == "spike off" then
+		_G.AutoDelete_SetSpikeDebug(false)
+		return
+	end
+	if arg == "spike report" then
+		_G.AutoDelete_SpikeReport()
+		return
+	end
+	if arg == "spike chat" then
+		_G.AutoDelete_SpikeReportChat()
+		return
+	end
+	if arg == "spike clear" then
+		_G.AutoDelete_SpikeClear()
+		return
+	end
+	-- v3.20 ElvUI hook A/B gate (diagnostic only -- not exposed in the
+	-- options panel). When OFF, AutoDelete's ElvUI bag-dot work is
+	-- skipped at the top of the UpdateSlot hook; ElvUI itself still
+	-- runs as normal. Use to isolate whether our per-slot work is
+	-- amplifying pickup stutter during loot bursts.
+	if arg == "elvuihook" then
+		print(string.format(
+			"|cffff8000[AutoDelete]|r ElvUI bag hook is %s. /del elvuihook on | off",
+			_G.AutoDelete_ElvUIHookDisabled and "|cffff5555OFF (skipping AutoDelete work)|r"
+				or "|cff00ff00ON|r"
+		))
+		return
+	end
+	if arg == "elvuihook on" then
+		_G.AutoDelete_ElvUIHookDisabled = false
+		print("|cffff8000[AutoDelete]|r ElvUI bag hook |cff00ff00ON|r -- affix dots will draw on ElvUI bag slots.")
+		-- Trigger a full refresh so dots reappear on currently-visible
+		-- ElvUI bag slots without the user needing to open/close bags.
+		if _G.AutoDelete_RefreshAffixDots then _G.AutoDelete_RefreshAffixDots() end
+		return
+	end
+	if arg == "elvuihook off" then
+		_G.AutoDelete_ElvUIHookDisabled = true
+		print("|cffff8000[AutoDelete]|r ElvUI bag hook |cffff5555OFF|r -- AutoDelete will skip ALL per-slot work in ElvUI's UpdateSlot. Affix dots will NOT update on ElvUI bags until you turn this back on. Diagnostic use only.")
+		return
+	end
+	-- v3.20 /del goblin — live diagnostic for the bag-full auto-summon
+	-- gate. Prints what state the Goblin defer logic last saw so the
+	-- user can see WHY Goblin did or didn't fire.
+	if arg == "goblin" then
+		local now = GetTime()
+		print("|cffff8000[AutoDelete GOBLIN]|r current state:")
+		print(string.format("  bagsBelowAt=%.1fs ago   lastDeleteWalk=%.1fs ago (enqueued=%d)",
+			((_G.AutoDelete_BagsBelowAt or 0) == 0) and -1 or (now - _G.AutoDelete_BagsBelowAt),
+			((_G.AutoDelete_LastDeleteWalkAt or 0) == 0) and -1 or (now - _G.AutoDelete_LastDeleteWalkAt),
+			_G.AutoDelete_LastDeleteWalkEnqueued or 0
+		))
+		print(string.format("  lastDrainPop=%.1fs ago   lastEnqueue=%.1fs ago   queueLen=%d",
+			((_G.AutoDelete_LastDrainPopAt or 0) == 0) and -1 or (now - _G.AutoDelete_LastDrainPopAt),
+			((_G.AutoDelete_LastEnqueueAt or 0) == 0) and -1 or (now - _G.AutoDelete_LastEnqueueAt),
+			#((_G.AutoDelete_DeleteQueue or {}).items or {})
+		))
+		print(string.format("  lastFireReason=%s   lastDeferReason=%s",
+			tostring(_G.AutoDelete_GoblinLastFireReason or "none"),
+			tostring(_G.AutoDelete_GoblinLastDeferReason or "none")
+		))
+		print(string.format("  lastFireAt=%s",
+			((_G.AutoDelete_GoblinLastFireAt or 0) == 0)
+				and "never (this session)"
+				or string.format("%.1fs ago", now - _G.AutoDelete_GoblinLastFireAt)
+		))
+		print("  Negative \"ago\" values = event hasn't happened this session.")
+		return
+	end
+	-- v3.20 /del bench — auto-arming benchmark harness. One macro, hit it
+	-- to start. Auto-finalizes 5s after bag activity stops. See the
+	-- "Bench harness" block above for the state machine + save semantics.
+	if arg == "bench" then
+		_G.AutoDelete_BenchToggle()
+		return
+	end
+	-- Explicit subcommands for deterministic macro binding (vs smart toggle).
+	if arg == "bench start" then
+		local B = _G.AutoDelete_Bench
+		if B and B.state then
+			print(string.format(
+				"|cffff8000[AutoDelete BENCH]|r already %s ('%s'). Use /del bench stop or /del bench cancel.",
+				B.state, tostring(B.name)
+			))
+		else
+			_G.AutoDelete_BenchArm()
+		end
+		return
+	end
+	if arg == "bench stop" then
+		local B = _G.AutoDelete_Bench
+		if not B or not B.state then
+			print("|cffff8000[AutoDelete BENCH]|r not active. /del bench start to begin.")
+		elseif B.state == "armed" then
+			print("|cffff8000[AutoDelete BENCH]|r still armed (no activity captured). Use /del bench cancel to abort, or wait for loot to start it.")
+		else
+			print("|cffff8000[AutoDelete BENCH]|r force-finalizing '" .. tostring(B.name) .. "' (manual stop).")
+			_G.AutoDelete_BenchFinalize()
+		end
+		return
+	end
+	if arg == "bench cancel" then
+		local B = _G.AutoDelete_Bench
+		if not B or not B.state then
+			print("|cffff8000[AutoDelete BENCH]|r not active. Nothing to cancel.")
+		else
+			print("|cffff8000[AutoDelete BENCH]|r |cffff5555CANCELED|r '" .. tostring(B.name) .. "' -- no data saved.")
+			B.state = nil
+			B.name = nil
+			B.armedAt = 0
+			B.startedAt = 0
+			B.lastBagUpdateAt = 0
+			B.configSnap = nil
+		end
+		return
+	end
+	if arg == "bench list" then
+		_G.AutoDelete_BenchList()
+		return
+	end
+	if arg == "bench compare" then
+		_G.AutoDelete_BenchCompare(nil, nil)  -- auto-pick last two
+		return
+	end
+	do
+		local a, b = arg:match("^bench%s+compare%s+(%S+)%s+(%S+)$")
+		if a then
+			_G.AutoDelete_BenchCompare(a, b)
+			return
+		end
+		local single = arg:match("^bench%s+show%s+(%S+)$")
+		if single then
+			_G.AutoDelete_ShowBenchReport(single)
+			return
+		end
+		local delName = arg:match("^bench%s+delete%s+(%S+)$")
+		if delName then
+			_G.AutoDelete_BenchDelete(delName)
+			return
+		end
+		-- /del bench <name>  -> arm with explicit name (if not a subcommand above)
+		local explicit = arg:match("^bench%s+(%S+)$")
+		if explicit and explicit ~= "list" and explicit ~= "compare"
+			and explicit ~= "show" and explicit ~= "delete" then
+			_G.AutoDelete_BenchArm(explicit)
+			return
+		end
+	end
+	do
+		local ms = arg:match("^spike%s+(%d+)$")
+		if ms then
+			local n = tonumber(ms)
+			if n and n >= 5 and n <= 500 then
+				_G.AutoDelete_SpikeThresholdMs = n
+				print(string.format("|cffff8000[AutoDelete SPIKE]|r threshold set to %dms.", n))
+			else
+				print("|cffff8000[AutoDelete SPIKE]|r threshold must be between 5 and 500 ms.")
+			end
+			return
+		end
 	end
 	if arg == "collection" then
 		-- Toggle Affix Collection Mode. When on, the affix dot only shows
