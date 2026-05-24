@@ -1,25 +1,13 @@
-# OS junk
 .DS_Store
 Thumbs.db
-
-# Editor
 .vscode/
 .idea/
 *.swp
-
-# Build artifacts
 *.zip
-
-# WoW SavedVariables — never commit these, they contain per-character data
 *.lua.bak
-
-# luacheck (static analyzer) — config and cache stay local
 .luacheckrc
 .luacheckcache/
 luacheck.txt
-
-# Local-only reference material. Never commit copies of these even if
-# someone accidentally drags them into the repo directory.
 addon-conventions.md
 lua-reference/
 wow-api/
@@ -27,9 +15,6 @@ AutoDelete_Architecture.md
 Addon_UI_StyleGuide.md
 CLAUDE.md
 handoff/
-
-# Harness / dev environment scripts and logs. These contain absolute
-# machine paths and personal config that must never be committed.
 .claude/
 launch-claude.*
 claude-monitor.*
