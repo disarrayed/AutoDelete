@@ -18,10 +18,19 @@ local C_BORDER    = { 0.16, 0.16, 0.16, 1 }   -- #2a2a2a outer frame border per 
 local C_TITLE     = { 1.00, 0.50, 0.00, 1 }  -- #ff8000 WoW legendary orange
 local C_TEXT      = { 0.85, 0.85, 0.85, 1 }   -- #D9D9D9
 local C_DIM       = { 0.45, 0.45, 0.45, 1 }   -- #737373
-local C_HOVER     = { 0.122, 0.435, 0.659, 1 }   -- mage blue #1F6FA8
-local C_RED       = { 0.75, 0.22, 0.22, 1 }
-local C_GREEN     = { 0.20, 0.75, 0.20, 1 }
-local C_ACCENT    = { 1.00, 0.50, 0.00, 1 }   -- #ff8000 WoW legendary orange
+local C_HOVER     = { 0.122, 0.435, 0.659, 1 }   -- mage blue #1F6FA8 (alias: C_BLUE)
+-- =========================================================================
+-- Semantic action palette (HARD RULE: only THREE colors for button hover)
+-- =========================================================================
+--   C_GREEN  -> additive / approve / go / positive   (Add, Copy, Import, Apply, Save, Confirm)
+--   C_RED    -> destructive / decline / remove       (Delete, Remove, Clear, Cancel)
+--   C_BLUE   -> change / update / reward / transform (Open Panel, Edit, Refresh, Audit, Toggle filters)
+-- C_ACCENT (legendary orange) is for window CHROME only (title bars, frame
+-- titles, accent borders). Never use it for a button hover.
+local C_RED       = { 0.75, 0.22, 0.22, 1 }   -- destructive
+local C_GREEN     = { 0.20, 0.75, 0.20, 1 }   -- additive
+local C_BLUE      = C_HOVER                   -- transformational; alias to keep one source
+local C_ACCENT    = { 1.00, 0.50, 0.00, 1 }   -- #ff8000 WoW legendary orange (CHROME ONLY)
 local C_DK_RED    = { 0.77, 0.12, 0.23, 1 }   -- #C41E3A WoW Death Knight class color
 -- Exact WoW item quality colors (used for rarity toggles)
 local C_Q_POOR     = { 0.62, 0.62, 0.62, 1 }   -- #9d9d9d (Junk)
@@ -136,6 +145,201 @@ local function MakeToggle(parent, label, color, tooltip, tooltipTitle)
 	end
 
 	return row
+end
+
+-- Small helper for sub-toggles: smaller box (12x12), 9pt text, no description.
+-- Promoted to file scope so the Disenchant Filters popup (built at file load
+-- time, before BuildUI runs) can call it. BuildUI's own callers resolve to
+-- this same upvalue.
+local function MakeSubToggle(parent, label, color)
+	local row = CreateFrame("Button", nil, parent)
+	row:SetSize(120, 16)
+
+	local box = CreateFrame("Frame", nil, row)
+	box:SetSize(12, 12)
+	box:SetPoint("LEFT", 0, 0)
+	ApplyBackdrop(box, { 0.04, 0.04, 0.04, 1 }, { 0.33, 0.33, 0.33, 1 })
+
+	local indicator = box:CreateTexture(nil, "OVERLAY")
+	indicator:SetTexture("Interface\\AddOns\\AutoDelete\\textures\\checkmark.tga")
+	indicator:SetPoint("CENTER", box, "CENTER", 0, 0)
+	indicator:SetSize(12, 12)
+	indicator:SetVertexColor(1, 1, 1, 1)
+	indicator:Hide()
+
+	local text = row:CreateFontString(nil, "OVERLAY")
+	text:SetFont(FONT, 9, "OUTLINE")
+	text:SetTextColor(unpack(C_DIM))
+	text:SetPoint("LEFT", box, "RIGHT", 6, 0)
+	text:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+	text:SetJustifyH("LEFT")
+	text:SetWordWrap(true)
+	text:SetText(label)
+
+	row._checked = false
+	local activeColor = color or C_ACCENT
+
+	local function UpdateVisual()
+		if row._checked then
+			local lighter = {
+				math.min(activeColor[1] + 0.10, 1),
+				math.min(activeColor[2] + 0.10, 1),
+				math.min(activeColor[3] + 0.10, 1),
+				1,
+			}
+			ApplyBackdrop(box, activeColor, lighter)
+			indicator:Show()
+			text:SetTextColor(unpack(C_TEXT))
+		else
+			ApplyBackdrop(box, { 0.04, 0.04, 0.04, 1 }, { 0.33, 0.33, 0.33, 1 })
+			indicator:Hide()
+			text:SetTextColor(unpack(C_DIM))
+		end
+	end
+
+	function row:SetChecked(val)
+		row._checked = val and true or false
+		UpdateVisual()
+	end
+	function row:GetChecked() return row._checked end
+	row:SetScript("OnClick", function()
+		row._checked = not row._checked
+		UpdateVisual()
+	end)
+
+	return row
+end
+
+-- Segmented control: N pills laid out side-by-side, one active at a time,
+-- or none active (idle/off). Used for the Auto Actions card but generic.
+--
+-- States table format (each entry):
+--   { value="delete", label="Del", tooltip="...",
+--     bg={r,g,b,a}, border={r,g,b,a}, fg={r,g,b,a} }
+-- bg/border/fg describe the ACTIVE appearance. Inactive segments share a
+-- single neutral-gray paint -- "all gray until you click one" -- so the
+-- active pill is the only thing competing for attention.
+--
+-- Click semantics:
+--   - Click an inactive segment   -> SetValue(segment.value)  (light it up)
+--   - Click the active segment    -> SetValue(offValue)       (dim it out)
+--     (only if offValue was supplied; otherwise it's a no-op repaint.)
+--
+-- offValue may be ANY string -- including one that doesn't match any segment.
+-- A value that doesn't match any segment renders as "no segment active",
+-- which is exactly what we want for an implicit-off state.
+--
+-- API surface:
+--   ctrl:GetValue()       -> current value string
+--   ctrl:SetValue(value)  -> set value (any string allowed); fires onChange
+--                            iff value actually changed
+--   onChange(newValue, oldValue) -> caller-supplied callback
+--
+-- segWidth is the PER-SEGMENT width. Total control width is
+-- N * segWidth + (N - 1) GAP. This lets two different controls share the
+-- same pill width but have different total widths -- e.g. a 2-segment row
+-- and a 1-segment row whose right edges line up because of where they're
+-- anchored, with the single pill lining up with the rightmost pill of the
+-- 2-segment row.
+local function MakeSegmentedControl(parent, segWidth, height, states, offValue, onChange)
+	local n = #states
+	local GAP = 1
+	local totalWidth = n * segWidth + math.max(0, n - 1) * GAP
+
+	local ctrl = CreateFrame("Frame", nil, parent)
+	ctrl:SetSize(totalWidth, height)
+
+	ctrl._states = states
+	ctrl._value = offValue   -- start in the implicit-off state; caller SetValue overrides
+	ctrl._segments = {}
+
+	-- Neutral inactive paint: dark bg, subtle gray border, dimmed text.
+	-- Same for every state when inactive so the visual reads "all gray".
+	local INACTIVE_BG     = { 0.07, 0.07, 0.07, 1 }
+	local INACTIVE_BORDER = { 0.22, 0.22, 0.22, 1 }
+	local INACTIVE_FG     = C_DIM
+
+	local function PaintSegment(seg, isActive)
+		local s = seg._state
+		if isActive then
+			ApplyBackdrop(seg, s.bg, s.border)
+			seg._text:SetTextColor(unpack(s.fg))
+		else
+			ApplyBackdrop(seg, INACTIVE_BG, INACTIVE_BORDER)
+			seg._text:SetTextColor(unpack(INACTIVE_FG))
+		end
+	end
+
+	local function Repaint()
+		for _, seg in ipairs(ctrl._segments) do
+			PaintSegment(seg, seg._state.value == ctrl._value)
+		end
+	end
+
+	for i, s in ipairs(states) do
+		local seg = CreateFrame("Button", nil, ctrl)
+		seg:SetSize(segWidth, height)
+		seg:SetPoint("LEFT", ctrl, "LEFT", (i - 1) * (segWidth + GAP), 0)
+		seg._state = s
+
+		local text = seg:CreateFontString(nil, "OVERLAY")
+		text:SetFont(FONT, 10, "OUTLINE")
+		text:SetPoint("CENTER", 0, 0)
+		text:SetJustifyH("CENTER")
+		text:SetText(s.label)
+		seg._text = text
+
+		-- Click an inactive segment -> activate it.
+		-- Click the active segment -> deselect (set to offValue).
+		seg:SetScript("OnClick", function()
+			if ctrl._value == s.value then
+				ctrl:SetValue(offValue)
+			else
+				ctrl:SetValue(s.value)
+			end
+		end)
+
+		-- Hover: brighten the border on this segment and show its tooltip.
+		-- Active segments brighten from their state border; inactive segments
+		-- brighten from INACTIVE_BORDER so the hover hint is visible without
+		-- pre-disclosing the state color.
+		seg:SetScript("OnEnter", function(self)
+			local b = (ctrl._value == self._state.value) and self._state.border or INACTIVE_BORDER
+			self:SetBackdropBorderColor(
+				math.min(b[1] + 0.25, 1),
+				math.min(b[2] + 0.25, 1),
+				math.min(b[3] + 0.25, 1),
+				1)
+			if self._state.tooltip then
+				GameTooltip:SetOwner(self, "ANCHOR_TOP")
+				GameTooltip:SetText(self._state.label, 1, 1, 1)
+				GameTooltip:AddLine(self._state.tooltip, C_DIM[1], C_DIM[2], C_DIM[3], true)
+				GameTooltip:Show()
+			end
+		end)
+		seg:SetScript("OnLeave", function()
+			Repaint()
+			GameTooltip:Hide()
+		end)
+
+		ctrl._segments[i] = seg
+	end
+
+	function ctrl:GetValue() return self._value end
+
+	function ctrl:SetValue(value)
+		local oldValue = self._value
+		if oldValue == value then
+			Repaint()  -- idempotent paint so stale visuals (e.g. post profile-switch) line up
+			return
+		end
+		self._value = value
+		Repaint()
+		if onChange then onChange(value, oldValue) end
+	end
+
+	Repaint()
+	return ctrl
 end
 
 -- PEADAR-style custom dropdown
@@ -483,6 +687,78 @@ local function MakeSection(parent, title, yOff, height, leftMargin, rightMargin)
 	return box, titleFS
 end
 
+-- ============================================================================
+-- Canonical button helpers (HARD RULE: every button must go through one
+-- of these two helpers; see Addon_UI_StyleGuide.md §4 "Buttons: the two
+-- canonical helpers"). Defined here BEFORE BuildUI so BuildUI's tab
+-- builders can capture them as upvalues. Other top-level builders below
+-- (BuildClearListWindow, etc.) also capture from this same scope.
+-- ============================================================================
+
+-- MakeDialogButton: neutral footer button. Apply / Cancel / OK / Close.
+-- Default 90x24, blue hover (C_ROW_HOVER), white text on hover. Use this
+-- when the action has no semantic weight, or when it is one of a small
+-- group of equivalent footer choices.
+local function MakeDialogButton(parent, label, onClick)
+	local btn = CreateFrame("Button", nil, parent)
+	btn:SetSize(90, 24)
+	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+	local txt = MakeText(btn, 11, C_TEXT, "OUTLINE")
+	txt:SetPoint("CENTER")
+	txt:SetText(label)
+	btn._text = txt
+	btn:SetScript("OnEnter", function(b)
+		ApplyBackdrop(b, C_ROW_HOVER, C_BORDER)
+		txt:SetTextColor(1, 1, 1)
+	end)
+	btn:SetScript("OnLeave", function(b)
+		ApplyBackdrop(b, C_ROW_ODD, C_BORDER)
+		txt:SetTextColor(unpack(C_TEXT))
+	end)
+	btn:SetScript("OnClick", onClick)
+	return btn
+end
+
+-- MakeActionButton: semantic action button. Variable width, 26 tall by
+-- default. On hover the backdrop fills with the semantic color at 0.3
+-- alpha and the border switches to the full semantic color. Text becomes
+-- pure white on hover. The Clear List window is the canonical reference.
+--
+-- HARD RULE: only THREE semantic colors. Pick by the action class:
+--   C_GREEN  -> additive / approve / go / positive
+--              (Add, Copy, Import, Apply, Save, Confirm)
+--   C_RED    -> destructive / decline / remove
+--              (Delete, Remove, Clear, Cancel)
+--   C_BLUE   -> change / update / reward / transform
+--              (Open Panel, Edit, Refresh, Audit, Toggle filters)
+--
+-- Do NOT use C_ACCENT (legendary orange) for button hovers. That color
+-- is reserved for window CHROME (title bars, frame titles, accent borders).
+-- The hover color itself is a clarity cue for non-technical users: green
+-- means "this adds something," red means "this removes something," blue
+-- means "this changes or opens something."
+local function MakeActionButton(parent, label, semanticColor, onClick, width, height)
+	local btn = CreateFrame("Button", nil, parent)
+	btn:SetSize(width or 290, height or 26)
+	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+	local txt = MakeText(btn, 11, C_TEXT, "OUTLINE")
+	txt:SetPoint("CENTER")
+	txt:SetText(label)
+	btn._text = txt
+	local color = semanticColor or C_ACCENT
+	btn:SetScript("OnEnter", function(b)
+		b:SetBackdropColor(color[1], color[2], color[3], 0.3)
+		b:SetBackdropBorderColor(color[1], color[2], color[3], 1)
+		txt:SetTextColor(1, 1, 1)
+	end)
+	btn:SetScript("OnLeave", function(b)
+		ApplyBackdrop(b, C_ROW_ODD, C_BORDER)
+		txt:SetTextColor(unpack(C_TEXT))
+	end)
+	if onClick then btn:SetScript("OnClick", onClick) end
+	return btn
+end
+
 -- AddToggleDescription: attaches a dim multi-line description below a toggle.
 -- Positioned indented under the toggle's text label (not the box).
 local function AddToggleDescription(toggle, description, maxWidth)
@@ -516,9 +792,11 @@ local DEFAULT_PROFILE = {
 	listText = "",
 	sellListText = "",
 	whitelistText = "",
-	autoGray = false,
+	-- 3-state quality filters: "off" | "delete" | "sell"
+	-- Migration: old boolean true → "delete" (user requested default)
+	autoGray = "delete",
 	scanInterval = 0.5,
-	autoDeleteCommon  = false,
+	autoDeleteCommon = "delete",
 	autoSellGreens    = false,
 	boeArmorEnabled   = false,
 	boeArmorIlvlMin   = 1,
@@ -820,6 +1098,1579 @@ closeBtn:SetScript("OnClick", function() frame:Hide() end)
 _G.AutoDeleteOptionsPanel = frame
 
 -- ============================================================================
+-- Process Bags Panel
+-- ============================================================================
+-- Standalone draggable window listing every item in the player's bags that
+-- one of the four secure-action features (Open, Disenchant, Mill, Prospect)
+-- could target right now. Clicking a row arms that item as the next target
+-- for its action; pressing the corresponding bound key fires it.
+--
+-- Built as a sibling frame to the main AutoDeleteFrame -- not a child.
+-- That keeps it openable when the settings panel is closed and lets the
+-- two windows be positioned independently. Position is saved per-character
+-- in AutoDeleteStatsDB.processPanel.
+--
+-- Wrapped in a `do ... end` block so its locals stay out of the main
+-- chunk's 200-cap. Public entry points are _G.AutoDelete_ToggleProcessPanel
+-- and _G.AutoDelete_ProcessPanel set at the bottom.
+
+do
+
+local PROCESS_PANEL_W = 360
+local PROCESS_PANEL_H = 440
+local PROCESS_ROW_H   = 22
+local PROCESS_HEADER_H = 22
+local PROCESS_FOOTER_H = 28
+-- Scroll area height = total - title - header - footer - vertical pads.
+local PROCESS_SCROLL_H = PROCESS_PANEL_H - 24 - PROCESS_HEADER_H - PROCESS_FOOTER_H - 8
+local PROCESS_VISIBLE_ROWS = math.floor(PROCESS_SCROLL_H / PROCESS_ROW_H)
+
+-- The panel itself. Strata MEDIUM so it floats above bag frames but
+-- below DIALOG (so the settings panel stays on top when both are open
+-- and the user clicks the settings panel). Frame name is globally
+-- exposed so /framestack and other diagnostic tools find it.
+local panel = CreateFrame("Frame", "AutoDeleteProcessPanel", UIParent)
+panel:SetSize(PROCESS_PANEL_W, PROCESS_PANEL_H)
+-- FULLSCREEN_DIALOG so the panel floats ABOVE the main settings panel
+-- (which lives on DIALOG). Previously this was MEDIUM, which put the
+-- panel BEHIND the settings panel when both were open -- user clicked
+-- the Process Bags launcher and saw nothing happen because the window
+-- opened underneath the settings frame.
+panel:SetFrameStrata("FULLSCREEN_DIALOG")
+panel:SetFrameLevel(50)
+panel:SetMovable(true)
+panel:EnableMouse(true)
+panel:SetClampedToScreen(true)
+panel:Hide()
+
+-- Visual style matches the main settings panel (dark body, dark gray
+-- border, dark title bar with orange text). Previously this used raw
+-- SetBackdrop calls with an orange-filled title bar + orange border,
+-- which read as a different window family than the rest of the addon.
+ApplyBackdrop(panel, C_BG, C_BORDER)
+
+-- Title bar: clickable drag handle, same dark-with-accent-border look
+-- as the main panel's title bar.
+local titleBar = CreateFrame("Frame", nil, panel)
+titleBar:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, 0)
+titleBar:SetPoint("TOPRIGHT", panel, "TOPRIGHT", 0, 0)
+titleBar:SetHeight(24)
+ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
+titleBar:EnableMouse(true)
+titleBar:RegisterForDrag("LeftButton")
+titleBar:SetScript("OnDragStart", function() panel:StartMoving() end)
+titleBar:SetScript("OnDragStop", function()
+	panel:StopMovingOrSizing()
+	-- Save position to per-character stats DB so the panel re-opens
+	-- in the same place across /reload and logout.
+	local point, _, relPoint, x, y = panel:GetPoint(1)
+	_G.AutoDeleteStatsDB = _G.AutoDeleteStatsDB or {}
+	_G.AutoDeleteStatsDB.processPanel = {
+		point = point, relPoint = relPoint, x = x, y = y,
+	}
+end)
+
+local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
+titleText:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
+titleText:SetText("Process Bags")
+
+-- Close X in the title bar's right corner. Dim by default, red on
+-- hover -- matches the main settings panel's close button exactly.
+local closeX = CreateFrame("Button", nil, titleBar)
+closeX:SetSize(24, 24)
+closeX:SetPoint("TOPRIGHT", titleBar, "TOPRIGHT", 0, 0)
+local closeXText = MakeText(closeX, 14, C_DIM, "OUTLINE")
+closeXText:SetText("x")
+closeXText:SetPoint("CENTER")
+closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.3, 0.3) end)
+closeX:SetScript("OnLeave", function() closeXText:SetTextColor(unpack(C_DIM)) end)
+closeX:SetScript("OnClick", function() panel:Hide() end)
+
+-- Column header row directly under the title bar.
+local headerRow = CreateFrame("Frame", nil, panel)
+headerRow:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, -2)
+headerRow:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT", 0, -2)
+headerRow:SetHeight(PROCESS_HEADER_H)
+headerRow:SetBackdrop({ bgFile = WHITE8x8 })
+headerRow:SetBackdropColor(0.10, 0.10, 0.10, 1)
+
+local headerItemText = headerRow:CreateFontString(nil, "OVERLAY")
+headerItemText:SetFont(FONT, 10, "OUTLINE")
+headerItemText:SetTextColor(unpack(C_DIM))
+headerItemText:SetPoint("LEFT", headerRow, "LEFT", 10 + 18 + 6, 0)  -- after icon column
+headerItemText:SetText("Item")
+
+local headerActionText = headerRow:CreateFontString(nil, "OVERLAY")
+headerActionText:SetFont(FONT, 10, "OUTLINE")
+headerActionText:SetTextColor(unpack(C_DIM))
+headerActionText:SetPoint("RIGHT", headerRow, "RIGHT", -10, 0)
+headerActionText:SetText("Action")
+
+-- FauxScrollFrame for the row list. 3.3.5a-correct (HybridScrollFrame is
+-- later). Rows themselves get created lazily in B.3 via a row pool.
+local scrollContainer = CreateFrame("Frame", nil, panel)
+scrollContainer:SetPoint("TOPLEFT", headerRow, "BOTTOMLEFT", 4, -2)
+scrollContainer:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -22, PROCESS_FOOTER_H + 4)
+
+local scrollFrame = CreateFrame("ScrollFrame", "AutoDeleteProcessScroll",
+	scrollContainer, "FauxScrollFrameTemplate")
+scrollFrame:SetAllPoints(scrollContainer)
+-- The OnVerticalScroll callback is wired in B.3 once the row-update
+-- function exists. Standard FauxScroll idiom.
+scrollFrame:SetScript("OnVerticalScroll", function(self, offset)
+	FauxScrollFrame_OnVerticalScroll(self, offset, PROCESS_ROW_H,
+		function()
+			if _G.AutoDelete_RefreshProcessPanel then
+				_G.AutoDelete_RefreshProcessPanel()
+			end
+		end)
+end)
+
+-- Footer: row count on the left, "Clear Ignored" button on the right.
+local footer = CreateFrame("Frame", nil, panel)
+footer:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 0, 0)
+footer:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 0)
+footer:SetHeight(PROCESS_FOOTER_H)
+footer:SetBackdrop({ bgFile = WHITE8x8 })
+footer:SetBackdropColor(0.07, 0.07, 0.07, 1)
+
+local footerCount = footer:CreateFontString(nil, "OVERLAY")
+footerCount:SetFont(FONT, 10, "OUTLINE")
+footerCount:SetTextColor(unpack(C_DIM))
+footerCount:SetPoint("LEFT", footer, "LEFT", 10, 0)
+footerCount:SetText("")  -- populated by RefreshProcessPanel in B.3
+
+-- Clear Ignored: canonical MakeActionButton (semantic destructive red).
+-- Resets the per-character ignore list, undoing prior right-click-off
+-- decisions. Treated as destructive because it loses user choices.
+-- Same width and height as the Filters-tab card buttons so footers
+-- read uniformly across the addon.
+local clearBtn = MakeActionButton(footer, "Clear Ignored", C_RED, function()
+	if _G.AutoDelete_ClearProcessIgnored then _G.AutoDelete_ClearProcessIgnored() end
+	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+end, 110, 22)
+clearBtn:SetPoint("RIGHT", footer, "RIGHT", -8, 0)
+-- Tooltip on hover (the MakeActionButton hover styling stays; we just
+-- layer the tooltip on top so the user sees the explanation).
+clearBtn:SetScript("OnEnter", function(btn)
+	btn:SetBackdropColor(C_RED[1], C_RED[2], C_RED[3], 0.3)
+	btn:SetBackdropBorderColor(C_RED[1], C_RED[2], C_RED[3], 1)
+	btn._text:SetTextColor(1, 1, 1)
+	GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+	GameTooltip:SetText("Clear Ignored", 1, 1, 1)
+	GameTooltip:AddLine("Resets the ignore list. Items you right-clicked to hide will come back if they're still in your bags.",
+		C_DIM[1], C_DIM[2], C_DIM[3], true)
+	GameTooltip:Show()
+end)
+clearBtn:SetScript("OnLeave", function(btn)
+	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+	btn._text:SetTextColor(unpack(C_TEXT))
+	GameTooltip:Hide()
+end)
+
+-- Position restoration on first Show. Reads saved per-character coords;
+-- falls back to centered on first run.
+panel:SetScript("OnShow", function(self)
+	local saved = _G.AutoDeleteStatsDB and _G.AutoDeleteStatsDB.processPanel
+	if saved and saved.point then
+		self:ClearAllPoints()
+		self:SetPoint(saved.point, UIParent, saved.relPoint or saved.point,
+			saved.x or 0, saved.y or 0)
+	else
+		self:ClearAllPoints()
+		self:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+	end
+	-- Refresh content. The actual list-population happens in B.3; for now
+	-- this is a no-op gated check.
+	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+end)
+
+-- Toggle entry point. Called from the /del process slash command and the
+-- Tools Card 1 launcher button. Idempotent.
+local function ToggleProcessPanel()
+	if panel:IsShown() then panel:Hide() else panel:Show() end
+end
+
+_G.AutoDelete_ProcessPanel       = panel
+_G.AutoDelete_ProcessPanelScroll = scrollFrame
+_G.AutoDelete_ProcessPanelCount  = footerCount
+_G.AutoDelete_ProcessVisibleRows = PROCESS_VISIBLE_ROWS
+_G.AutoDelete_ProcessRowHeight   = PROCESS_ROW_H
+_G.AutoDelete_ToggleProcessPanel = ToggleProcessPanel
+
+-- ------------------------------------------------------------------
+-- Row pool + RefreshProcessPanel
+-- ------------------------------------------------------------------
+-- Skillet-Classic-style row pool: rows are created on demand and never
+-- destroyed. Anchor chain is "row N below row N-1"; row 1 anchors to
+-- the scroll container's TOPLEFT. The pool persists between Refresh
+-- calls -- only the visible window's row.data fields are rewritten.
+--
+-- Selected row (per action) is tracked in `armed[action]` so that the
+-- yellow tint persists across Refresh redraws.
+
+local rowPool = {}          -- [i] = row frame
+local armed = {}            -- ["disenchant"] = {bag, slot, itemId} or nil
+local lastResults = {}      -- cached ProcessScan result, used by row OnClick
+
+-- Lazy row factory. The first call creates the row; subsequent calls
+-- return the cached frame.
+local function GetOrCreateRow(i)
+	if rowPool[i] then return rowPool[i] end
+	local rowName = "AutoDeleteProcessRow" .. i
+	local row = CreateFrame("Button", rowName, scrollContainer)
+	row:SetSize(PROCESS_PANEL_W - 24, PROCESS_ROW_H)
+	if i == 1 then
+		row:SetPoint("TOPLEFT", scrollContainer, "TOPLEFT", 0, 0)
+	else
+		row:SetPoint("TOPLEFT", rowPool[i - 1], "BOTTOMLEFT", 0, 0)
+	end
+	row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+	-- Backdrop is the armed-row highlight. Hidden by default; toggled
+	-- via row.armedTexture:SetShown() on Refresh. Yellow tint is the
+	-- Skillet/Postal convention for "this is the selected/staged target".
+	local armedTexture = row:CreateTexture(nil, "BACKGROUND")
+	armedTexture:SetAllPoints(row)
+	armedTexture:SetTexture(WHITE8x8)
+	armedTexture:SetVertexColor(C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.18)
+	armedTexture:Hide()
+	row.armedTexture = armedTexture
+
+	-- Hover highlight is a separate, dimmer texture so the armed-row
+	-- color reads correctly even when also hovered.
+	local hoverTexture = row:CreateTexture(nil, "BACKGROUND", nil, 1)
+	hoverTexture:SetAllPoints(row)
+	hoverTexture:SetTexture(WHITE8x8)
+	hoverTexture:SetVertexColor(1, 1, 1, 0.06)
+	hoverTexture:Hide()
+	row.hoverTexture = hoverTexture
+
+	-- Icon column: 18x18 texture left-anchored, 4px inset.
+	local icon = row:CreateTexture(nil, "ARTWORK")
+	icon:SetSize(18, 18)
+	icon:SetPoint("LEFT", row, "LEFT", 6, 0)
+	row.icon = icon
+
+	-- Item-name FontString. Positioned after the icon; truncates with
+	-- ellipsis if the link is too long for the column width.
+	local nameText = row:CreateFontString(nil, "OVERLAY")
+	nameText:SetFont(FONT, 10, "OUTLINE")
+	nameText:SetTextColor(unpack(C_TEXT))
+	nameText:SetPoint("LEFT", icon, "RIGHT", 6, 0)
+	nameText:SetPoint("RIGHT", row, "RIGHT", -80, 0)  -- leave room for action tag
+	nameText:SetJustifyH("LEFT")
+	nameText:SetWordWrap(false)
+	row.nameText = nameText
+
+	-- Action tag (DE / Mill / Prospect / Open). Right-aligned, color
+	-- pulled from PROCESS_ACTIONS in AutoDelete.lua.
+	local actionTag = row:CreateFontString(nil, "OVERLAY")
+	actionTag:SetFont(FONT, 10, "OUTLINE")
+	actionTag:SetPoint("RIGHT", row, "RIGHT", -10, 0)
+	actionTag:SetJustifyH("RIGHT")
+	row.actionTag = actionTag
+
+	-- Hover handlers: show tooltip with the item link details + the
+	-- secondary "click to arm / right-click to ignore" hint.
+	row:SetScript("OnEnter", function(self)
+		self.hoverTexture:Show()
+		if self._entry and self._entry.link then
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			GameTooltip:SetHyperlink(self._entry.link)
+			GameTooltip:AddLine(" ", 1, 1, 1)
+			GameTooltip:AddLine("|cff00ff00Left-click|r to arm this item for the action's keybind.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:AddLine("|cffff8000Right-click|r to ignore this item on this character.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end
+	end)
+	row:SetScript("OnLeave", function(self)
+		self.hoverTexture:Hide()
+		GameTooltip:Hide()
+	end)
+
+	-- Click dispatch. Left arms, right ignores. The button-arg form
+	-- (RegisterForClicks("LeftButtonUp", "RightButtonUp") + OnClick
+	-- receives the button name) is the Postal/Bagnon idiom.
+	row:SetScript("OnClick", function(self, mouseButton)
+		local entry = self._entry
+		if not entry then return end
+		if mouseButton == "RightButton" then
+			if _G.AutoDelete_SetProcessIgnored then
+				_G.AutoDelete_SetProcessIgnored(entry.itemId, true)
+			end
+			if _G.AutoDelete_RefreshProcessPanel then
+				_G.AutoDelete_RefreshProcessPanel()
+			end
+			return
+		end
+		-- Left-click: arm the secure-button macrotext for this action.
+		if InCombatLockdown and InCombatLockdown() then
+			print("|cffff8000[AutoDelete]|r Can't arm a target in combat.")
+			return
+		end
+		if _G.AutoDelete_ProcessArm then
+			local ok = _G.AutoDelete_ProcessArm(entry.action, entry.bag, entry.slot)
+			if ok then
+				armed[entry.action] = {
+					bag = entry.bag, slot = entry.slot, itemId = entry.itemId
+				}
+				if _G.AutoDelete_RefreshProcessPanel then
+					_G.AutoDelete_RefreshProcessPanel()
+				end
+			end
+		end
+	end)
+
+	rowPool[i] = row
+	return row
+end
+
+-- Returns true if this entry is the currently-armed target for its
+-- action. Compared by itemId+bag+slot rather than table identity since
+-- armed[] is rewritten on every arm and ProcessScan returns fresh tables.
+local function IsArmed(entry)
+	local a = armed[entry.action]
+	if not a then return false end
+	return a.bag == entry.bag and a.slot == entry.slot and a.itemId == entry.itemId
+end
+
+-- The actual list refresh. Called from OnShow, from BAG_UPDATE hook in
+-- B.4, after a Clear Ignored / Arm / Ignore action, and from the scroll
+-- handler. Cheap when the panel is hidden (early-returns).
+local function RefreshProcessPanel()
+	if not panel:IsShown() then return end
+	local profile = nil
+	if _G.AutoDelete_GetCachedProfile then
+		profile = _G.AutoDelete_GetCachedProfile()
+	end
+	local scan = _G.AutoDelete_ProcessScan
+	local results = (scan and profile) and scan(profile) or {}
+	lastResults = results
+
+	local actionsTable = _G.AutoDelete_PROCESS_ACTIONS or {}
+	local visible = PROCESS_VISIBLE_ROWS
+	local total = #results
+
+	FauxScrollFrame_Update(scrollFrame, total, visible, PROCESS_ROW_H)
+	local offset = FauxScrollFrame_GetOffset(scrollFrame)
+
+	for i = 1, visible do
+		local row = GetOrCreateRow(i)
+		local entry = results[i + offset]
+		if entry then
+			-- Item icon. GetItemInfo's 10th return is the texture path.
+			local _, _, _, _, _, _, _, _, _, texture = GetItemInfo(entry.link)
+			row.icon:SetTexture(texture or "Interface\\Icons\\INV_Misc_QuestionMark")
+			row.nameText:SetText(entry.link)
+			local meta = actionsTable[entry.action]
+			if meta then
+				row.actionTag:SetText(meta.label)
+				row.actionTag:SetTextColor(unpack(meta.color))
+			else
+				row.actionTag:SetText("?")
+				row.actionTag:SetTextColor(0.55, 0.55, 0.55, 1)
+			end
+			row._entry = entry
+			if IsArmed(entry) then
+				row.armedTexture:Show()
+			else
+				row.armedTexture:Hide()
+			end
+			row:Show()
+		else
+			row._entry = nil
+			row:Hide()
+		end
+	end
+
+	-- Footer count: items shown + ignored. Reads ignored count via the
+	-- exposed table from AutoDelete.lua's GetProcessIgnoredTable.
+	local ignoredCount = 0
+	if _G.AutoDeleteStatsDB and _G.AutoDeleteStatsDB.processIgnored then
+		for _ in pairs(_G.AutoDeleteStatsDB.processIgnored) do
+			ignoredCount = ignoredCount + 1
+		end
+	end
+	if ignoredCount > 0 then
+		footerCount:SetText(total .. " items, " .. ignoredCount .. " ignored")
+	else
+		footerCount:SetText(total .. " items")
+	end
+end
+
+_G.AutoDelete_RefreshProcessPanel = RefreshProcessPanel
+
+end  -- end of Process Bags Panel `do` block
+
+-- ============================================================================
+-- Disenchant Filters Popup
+-- ============================================================================
+-- Tiny standalone popup that holds the Disenchant scope filters that don't
+-- fit on the Keybinds-tab single-row layout. Opened by clicking the gear
+-- button on the One-Key Disenchant row. Same draggable-frame pattern as
+-- the Process Bags panel, just smaller (no scrollable list, just a stack
+-- of compact controls).
+
+do
+
+local POPUP_W = 240
+-- v3.21: bumped from 170 -> 190 to absorb the Quality-label Y shift that
+-- fixed the BoP/BoE overlap (was off-by-10 against the toggle row height).
+local POPUP_H = 190
+
+-- Visual style mirrors the Process Bags panel and the main settings
+-- panel: dark body, dark gray border, dark title bar with orange text,
+-- dim close X that turns red on hover. Previously this popup used an
+-- orange-filled title bar and an orange border, which read as a
+-- different window family from the rest of the addon (same regression
+-- the Process Bags panel had pre-2026-04). Audit fix 2026-05-20.
+local popup = CreateFrame("Frame", "AutoDeleteDisenchantFiltersPopup", UIParent)
+popup:SetSize(POPUP_W, POPUP_H)
+popup:SetFrameStrata("DIALOG")
+popup:SetFrameLevel(120)
+popup:SetMovable(true)
+popup:EnableMouse(true)
+popup:SetClampedToScreen(true)
+popup:Hide()
+ApplyBackdrop(popup, C_BG, C_BORDER)
+
+-- Title bar: drag handle + window title. Same canonical look as
+-- Process Bags and the main settings panel.
+local titleBar = CreateFrame("Frame", nil, popup)
+titleBar:SetPoint("TOPLEFT", popup, "TOPLEFT", 0, 0)
+titleBar:SetPoint("TOPRIGHT", popup, "TOPRIGHT", 0, 0)
+titleBar:SetHeight(24)
+ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
+titleBar:EnableMouse(true)
+titleBar:RegisterForDrag("LeftButton")
+titleBar:SetScript("OnDragStart", function() popup:StartMoving() end)
+titleBar:SetScript("OnDragStop", function() popup:StopMovingOrSizing() end)
+
+local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
+titleText:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
+titleText:SetText("Disenchant Filters")
+
+-- Close X in the title bar's right corner. Dim by default, red on
+-- hover -- matches the main settings panel and Process Bags exactly.
+local closeX = CreateFrame("Button", nil, titleBar)
+closeX:SetSize(24, 24)
+closeX:SetPoint("TOPRIGHT", titleBar, "TOPRIGHT", 0, 0)
+local closeXText = MakeText(closeX, 14, C_DIM, "OUTLINE")
+closeXText:SetText("x")
+closeXText:SetPoint("CENTER")
+closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.3, 0.3) end)
+closeX:SetScript("OnLeave", function() closeXText:SetTextColor(unpack(C_DIM)) end)
+closeX:SetScript("OnClick", function() popup:Hide() end)
+
+-- Body: section labels + 5 inline sub-toggles (BoP / BoE / Unc / Rare /
+-- Epic) on two rows + an iLvl row with min/max inputs. All controls
+-- mirror the Keybinds-tab inline controls we used to render before this
+-- popup existed; the OnClick handlers below dispatch the same way.
+--
+-- v3.21: section Y values pushed down to eliminate label/toggle overlap.
+-- The original layout had QUAL_Y = -56 (label) and TGL_Y_BIND = -46
+-- (toggles, height 16, extending to -62), so the Quality label collided
+-- with the BoP/BoE row from y=-56 to y=-62. New values give each
+-- section a clean 6px gap below the toggles of the section above.
+--   Section A (Bind state): label at -30, toggles at -46 (row -46..-62)
+--   Section B (Quality):    label at -68, toggles at -84 (row -84..-100)
+--   Section C (iLvl range): label at -106, inputs at -124 (row -124..-142)
+local BIND_Y    = -30
+local QUAL_Y    = -68
+local ILVL_Y    = -106
+local LABEL_X   = 12
+
+local function MakeSectionLabel(parent, text, y)
+	local fs = parent:CreateFontString(nil, "OVERLAY")
+	fs:SetFont(FONT, 10, "OUTLINE")
+	fs:SetTextColor(unpack(C_ACCENT))
+	fs:SetPoint("TOPLEFT", LABEL_X, y)
+	fs:SetText(text)
+	return fs
+end
+
+local bindLabel = MakeSectionLabel(popup, "Bind state:", BIND_Y)
+local qualLabel = MakeSectionLabel(popup, "Quality:",    QUAL_Y)
+local ilvlLabel = MakeSectionLabel(popup, "iLvl range:", ILVL_Y)
+
+-- Sub-toggles: positioned with a per-toggle width, anchored to the
+-- popup at fixed x offsets. Color follows the main-panel convention:
+-- binary toggles (BoP/BoE) use C_ACCENT (the standard active-state
+-- orange); rarity toggles (Unc/Rare/Epic) use the WoW quality colors
+-- (green/blue/purple). Audit fix 2026-05-20 -- the previous build
+-- used C_DK_RED (Death Knight class color, only intended for the
+-- Auto-Repair "Use Guild Bank money" sub-toggle) for everything,
+-- which read as off-design and didn't communicate rarity.
+local TGL_Y_BIND = BIND_Y - 16
+local TGL_Y_QUAL = QUAL_Y - 16
+local TGL_W      = 52
+
+local function MakeFilterToggle(label, color, x, y)
+	local tgl = MakeSubToggle(popup, label, color)
+	tgl:SetPoint("TOPLEFT", x, y)
+	tgl:SetWidth(TGL_W)
+	return tgl
+end
+
+-- Binary bind-state toggles use the standard accent (orange).
+local tglBoP  = MakeFilterToggle("BoP",  C_ACCENT, LABEL_X,             TGL_Y_BIND)
+local tglBoE  = MakeFilterToggle("BoE",  C_ACCENT, LABEL_X + TGL_W,     TGL_Y_BIND)
+
+-- Rarity toggles use WoW quality colors so the checked-state fill
+-- communicates which rarity each control governs at a glance.
+local tglUnc  = MakeFilterToggle("Unc",  C_Q_UNCOMMON, LABEL_X,             TGL_Y_QUAL)
+local tglRare = MakeFilterToggle("Rare", C_Q_RARE,     LABEL_X + TGL_W,     TGL_Y_QUAL)
+local tglEpic = MakeFilterToggle("Epic", C_Q_EPIC,     LABEL_X + TGL_W * 2, TGL_Y_QUAL)
+
+-- iLvl min/max: two small numeric input boxes joined by a dash. Width
+-- and offset match the Process Bags panel's iLvl controls for visual
+-- consistency.
+local function MakeIlvlEdit(x, y)
+	local box = CreateFrame("Frame", nil, popup)
+	box:SetSize(36, 18)
+	box:SetPoint("TOPLEFT", x, y)
+	ApplyBackdrop(box, C_DROP_BG, C_DROP_BORDER)
+	local edit = CreateFrame("EditBox", nil, box)
+	edit:SetFont(FONT, 10, "OUTLINE")
+	edit:SetTextColor(unpack(C_TEXT))
+	edit:SetAutoFocus(false)
+	edit:SetNumeric(true)
+	edit:SetMaxLetters(4)
+	edit:SetPoint("TOPLEFT", 3, -1)
+	edit:SetPoint("BOTTOMRIGHT", -3, 1)
+	edit:SetJustifyH("CENTER")
+	edit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
+	edit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
+	return edit
+end
+
+local ilvlMinEdit = MakeIlvlEdit(LABEL_X,      ILVL_Y - 18)
+local ilvlMaxEdit = MakeIlvlEdit(LABEL_X + 48, ILVL_Y - 18)
+
+local ilvlDash = popup:CreateFontString(nil, "OVERLAY")
+ilvlDash:SetFont(FONT, 10, "OUTLINE")
+ilvlDash:SetTextColor(unpack(C_DIM))
+ilvlDash:SetPoint("TOPLEFT", LABEL_X + 38, ILVL_Y - 21)
+ilvlDash:SetText("-")
+
+-- Hint text under the iLvl row explaining the 0 = use-default semantics.
+local ilvlHint = popup:CreateFontString(nil, "OVERLAY")
+ilvlHint:SetFont(FONT, 8, "OUTLINE")
+ilvlHint:SetTextColor(unpack(C_DIM))
+ilvlHint:SetPoint("TOPLEFT", LABEL_X + 92, ILVL_Y - 18)
+ilvlHint:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -10, ILVL_Y - 18)
+ilvlHint:SetJustifyH("LEFT")
+ilvlHint:SetWordWrap(true)
+ilvlHint:SetText("0 = use default")
+
+-- OnClick handlers. Each writes the profile field, refreshes the cache,
+-- and re-arms the disenchant button. Mirrors the per-toggle handler the
+-- main panel sets up for other features.
+--
+-- IMPORTANT: this popup is constructed at FILE LOAD time, outside the
+-- BuildUI() closure where `db` is a local. Use GetDB() explicitly here
+-- so the handlers don't resolve `db` to a nil global. (Latent bug fixed
+-- 2026-05-20: any toggle click previously errored with "attempt to
+-- index local 'db' (a nil value)" at GetActiveProfile.)
+local function MakeFilterHandler(field)
+	return function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		GetActiveProfile(GetDB())[field] = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+		if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
+		local panel = _G.AutoDeleteOptionsPanel
+		if panel and panel._refreshDisenchantStatus then panel:_refreshDisenchantStatus() end
+	end
+end
+tglBoP:SetScript("OnClick",  MakeFilterHandler("disenchantBoP"))
+tglBoE:SetScript("OnClick",  MakeFilterHandler("disenchantBoE"))
+tglUnc:SetScript("OnClick",  MakeFilterHandler("disenchantUncommon"))
+tglRare:SetScript("OnClick", MakeFilterHandler("disenchantRare"))
+tglEpic:SetScript("OnClick", MakeFilterHandler("disenchantEpic"))
+
+local function MakeIlvlHandler(field)
+	return function(s)
+		local val = tonumber(s:GetText()) or 0
+		if val < 0 then val = 0 end
+		s:SetText(tostring(val))
+		GetActiveProfile(GetDB())[field] = val
+		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+		if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
+	end
+end
+ilvlMinEdit:SetScript("OnEditFocusLost", MakeIlvlHandler("disenchantIlvlMin"))
+ilvlMaxEdit:SetScript("OnEditFocusLost", MakeIlvlHandler("disenchantIlvlMax"))
+
+-- Refresh: reads current profile values into the popup widgets. Called
+-- on popup show so the controls always reflect saved state.
+local function RefreshPopup()
+	local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
+	if not profile then return end
+	tglBoP:SetChecked(profile.disenchantBoP)
+	tglBoE:SetChecked(profile.disenchantBoE)
+	tglUnc:SetChecked(profile.disenchantUncommon)
+	tglRare:SetChecked(profile.disenchantRare)
+	tglEpic:SetChecked(profile.disenchantEpic)
+	ilvlMinEdit:SetText(tostring(profile.disenchantIlvlMin or 0))
+	ilvlMaxEdit:SetText(tostring(profile.disenchantIlvlMax or 0))
+end
+
+popup:SetScript("OnShow", function(self)
+	-- Anchor centered on first show; user can drag it after.
+	if not self._everShown then
+		self:ClearAllPoints()
+		self:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+		self._everShown = true
+	end
+	RefreshPopup()
+end)
+
+local function ToggleDisenchantFiltersPopup()
+	if popup:IsShown() then popup:Hide() else popup:Show() end
+end
+
+_G.AutoDelete_DisenchantFiltersPopup       = popup
+_G.AutoDelete_ToggleDisenchantFiltersPopup = ToggleDisenchantFiltersPopup
+_G.AutoDelete_RefreshDisenchantFilters     = RefreshPopup
+
+end  -- end of Disenchant Filters Popup `do` block
+
+-- ============================================================================
+-- Learned Affixes Popup
+-- ============================================================================
+-- Scrollable read-only window that displays the player's learned affixes,
+-- populated by the Scan Learned Affixes button on the Affix Display card.
+-- Same draggable-frame pattern as the Disenchant Filters popup and the
+-- Process Bags panel: dark body, dark gray border, dark title bar with
+-- orange text, dim close X that turns red on hover.
+--
+-- Body is a ScrollFrame holding a single FontString -- one widget, no row
+-- pooling needed at the expected scale (~50-100 affixes max). The caller
+-- in AutoDelete.lua formats the multi-line string (tier headers in orange
+-- via embedded |cff...| escape codes, affix entries in default text) and
+-- hands it off via _G.AutoDelete_ShowLearnedAffixesWindow(text).
+
+do
+
+local POPUP_W = 320
+local POPUP_H = 360
+local TITLE_H = 24
+local BODY_PAD_X = 10
+local BODY_PAD_TOP = 4
+local BODY_PAD_BOT = 8
+-- Scrollbar built into UIPanelScrollFrameTemplate reserves ~22px on the
+-- right edge of the scroll frame; pad accordingly so text doesn't slide
+-- under the bar.
+local SCROLLBAR_W = 22
+
+local popup = CreateFrame("Frame", "AutoDeleteLearnedAffixesPopup", UIParent)
+popup:SetSize(POPUP_W, POPUP_H)
+popup:SetFrameStrata("DIALOG")
+popup:SetFrameLevel(120)
+popup:SetMovable(true)
+popup:EnableMouse(true)
+popup:SetClampedToScreen(true)
+popup:Hide()
+ApplyBackdrop(popup, C_BG, C_BORDER)
+
+-- Title bar: drag handle + window title + close X. Mirrors the canonical
+-- look used by the Disenchant Filters popup and Process Bags panel.
+local titleBar = CreateFrame("Frame", nil, popup)
+titleBar:SetPoint("TOPLEFT", popup, "TOPLEFT", 0, 0)
+titleBar:SetPoint("TOPRIGHT", popup, "TOPRIGHT", 0, 0)
+titleBar:SetHeight(TITLE_H)
+ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
+titleBar:EnableMouse(true)
+titleBar:RegisterForDrag("LeftButton")
+titleBar:SetScript("OnDragStart", function() popup:StartMoving() end)
+titleBar:SetScript("OnDragStop", function() popup:StopMovingOrSizing() end)
+
+local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
+titleText:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
+titleText:SetText("Learned Affixes")
+
+local closeX = CreateFrame("Button", nil, titleBar)
+closeX:SetSize(24, 24)
+closeX:SetPoint("TOPRIGHT", titleBar, "TOPRIGHT", 0, 0)
+local closeXText = MakeText(closeX, 14, C_DIM, "OUTLINE")
+closeXText:SetText("x")
+closeXText:SetPoint("CENTER")
+closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.3, 0.3) end)
+closeX:SetScript("OnLeave", function() closeXText:SetTextColor(unpack(C_DIM)) end)
+closeX:SetScript("OnClick", function() popup:Hide() end)
+
+-- Scroll frame fills the body below the title bar. Use Blizzard's stock
+-- UIPanelScrollFrameTemplate so we get a usable scrollbar with up/down
+-- arrows that match the rest of the WoW UI on 3.3.5a.
+local scroll = CreateFrame("ScrollFrame", "AutoDeleteLearnedAffixesScroll", popup,
+	"UIPanelScrollFrameTemplate")
+scroll:SetPoint("TOPLEFT", popup, "TOPLEFT", BODY_PAD_X, -(TITLE_H + BODY_PAD_TOP))
+scroll:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -SCROLLBAR_W, BODY_PAD_BOT)
+
+-- Scroll child: a Frame holding the body FontString. UIPanelScrollFrameTemplate
+-- needs an explicit child whose height drives how much can be scrolled. After
+-- setting text we measure GetStringHeight() and resize the child to match.
+local content = CreateFrame("Frame", nil, scroll)
+content:SetSize(POPUP_W - BODY_PAD_X - SCROLLBAR_W, 1) -- height set dynamically on Show
+scroll:SetScrollChild(content)
+
+local bodyFS = content:CreateFontString(nil, "OVERLAY")
+bodyFS:SetFont(FONT, 11, "OUTLINE")
+bodyFS:SetTextColor(unpack(C_TEXT))
+bodyFS:SetJustifyH("LEFT")
+bodyFS:SetJustifyV("TOP")
+bodyFS:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
+-- Fixed width so the FontString wraps cleanly within the scroll child.
+-- Per CLAUDE.md FontString rule §10.9: width MUST come from SetWidth(N),
+-- never from a RIGHT-anchor SetPoint. SetWordWrap + SetNonSpaceWrap
+-- explicit per the same rule.
+local CONTENT_FS_W = POPUP_W - BODY_PAD_X - SCROLLBAR_W
+bodyFS:SetWidth(CONTENT_FS_W)
+bodyFS:SetWordWrap(true)
+bodyFS:SetNonSpaceWrap(false)
+
+-- Show the popup with the given body text. Resizes the scroll child so the
+-- scrollbar reflects the actual content height. Text may include WoW color
+-- escapes (|cffRRGGBB...|r) which FontString renders natively.
+local function ShowLearnedAffixesWindow(bodyText)
+	bodyFS:SetText(bodyText or "")
+	-- Measure rendered height and size the scroll child to match so the
+	-- scrollbar's range is correct. Add a small bottom pad so the last line
+	-- isn't flush against the frame edge.
+	local h = bodyFS:GetStringHeight() + 8
+	if h < 1 then h = 1 end
+	content:SetHeight(h)
+	-- Anchor centered on first show; user can drag it after.
+	if not popup._everShown then
+		popup:ClearAllPoints()
+		popup:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+		popup._everShown = true
+	end
+	-- Reset scroll to top so a freshly-shown window starts at the summary.
+	scroll:SetVerticalScroll(0)
+	popup:Show()
+end
+
+_G.AutoDelete_LearnedAffixesPopup      = popup
+_G.AutoDelete_ShowLearnedAffixesWindow = ShowLearnedAffixesWindow
+
+-- Escape-to-close: WoW's stock UISpecialFrames mechanism scans this table on
+-- ESC and Hides any matching named frame. Our popup has a global name set
+-- via CreateFrame's second arg, so just append it once.
+tinsert(UISpecialFrames, "AutoDeleteLearnedAffixesPopup")
+
+end  -- end of Learned Affixes Popup `do` block
+
+-- ============================================================================
+-- Manage Ignored Items Popup
+-- ============================================================================
+-- v3.20: surfaces the per-character "Skip this item" choices the user made
+-- via the Keep-list override popup (AutoDelete_MarkKeepSkipped writes them
+-- into AutoDeleteStatsDB.keepSkip[action][itemId]). Each row shows the
+-- action tag + item link + a one-click Unignore button.
+--
+-- Same chrome pattern as Learned Affixes (themed title bar, dim close X,
+-- UIPanelScrollFrameTemplate body, ESC-closes via UISpecialFrames).
+-- Refreshes the row list every time it's shown so new ignores appear and
+-- removed ones disappear without requiring a reload.
+
+do
+
+local POPUP_W = 360
+local POPUP_H = 420
+local TITLE_H = 24
+local BODY_PAD_X = 10
+local BODY_PAD_TOP = 4
+local BODY_PAD_BOT = 8
+local SCROLLBAR_W = 22
+local ROW_H = 22
+
+local popup = CreateFrame("Frame", "AutoDeleteIgnoredItemsPopup", UIParent)
+popup:SetSize(POPUP_W, POPUP_H)
+popup:SetFrameStrata("DIALOG")
+popup:SetFrameLevel(120)
+popup:SetMovable(true)
+popup:EnableMouse(true)
+popup:SetClampedToScreen(true)
+popup:Hide()
+ApplyBackdrop(popup, C_BG, C_BORDER)
+
+local titleBar = CreateFrame("Frame", nil, popup)
+titleBar:SetPoint("TOPLEFT", popup, "TOPLEFT", 0, 0)
+titleBar:SetPoint("TOPRIGHT", popup, "TOPRIGHT", 0, 0)
+titleBar:SetHeight(TITLE_H)
+ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
+titleBar:EnableMouse(true)
+titleBar:RegisterForDrag("LeftButton")
+titleBar:SetScript("OnDragStart", function() popup:StartMoving() end)
+titleBar:SetScript("OnDragStop", function() popup:StopMovingOrSizing() end)
+
+local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
+titleText:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
+titleText:SetText("Ignored Items")
+
+local closeX = CreateFrame("Button", nil, titleBar)
+closeX:SetSize(24, 24)
+closeX:SetPoint("TOPRIGHT", titleBar, "TOPRIGHT", 0, 0)
+local closeXText = MakeText(closeX, 14, C_DIM, "OUTLINE")
+closeXText:SetText("x")
+closeXText:SetPoint("CENTER")
+closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.3, 0.3) end)
+closeX:SetScript("OnLeave", function() closeXText:SetTextColor(unpack(C_DIM)) end)
+closeX:SetScript("OnClick", function() popup:Hide() end)
+
+-- Scroll frame fills the body below the title bar.
+local scroll = CreateFrame("ScrollFrame", "AutoDeleteIgnoredItemsScroll", popup,
+	"UIPanelScrollFrameTemplate")
+scroll:SetPoint("TOPLEFT", popup, "TOPLEFT", BODY_PAD_X, -(TITLE_H + BODY_PAD_TOP))
+scroll:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -SCROLLBAR_W, BODY_PAD_BOT)
+
+local content = CreateFrame("Frame", nil, scroll)
+content:SetSize(POPUP_W - BODY_PAD_X - SCROLLBAR_W, 1)
+scroll:SetScrollChild(content)
+
+-- Row pool: lazy-create on demand, reuse across refreshes. Each row has an
+-- action tag FontString, an item link FontString, and an "X" unignore
+-- button on the right. Rows hide when unused (refresh pass shows only as
+-- many rows as needed, hides the rest).
+local rowPool = {}
+
+local function MakeIgnoreRow(idx)
+	local row = CreateFrame("Frame", nil, content)
+	row:SetSize(POPUP_W - BODY_PAD_X - SCROLLBAR_W, ROW_H)
+	row:SetPoint("TOPLEFT", 0, -(idx - 1) * ROW_H)
+
+	-- Subtle alternating row bg so a long list reads as a list.
+	local bg = row:CreateTexture(nil, "BACKGROUND")
+	bg:SetTexture(WHITE8x8)
+	bg:SetAllPoints()
+	bg:SetVertexColor(0.06, 0.06, 0.06, 1)
+	row._bg = bg
+
+	-- Action tag on the left ("DE" / "Mill" / "Prospect" / "Open").
+	local tag = MakeText(row, 9, C_DIM, "OUTLINE")
+	tag:SetPoint("LEFT", row, "LEFT", 6, 0)
+	tag:SetWidth(52)
+	tag:SetJustifyH("LEFT")
+	tag:SetWordWrap(false)
+	tag:SetNonSpaceWrap(false)
+	row._tag = tag
+
+	-- Item link in the middle.
+	local link = MakeText(row, 10, C_TEXT, "OUTLINE")
+	link:SetPoint("LEFT", tag, "RIGHT", 6, 0)
+	link:SetPoint("RIGHT", row, "RIGHT", -30, 0)
+	link:SetJustifyH("LEFT")
+	link:SetWordWrap(false)
+	link:SetNonSpaceWrap(false)
+	row._link = link
+
+	-- Unignore button on the right -- small X.
+	local unignore = CreateFrame("Button", nil, row)
+	unignore:SetSize(18, 18)
+	unignore:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+	ApplyBackdrop(unignore, { 0.07, 0.07, 0.07, 1 }, { 0.30, 0.30, 0.30, 1 })
+	local uTxt = MakeText(unignore, 12, C_DIM, "OUTLINE")
+	uTxt:SetText("x")
+	uTxt:SetPoint("CENTER")
+	unignore:SetScript("OnEnter", function(self)
+		ApplyBackdrop(self, { C_RED[1], C_RED[2], C_RED[3], 0.4 }, C_RED)
+		uTxt:SetTextColor(1, 1, 1, 1)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText("Unignore", 1, 1, 1)
+		GameTooltip:AddLine("Stop ignoring this item. AutoDelete will ask about it again next time.",
+			C_DIM[1], C_DIM[2], C_DIM[3], true)
+		GameTooltip:Show()
+	end)
+	unignore:SetScript("OnLeave", function(self)
+		ApplyBackdrop(self, { 0.07, 0.07, 0.07, 1 }, { 0.30, 0.30, 0.30, 1 })
+		uTxt:SetTextColor(unpack(C_DIM))
+		GameTooltip:Hide()
+	end)
+	row._unignore = unignore
+
+	return row
+end
+
+-- Empty-state message (shown when no items are ignored).
+local emptyText = MakeText(content, 11, C_DIM, "OUTLINE")
+emptyText:SetPoint("TOPLEFT", content, "TOPLEFT", 6, -8)
+emptyText:SetWidth(POPUP_W - BODY_PAD_X - SCROLLBAR_W - 12)
+emptyText:SetJustifyH("LEFT")
+emptyText:SetWordWrap(true)
+emptyText:SetNonSpaceWrap(false)
+emptyText:SetText("No ignored items. When the Keep-list popup appears, clicking Ignore on an item adds it here.")
+emptyText:Hide()
+
+-- Action label lookup. Uses the same verbs as the override popup.
+local ACTION_TAGS = {
+	disenchant = "DE",
+	mill       = "Mill",
+	prospect   = "Prospect",
+	open       = "Open",
+}
+
+local function RefreshIgnoredItems()
+	local sv = _G.AutoDeleteStatsDB
+	if not sv or not sv.keepSkip then
+		-- SV not initialized yet (PLAYER_LOGIN hasn't fired); show empty.
+		for _, r in ipairs(rowPool) do r:Hide() end
+		emptyText:Show()
+		content:SetHeight(40)
+		return
+	end
+	-- Collect (action, itemId) pairs.
+	local entries = {}
+	for _, action in ipairs({ "disenchant", "mill", "prospect", "open" }) do
+		local bucket = sv.keepSkip[action]
+		if bucket then
+			for id in pairs(bucket) do
+				if bucket[id] then
+					table.insert(entries, { action = action, id = id })
+				end
+			end
+		end
+	end
+	-- Sort: by action first (DE / Mill / Prospect / Open) then by id.
+	local actionOrder = { disenchant = 1, mill = 2, prospect = 3, open = 4 }
+	table.sort(entries, function(a, b)
+		if a.action == b.action then return a.id < b.id end
+		return (actionOrder[a.action] or 99) < (actionOrder[b.action] or 99)
+	end)
+
+	if #entries == 0 then
+		for _, r in ipairs(rowPool) do r:Hide() end
+		emptyText:Show()
+		content:SetHeight(40)
+		return
+	end
+	emptyText:Hide()
+
+	-- Populate rows; grow the pool as needed.
+	for i, entry in ipairs(entries) do
+		local row = rowPool[i]
+		if not row then
+			row = MakeIgnoreRow(i)
+			rowPool[i] = row
+		end
+		row:Show()
+		row._tag:SetText(ACTION_TAGS[entry.action] or entry.action)
+		-- Item link if cached; otherwise itemId text.
+		local _, link = GetItemInfo("item:" .. entry.id)
+		row._link:SetText(link or ("item:" .. entry.id))
+		-- Per-row unignore wires its action+id at refresh time so the
+		-- closure captures the right values.
+		row._unignore:SetScript("OnClick", function()
+			if _G.AutoDelete_ClearKeepSkip then
+				_G.AutoDelete_ClearKeepSkip(entry.action, entry.id)
+			end
+			RefreshIgnoredItems()
+		end)
+		-- Alternating row tint for legibility.
+		if i % 2 == 0 then
+			row._bg:SetVertexColor(0.04, 0.04, 0.04, 1)
+		else
+			row._bg:SetVertexColor(0.07, 0.07, 0.07, 1)
+		end
+	end
+	-- Hide unused rows from the pool.
+	for i = #entries + 1, #rowPool do
+		rowPool[i]:Hide()
+	end
+	content:SetHeight(#entries * ROW_H + 8)
+end
+
+popup:SetScript("OnShow", function(self)
+	if not self._everShown then
+		self:ClearAllPoints()
+		self:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+		self._everShown = true
+	end
+	scroll:SetVerticalScroll(0)
+	RefreshIgnoredItems()
+end)
+
+local function ShowIgnoredItemsWindow()
+	popup:Show()
+end
+
+local function ToggleIgnoredItemsWindow()
+	if popup:IsShown() then popup:Hide() else popup:Show() end
+end
+
+_G.AutoDelete_IgnoredItemsPopup        = popup
+_G.AutoDelete_ShowIgnoredItemsWindow   = ShowIgnoredItemsWindow
+_G.AutoDelete_ToggleIgnoredItemsWindow = ToggleIgnoredItemsWindow
+_G.AutoDelete_RefreshIgnoredItemsWindow = RefreshIgnoredItems
+
+tinsert(UISpecialFrames, "AutoDeleteIgnoredItemsPopup")
+
+end  -- end of Ignored Items Popup `do` block
+
+-- ============================================================================
+-- Raw Lists Import / Export (v3.20)
+-- ============================================================================
+-- Three popups + the execute helper that wires them together:
+--
+--   1. Import Raw popup       (paste area + Import to Delete/Sell/Keep buttons)
+--   2. Import Results popup   (summary: imported / duplicates / unresolved)
+--   3. Export Raw popup       (list-picker dropdown + read-only auto-selected text)
+--
+-- Flow:
+--   * User pastes item names (one per line) into Import Raw, clicks a
+--     destination button -> AutoDelete_ExecuteRawImport(listKey, rawText)
+--     resolves names via GetItemInfo, dedupes against the target list,
+--     appends item:<id> lines to profile.<listText|sellListText|whitelistText>,
+--     opens the Results popup with counts + unresolved names.
+--   * User opens Export Raw, picks Delete / Sell / Keep -> the read-only
+--     EditBox fills with the target list's items as plain names (one per
+--     line). User Ctrl+A / Ctrl+C to copy.
+--
+-- All popups follow the canonical chrome (dark body, dark gray border,
+-- dark title bar + orange title, dim close X that turns red on hover) and
+-- close on Escape via UISpecialFrames. Helpers all live on _G to keep
+-- the main chunk under Lua 5.1's 200-local cap.
+
+-- ---------------------------------------------------------------------------
+-- Parser + import-execute helpers (file-local; called by the popups below).
+-- ---------------------------------------------------------------------------
+
+-- Build a set of itemIds already on a list (newline-separated `item:<id>`
+-- format). Cheap; used for dedupe during import.
+local function ParseListItemIds(listText)
+	local ids = {}
+	for line in string.gmatch(listText or "", "[^\r\n]+") do
+		local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+		local id = tonumber(trimmed:match("item:(%d+)"))
+		if id then ids[id] = true end
+	end
+	return ids
+end
+
+-- Try to resolve one pasted line into (itemId, displayName) by accepting
+-- three forms: full item link, "item:<id>", or plain item name. Returns
+-- nil, nil if nothing matched (uncached items will land here on 3.3.5a).
+local function ResolveRawLine(line)
+	if not line or line == "" then return nil, nil end
+	-- Form A: full link or item:<id> reference.
+	local id = tonumber(line:match("Hitem:(%d+)") or line:match("item:(%d+)"))
+	if id then
+		local name = GetItemInfo(id)
+		if name then return id, name end
+		-- We have an id we can format, but the player's cache has not
+		-- seen it. Still usable for the import (we have the id) but the
+		-- summary popup won't have a pretty name; show the id.
+		return id, "item:" .. id
+	end
+	-- Form B: plain name (optionally wrapped in [brackets] from copy-paste).
+	local cleanName = line:gsub("^%[(.+)%]$", "%1"):gsub("^%s+", ""):gsub("%s+$", "")
+	if cleanName == "" then return nil, nil end
+	local resolved, link = GetItemInfo(cleanName)
+	if resolved and link then
+		local linkId = tonumber(link:match("item:(%d+)"))
+		if linkId then return linkId, resolved end
+	end
+	return nil, nil
+end
+
+-- The list-key -> profile-field map used by both Import and Export.
+local RAW_LIST_FIELDS = {
+	delete = "listText",
+	sell   = "sellListText",
+	keep   = "whitelistText",
+}
+local RAW_LIST_LABELS = {
+	delete = "Delete",
+	sell   = "Sell",
+	keep   = "Keep",
+}
+
+-- Append a batch of item ids to profile[listKey field]. Caller has already
+-- deduped. Adds a trailing newline if the existing list doesn't already
+-- end with one so the appended block stays on its own lines.
+local function AppendIdsToList(profile, listKey, ids)
+	local field = RAW_LIST_FIELDS[listKey]
+	if not field or not profile or #ids == 0 then return end
+	local current = profile[field] or ""
+	if current ~= "" and not current:match("\n$") then
+		current = current .. "\n"
+	end
+	local lines = {}
+	for _, id in ipairs(ids) do
+		table.insert(lines, "item:" .. id)
+	end
+	profile[field] = current .. table.concat(lines, "\n") .. "\n"
+end
+
+-- Execute Raw import. Called by the Import Raw popup's destination buttons.
+-- Walks the paste text line-by-line, resolves each, dedupes against the
+-- target list, appends survivors, then opens the Results popup with a
+-- summary breakdown.
+function _G.AutoDelete_ExecuteRawImport(listKey, rawText)
+	if not RAW_LIST_FIELDS[listKey] then return end
+	local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
+	if not profile then return end
+	local existing = ParseListItemIds(profile[RAW_LIST_FIELDS[listKey]])
+	local imported, duplicates, unresolved = {}, {}, {}
+	local toAppend = {}
+	for line in string.gmatch(rawText or "", "[^\r\n]+") do
+		local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+		if trimmed ~= "" then
+			local id, name = ResolveRawLine(trimmed)
+			if not id then
+				table.insert(unresolved, trimmed)
+			elseif existing[id] then
+				table.insert(duplicates, name or ("item:" .. id))
+			else
+				table.insert(imported, name or ("item:" .. id))
+				table.insert(toAppend, id)
+				existing[id] = true
+			end
+		end
+	end
+	AppendIdsToList(profile, listKey, toAppend)
+	if _G.AutoDelete_RefreshCachedProfile then
+		_G.AutoDelete_RefreshCachedProfile()
+	end
+	-- Refresh the visible Lists view (Delete/Sell/Keep) if open.
+	local panel = _G.AutoDeleteOptionsPanel
+	if panel and panel.Refresh then panel:Refresh() end
+	-- Show the Results popup with counts + unresolved names.
+	if _G.AutoDelete_ShowImportResultsWindow then
+		_G.AutoDelete_ShowImportResultsWindow(listKey, #imported, #duplicates, unresolved)
+	end
+end
+
+-- Render a list as raw names for export. Walks profile[<listKey>Text],
+-- resolves each item:<id> entry via GetItemInfo, returns a newline-joined
+-- string of names. Uncached items fall back to their item:<id> form.
+function _G.AutoDelete_BuildRawExport(listKey)
+	if not RAW_LIST_FIELDS[listKey] then return "" end
+	local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
+	if not profile then return "" end
+	local text = profile[RAW_LIST_FIELDS[listKey]] or ""
+	local names = {}
+	for line in string.gmatch(text, "[^\r\n]+") do
+		local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+		local id = tonumber(trimmed:match("item:(%d+)"))
+		if id then
+			local name = GetItemInfo(id)
+			table.insert(names, name or ("item:" .. id))
+		end
+	end
+	return table.concat(names, "\n")
+end
+
+-- ---------------------------------------------------------------------------
+-- Shared chrome helper for the three Raw popups. Returns the popup frame
+-- with title bar + close X already attached. Caller fills the body area
+-- (everything below TITLE_H pixels from the top).
+-- ---------------------------------------------------------------------------
+local function MakeRawPopup(globalName, titleText, w, h)
+	local p = CreateFrame("Frame", globalName, UIParent)
+	p:SetSize(w, h)
+	p:SetFrameStrata("DIALOG")
+	p:SetFrameLevel(120)
+	p:SetMovable(true)
+	p:EnableMouse(true)
+	p:SetClampedToScreen(true)
+	p:Hide()
+	ApplyBackdrop(p, C_BG, C_BORDER)
+	local tb = CreateFrame("Frame", nil, p)
+	tb:SetPoint("TOPLEFT", p, "TOPLEFT", 0, 0)
+	tb:SetPoint("TOPRIGHT", p, "TOPRIGHT", 0, 0)
+	tb:SetHeight(24)
+	ApplyBackdrop(tb, C_TITLEBAR, C_BORDER)
+	tb:EnableMouse(true)
+	tb:RegisterForDrag("LeftButton")
+	tb:SetScript("OnDragStart", function() p:StartMoving() end)
+	tb:SetScript("OnDragStop", function() p:StopMovingOrSizing() end)
+	local title = MakeText(tb, 12, C_TITLE, "OUTLINE")
+	title:SetPoint("LEFT", tb, "LEFT", 10, 0)
+	title:SetText(titleText)
+	local x = CreateFrame("Button", nil, tb)
+	x:SetSize(24, 24)
+	x:SetPoint("TOPRIGHT", tb, "TOPRIGHT", 0, 0)
+	local xt = MakeText(x, 14, C_DIM, "OUTLINE")
+	xt:SetText("x")
+	xt:SetPoint("CENTER")
+	x:SetScript("OnEnter", function() xt:SetTextColor(1, 0.3, 0.3) end)
+	x:SetScript("OnLeave", function() xt:SetTextColor(unpack(C_DIM)) end)
+	x:SetScript("OnClick", function() p:Hide() end)
+	tinsert(UISpecialFrames, globalName)
+	return p
+end
+
+-- ---------------------------------------------------------------------------
+-- Import Raw popup
+-- ---------------------------------------------------------------------------
+
+do
+
+local POPUP_W = 380
+local POPUP_H = 360
+local TITLE_H = 24
+local PAD_X = 10
+
+local popup = MakeRawPopup("AutoDeleteImportRawPopup", "Import Raw", POPUP_W, POPUP_H)
+
+-- Hint text above the paste area.
+local hint = MakeText(popup, 10, C_DIM, "OUTLINE")
+hint:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8))
+hint:SetWidth(POPUP_W - PAD_X * 2)
+hint:SetJustifyH("LEFT")
+hint:SetWordWrap(true)
+hint:SetNonSpaceWrap(false)
+hint:SetText("Paste item names below, one per line. Item links also work. Then pick a list:")
+
+-- Paste area: multi-line EditBox inside a ScrollFrame, dark bg.
+local pasteHolder = CreateFrame("Frame", nil, popup)
+pasteHolder:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8 + 24))
+pasteHolder:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 8 + 24))
+pasteHolder:SetHeight(POPUP_H - TITLE_H - 8 - 24 - 38 - 12)
+ApplyBackdrop(pasteHolder, C_DROP_BG, C_DROP_BORDER)
+
+local pasteScroll = CreateFrame("ScrollFrame", nil, pasteHolder)
+pasteScroll:SetPoint("TOPLEFT", 4, -4)
+pasteScroll:SetPoint("BOTTOMRIGHT", -4, 4)
+
+local pasteEdit = CreateFrame("EditBox", nil, pasteScroll)
+pasteEdit:SetMultiLine(true)
+pasteEdit:SetAutoFocus(false)
+pasteEdit:EnableMouse(true)
+pasteEdit:EnableKeyboard(true)
+pasteEdit:SetFont(FONT, 11, "OUTLINE")
+pasteEdit:SetTextColor(unpack(C_TEXT))
+pasteEdit:SetWidth(POPUP_W - PAD_X * 2 - 8)
+pasteScroll:SetScrollChild(pasteEdit)
+pasteEdit:SetScript("OnEscapePressed", function(eb) eb:ClearFocus() end)
+
+pasteHolder:EnableMouse(true)
+pasteHolder:SetScript("OnMouseDown", function() pasteEdit:SetFocus() end)
+pasteScroll:EnableMouseWheel(true)
+pasteScroll:SetScript("OnMouseWheel", function(sf, delta)
+	local v = math.max(0, math.min(sf:GetVerticalScrollRange(),
+		sf:GetVerticalScroll() - delta * 30))
+	sf:SetVerticalScroll(v)
+end)
+
+-- Three destination buttons below the paste area, equal widths.
+local BTN_H = 24
+local function MakeDestButton(label, listKey, color, xOff, btnW)
+	local b = MakeActionButton(popup, label, color, function()
+		local txt = pasteEdit:GetText() or ""
+		if txt == "" then return end
+		if _G.AutoDelete_ExecuteRawImport then
+			_G.AutoDelete_ExecuteRawImport(listKey, txt)
+		end
+		pasteEdit:SetText("")
+		popup:Hide()
+	end, btnW, BTN_H)
+	b:SetPoint("BOTTOMLEFT", popup, "BOTTOMLEFT", xOff, 12)
+	return b
+end
+local BTN_GAP = 6
+local TOTAL_BTN_W = POPUP_W - PAD_X * 2 - BTN_GAP * 2
+local BTN_W = math.floor(TOTAL_BTN_W / 3)
+MakeDestButton("Import to Delete", "delete", C_RED,   PAD_X,                                BTN_W)
+MakeDestButton("Import to Sell",   "sell",   C_BLUE,  PAD_X + BTN_W + BTN_GAP,              BTN_W)
+MakeDestButton("Import to Keep",   "keep",   C_GREEN, PAD_X + (BTN_W + BTN_GAP) * 2,        BTN_W)
+
+popup:SetScript("OnShow", function(self)
+	if not self._everShown then
+		self:ClearAllPoints()
+		self:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+		self._everShown = true
+	end
+	pasteEdit:SetText("")
+	pasteEdit:SetFocus()
+end)
+
+function _G.AutoDelete_ShowImportRawWindow()
+	popup:Show()
+end
+
+end  -- end of Import Raw Popup `do` block
+
+-- ---------------------------------------------------------------------------
+-- Import Results popup (summary: imported / duplicates / unresolved)
+-- ---------------------------------------------------------------------------
+
+do
+
+local POPUP_W = 380
+local POPUP_H = 320
+local TITLE_H = 24
+local PAD_X = 10
+local SCROLLBAR_W = 22
+
+local popup = MakeRawPopup("AutoDeleteImportResultsPopup", "Import Results", POPUP_W, POPUP_H)
+
+-- Scrollable body so a long list of unresolved names doesn't overflow.
+local scroll = CreateFrame("ScrollFrame", "AutoDeleteImportResultsScroll", popup,
+	"UIPanelScrollFrameTemplate")
+scroll:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 4))
+scroll:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -SCROLLBAR_W, 40)
+
+local content = CreateFrame("Frame", nil, scroll)
+content:SetSize(POPUP_W - PAD_X - SCROLLBAR_W, 1)
+scroll:SetScrollChild(content)
+
+local body = content:CreateFontString(nil, "OVERLAY")
+body:SetFont(FONT, 11, "OUTLINE")
+body:SetTextColor(unpack(C_TEXT))
+body:SetJustifyH("LEFT")
+body:SetJustifyV("TOP")
+body:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
+body:SetWidth(POPUP_W - PAD_X - SCROLLBAR_W)
+body:SetWordWrap(true)
+body:SetNonSpaceWrap(false)
+
+-- OK button anchored at the bottom of the popup.
+local okBtn = MakeActionButton(popup, "OK", C_BLUE, function() popup:Hide() end,
+	POPUP_W - PAD_X * 2, 24)
+okBtn:SetPoint("BOTTOMLEFT", popup, "BOTTOMLEFT", PAD_X, 8)
+
+function _G.AutoDelete_ShowImportResultsWindow(listKey, importedCount, duplicateCount, unresolved)
+	local listLabel = RAW_LIST_LABELS[listKey] or listKey or "?"
+	local lines = {}
+	table.insert(lines, string.format(
+		"|cffff8000Imported %d item(s) to the %s list.|r", importedCount, listLabel))
+	if duplicateCount and duplicateCount > 0 then
+		table.insert(lines, "")
+		table.insert(lines, string.format(
+			"|cff8a8a8aSkipped %d duplicate(s) already on the %s list.|r",
+			duplicateCount, listLabel))
+	end
+	if unresolved and #unresolved > 0 then
+		table.insert(lines, "")
+		table.insert(lines, string.format(
+			"|cffff5555Could not find %d name(s):|r", #unresolved))
+		for _, name in ipairs(unresolved) do
+			table.insert(lines, "  " .. name)
+		end
+		table.insert(lines, "")
+		table.insert(lines, "|cff8a8a8aTip: mouse over an item in your bags or in any item link once to cache it, then try importing again.|r")
+	end
+	body:SetText(table.concat(lines, "\n"))
+	local h = body:GetStringHeight() + 8
+	if h < 1 then h = 1 end
+	content:SetHeight(h)
+	if not popup._everShown then
+		popup:ClearAllPoints()
+		popup:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+		popup._everShown = true
+	end
+	scroll:SetVerticalScroll(0)
+	popup:Show()
+end
+
+end  -- end of Import Results Popup `do` block
+
+-- ---------------------------------------------------------------------------
+-- Export Raw popup (dropdown + read-only auto-selected text area)
+-- ---------------------------------------------------------------------------
+
+do
+
+local POPUP_W = 380
+local POPUP_H = 360
+local TITLE_H = 24
+local PAD_X = 10
+
+local popup = MakeRawPopup("AutoDeleteExportRawPopup", "Export Raw", POPUP_W, POPUP_H)
+
+-- Hint + dropdown row at top.
+local hint = MakeText(popup, 10, C_DIM, "OUTLINE")
+hint:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8))
+hint:SetWidth(POPUP_W - PAD_X * 2)
+hint:SetJustifyH("LEFT")
+hint:SetWordWrap(true)
+hint:SetNonSpaceWrap(false)
+hint:SetText("Pick a list. The names below are pre-selected -- press Ctrl+C to copy.")
+
+-- Read-only text area (multi-line EditBox inside a ScrollFrame).
+local exportHolder = CreateFrame("Frame", nil, popup)
+exportHolder:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8 + 24 + 28))
+exportHolder:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 8 + 24 + 28))
+exportHolder:SetHeight(POPUP_H - TITLE_H - 8 - 24 - 28 - 12 - 8)
+ApplyBackdrop(exportHolder, C_DROP_BG, C_DROP_BORDER)
+
+local exportScroll = CreateFrame("ScrollFrame", nil, exportHolder)
+exportScroll:SetPoint("TOPLEFT", 4, -4)
+exportScroll:SetPoint("BOTTOMRIGHT", -4, 4)
+
+local exportEdit = CreateFrame("EditBox", nil, exportScroll)
+exportEdit:SetMultiLine(true)
+exportEdit:SetAutoFocus(false)
+exportEdit:EnableMouse(true)
+exportEdit:EnableKeyboard(true)
+exportEdit:SetFont(FONT, 11, "OUTLINE")
+exportEdit:SetTextColor(unpack(C_TEXT))
+exportEdit:SetWidth(POPUP_W - PAD_X * 2 - 8)
+exportScroll:SetScrollChild(exportEdit)
+exportEdit:SetScript("OnEscapePressed", function(eb) eb:ClearFocus() end)
+-- Read-only: any edit attempts revert. The user can still highlight + copy.
+exportEdit:SetScript("OnTextChanged", function(eb)
+	if eb._suppress then return end
+	eb._suppress = true
+	eb:SetText(eb._stash or "")
+	eb._suppress = false
+end)
+
+exportHolder:EnableMouse(true)
+exportHolder:SetScript("OnMouseDown", function() exportEdit:SetFocus() end)
+exportScroll:EnableMouseWheel(true)
+exportScroll:SetScript("OnMouseWheel", function(sf, delta)
+	local v = math.max(0, math.min(sf:GetVerticalScrollRange(),
+		sf:GetVerticalScroll() - delta * 30))
+	sf:SetVerticalScroll(v)
+end)
+
+local function FillFor(listKey)
+	local txt = (_G.AutoDelete_BuildRawExport and _G.AutoDelete_BuildRawExport(listKey)) or ""
+	exportEdit._suppress = true
+	exportEdit._stash = txt
+	exportEdit:SetText(txt)
+	exportEdit._suppress = false
+	-- Auto-select all so Ctrl+C copies the whole list immediately.
+	exportEdit:SetFocus()
+	exportEdit:HighlightText()
+end
+
+-- Three buttons act as the "picker": clicking one fills the text area.
+-- (Simpler than a dropdown for three options and consistent with the
+-- Import popup's three-destination row.)
+local pickRow = CreateFrame("Frame", nil, popup)
+pickRow:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8 + 22))
+pickRow:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 8 + 22))
+pickRow:SetHeight(22)
+
+local BTN_GAP = 6
+local TOTAL_PICK_W = POPUP_W - PAD_X * 2 - BTN_GAP * 2
+local PICK_BTN_W = math.floor(TOTAL_PICK_W / 3)
+local function MakePickButton(label, listKey, color, xOff)
+	local b = MakeActionButton(pickRow, label, color, function()
+		FillFor(listKey)
+	end, PICK_BTN_W, 22)
+	b:SetPoint("LEFT", pickRow, "LEFT", xOff, 0)
+	return b
+end
+MakePickButton("Delete", "delete", C_RED,   0)
+MakePickButton("Sell",   "sell",   C_BLUE,  PICK_BTN_W + BTN_GAP)
+MakePickButton("Keep",   "keep",   C_GREEN, (PICK_BTN_W + BTN_GAP) * 2)
+
+popup:SetScript("OnShow", function(self)
+	if not self._everShown then
+		self:ClearAllPoints()
+		self:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+		self._everShown = true
+	end
+	-- Default to Delete list on open.
+	FillFor("delete")
+end)
+
+function _G.AutoDelete_ShowExportRawWindow()
+	popup:Show()
+end
+
+end  -- end of Export Raw Popup `do` block
+
+-- ============================================================================
+-- Spike Report popup (v3.20)
+-- ============================================================================
+-- Read-only multi-line dump of the spike-debug ring buffer. Mirrors the
+-- Export Raw popup pattern: pre-selects text on show so Ctrl+C copies the
+-- whole report immediately. Built so users without ElvUI (which provides
+-- chat copying) can still grab spike data after a test pass.
+--
+-- Called from AutoDelete.lua via _G.AutoDelete_ShowSpikeReportWindow(text).
+-- The text-building lives there; this file only owns the popup geometry.
+
+do
+
+local POPUP_W = 720         -- wider than Export Raw so one spike row fits per line
+local POPUP_H = 460
+local TITLE_H = 24
+local PAD_X   = 10
+
+local popup = MakeRawPopup("AutoDeleteSpikeReportPopup", "Spike Report", POPUP_W, POPUP_H)
+
+local hint = MakeText(popup, 10, C_DIM, "OUTLINE")
+hint:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8))
+hint:SetWidth(POPUP_W - PAD_X * 2)
+hint:SetJustifyH("LEFT")
+hint:SetWordWrap(true)
+hint:SetNonSpaceWrap(false)
+hint:SetText("Spike ring buffer (oldest first). Pre-selected -- press Ctrl+C to copy.")
+
+local txtHolder = CreateFrame("Frame", nil, popup)
+txtHolder:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8 + 18))
+txtHolder:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 8 + 18))
+txtHolder:SetHeight(POPUP_H - TITLE_H - 8 - 18 - 12)
+ApplyBackdrop(txtHolder, C_DROP_BG, C_DROP_BORDER)
+
+local txtScroll = CreateFrame("ScrollFrame", nil, txtHolder)
+txtScroll:SetPoint("TOPLEFT", 4, -4)
+txtScroll:SetPoint("BOTTOMRIGHT", -4, 4)
+
+local txtEdit = CreateFrame("EditBox", nil, txtScroll)
+txtEdit:SetMultiLine(true)
+txtEdit:SetAutoFocus(false)
+txtEdit:EnableMouse(true)
+txtEdit:EnableKeyboard(true)
+txtEdit:SetFont(FONT, 10, "OUTLINE")  -- 10pt fits one spike row at POPUP_W=720
+txtEdit:SetTextColor(unpack(C_TEXT))
+txtEdit:SetWidth(POPUP_W - PAD_X * 2 - 8)
+txtScroll:SetScrollChild(txtEdit)
+txtEdit:SetScript("OnEscapePressed", function(eb) eb:ClearFocus() end)
+-- Read-only: any edit attempts revert to the stash. Highlight + copy still work.
+txtEdit:SetScript("OnTextChanged", function(eb)
+	if eb._suppress then return end
+	eb._suppress = true
+	eb:SetText(eb._stash or "")
+	eb._suppress = false
+end)
+
+txtHolder:EnableMouse(true)
+txtHolder:SetScript("OnMouseDown", function() txtEdit:SetFocus() end)
+txtScroll:EnableMouseWheel(true)
+txtScroll:SetScript("OnMouseWheel", function(sf, delta)
+	local v = math.max(0, math.min(sf:GetVerticalScrollRange(),
+		sf:GetVerticalScroll() - delta * 30))
+	sf:SetVerticalScroll(v)
+end)
+
+local function FillWith(text)
+	txtEdit._suppress = true
+	txtEdit._stash = text or ""
+	txtEdit:SetText(text or "")
+	txtEdit._suppress = false
+	-- Auto-select all so Ctrl+C copies the whole report immediately.
+	txtEdit:SetFocus()
+	txtEdit:HighlightText()
+end
+
+popup:SetScript("OnShow", function(self)
+	if not self._everShown then
+		self:ClearAllPoints()
+		self:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+		self._everShown = true
+	end
+end)
+
+function _G.AutoDelete_ShowSpikeReportWindow(text)
+	FillWith(text)
+	popup:Show()
+end
+
+end  -- end of Spike Report Popup `do` block
+
+-- ============================================================================
 -- Build UI
 -- ============================================================================
 
@@ -867,12 +2718,11 @@ local function BuildUI(self)
 	local yOff = -36
 
 	-- ========================================================================
-	-- SECTION 1: Tabbed Settings (General / Goblin / AutoInv / Tracking / Profiles)
-	-- Container panel holds a horizontal tab strip at top + a fixed-height
-	-- content area below. The General tab's three cards are:
-	--   card 1: Enable (master toggle) + Auto-Delete Junk's parent description
-	--   card 2: Auto-Delete Junk + Auto-Delete Common + Auto-Sell Greens (3 rows)
-	--   card 3: Scan Speed dropdown
+	-- SECTION 1: Tabbed Settings (General / Pets / Filters / Keybinds /
+	-- Invites / Tracking / Profiles). Container panel holds a horizontal
+	-- tab strip at top + a fixed-height content area below. See each tab's
+	-- own header comment further down for the card-by-card breakdown of
+	-- that tab's layout.
 	-- ========================================================================
 	local CARD_TOP_PAD = 6
 	local CARD_BOT_PAD = 4
@@ -882,7 +2732,11 @@ local function BuildUI(self)
 	-- Content area: 82px tall (fits 4 cards at cardH=74 + 8px buffer)
 	-- Inner padding: 6px on each side, 6px gap between strip and content
 	local TAB_STRIP_H = 26
-	local CONTENT_AREA_H = 100   -- grown from 82 to fit Tracking tab's Reset button below the rows
+	-- Tab content area height. All tabs share this single height; the
+	-- previous 196 experiment (to fit a 2x2 Keybinds grid) put visible
+	-- dead space below every other tab and was reverted. Keybinds now
+	-- uses a compact 4-row layout that fits in 100.
+	local CONTENT_AREA_H = 100   -- 92px card area + 4px top + 4px bottom margins
 	local TAB_INNER_PAD = 6
 	local TAB_STRIP_GAP = 6
 	-- Total tab container height: strip + gap + content + inner padding
@@ -904,10 +2758,22 @@ local function BuildUI(self)
 	tabContent:SetPoint("TOPLEFT", tabStrip, "BOTTOMLEFT", 0, -TAB_STRIP_GAP)
 	tabContent:SetPoint("TOPRIGHT", tabStrip, "BOTTOMRIGHT", 0, -TAB_STRIP_GAP)
 
-	-- Create 6 tab content pages (frames parented to tabContent, filling it)
+	-- Create tab content pages (frames parented to tabContent, filling it).
 	local tabPages = {}
-	local TAB_KEYS = { "general", "goblin", "tools", "autoinv", "tracking", "profiles" }
-	local TAB_LABELS = { "General", "Goblin", "Tools", "AutoInv", "Tracking", "Profiles" }
+	-- Tab keys are stable internal identifiers (referenced in tabPages[<key>]
+	-- across the file); tab labels are user-facing and renamed without
+	-- migrating the keys. Goblin -> Pets, Tools -> Filters, AutoInv -> Invites
+	-- reflect what the tabs actually contain after the Option B reorg.
+	-- v3.20: added "affix" key/Affix label to house the Project Ebonhold
+	-- affix tooling that previously lived on Filters. Filters now hosts
+	-- DE Filters + Manage Ignored Items.
+	--
+	-- Order (2026-05-23 spec): General > Pets > Affix > Invites > Filters >
+	-- Keybinds > Tracking > Profiles. Internal keys stay STABLE (the SV
+	-- has `tools` for Filters and `goblin` for Pets from earlier renames)
+	-- so the visual reorder is just rearranging these two arrays.
+	local TAB_KEYS = { "general", "goblin", "affix", "autoinv", "tools", "keybinds", "tracking", "profiles" }
+	local TAB_LABELS = { "General", "Pets", "Affix", "Invites", "Filters", "Keybinds", "Tracking", "Profiles" }
 	for i, key in ipairs(TAB_KEYS) do
 		local page = CreateFrame("Frame", nil, tabContent)
 		page:SetAllPoints(tabContent)
@@ -995,8 +2861,12 @@ local function BuildUI(self)
 	end)
 
 	-- ========================================================================
-	-- GENERAL TAB: 4 cards horizontally (Enable, Summon, Auto-Delete Junk, Scan Speed)
-	-- Content area is 70px tall; cards occupy 62px centered vertically.
+	-- GENERAL TAB: 3 cards horizontally:
+	--   Card 1: Enable Addon + Auto-Add Equipped + Auto-Repair (+ guild bank
+	--           sub-toggle indented under Auto-Repair)
+	--   Card 2: Process Bags     (title + live count + Open Panel button)
+	--   Card 3: Scan Speed       (dropdown + help text + detailed tooltip)
+	-- Content area is 100px tall; cards occupy 92px with 4px top/bottom margins.
 	-- ========================================================================
 	local generalPage = tabPages.general
 	local CARD_GAP = 6
@@ -1021,45 +2891,114 @@ local function BuildUI(self)
 	local card2 = MakeGeneralCard(cardW + CARD_GAP)
 	local card3 = MakeGeneralCard((cardW + CARD_GAP) * 2)
 
-	local tglEnable = MakeToggle(card1, "Enable", C_ACCENT,
-		"Master switch for the item-handling features. When enabled, AutoDelete scans your bags for items on the Delete list, runs Auto-Delete Junk/Common, runs Auto-Sell Greens, performs Auto-Repair at vendors, runs the BoE Armor/BoP/BoE Weapons sell rules, and manages the Greedy Scavenger and Goblin Merchant pets. Auto-Invite and Hide Greedy Spam are independent and run regardless of this switch.")
+	-- Card 1 (Option B reorg per user request 2026-05-20):
+	--   Row 1: Enable Addon  (master toggle; description dropped from the
+	--          card to make room for Auto-Repair below -- the hover tooltip
+	--          still carries the full explanation)
+	--   Row 2: Auto-Add Equipped
+	--   Row 3: Auto-Repair      (master)
+	--   Row 3-sub: Use Guild Bank money (16px sub-toggle, indented)
+	-- 3 main rows + 1 sub-row fit in cardH=92 with 4px slack.
+	-- Sub-toggle indent matches MakeSubToggle convention (parent box+gap=32).
+	local SUBTGL_INDENT_GEN = CARD_INNER_PAD_X + 14 + 8
+
+	local tglEnable = MakeToggle(card1, "Enable Addon", C_ACCENT,
+		"Turns AutoDelete on or off. When off, nothing is auto-deleted or sold. Auto-Invite and Hide Greedy Spam still work no matter what.")
 	tglEnable:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglEnable:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	AddToggleDescription(tglEnable, "Allow AutoDelete to manage your items.",
-		cardW - CARD_INNER_PAD_X * 2 - 26)
 	self._tglEnable = tglEnable
 
-	-- Row 3: Auto-Add Equipped. Single toggle that drives both behaviours:
-	-- a one-time sync of currently equipped items into Keep on toggle-flip,
-	-- and reactive add-to-Keep on every PLAYER_EQUIPMENT_CHANGED. Description
-	-- omitted to fit in card1's 92px height under Enable + its description.
 	local tglAutoAddEquipped = MakeToggle(card1, "Auto-Add Equipped", C_ACCENT,
-		"When ON, every item you equip is added to the Keep list automatically. Toggling this on also syncs your currently equipped items to Keep as a one-time pass. Shirts and tabards are skipped.")
-	tglAutoAddEquipped:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
+		"Adds gear you equip to your Keep list so it won't be sold or deleted by mistake. Shirts and tabards are skipped.")
+	tglAutoAddEquipped:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 22))
 	tglAutoAddEquipped:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglAutoAddEquipped = tglAutoAddEquipped
 
-	-- card2: Auto-Delete Junk, Auto-Delete Common, Auto-Sell Greens
-	-- Three rows stacked. No descriptions to keep them compact within cardH=92.
-	local tglGray = MakeToggle(card2, "Auto-Delete Junk", C_ACCENT,
-		"Automatically destroy poor (gray) quality items. Quest items, shirts, and tabards are protected. Items on the Keep list are also protected.")
-	tglGray:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
-	tglGray:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglGray = tglGray
+	local tglRepair = MakeToggle(card1, "Auto-Repair", C_ACCENT,
+		"Fixes your gear when you talk to a vendor. Turn on the sub-toggle below to pay from your guild bank first.")
+	tglRepair:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
+	tglRepair:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglRepair = tglRepair
 
-	local tglDelCommon = MakeToggle(card2, "Auto-Delete Common", C_ACCENT,
-		"Automatically destroy Common (white) quality equippable gear. Quest items, reagents, consumables, shirts, tabards, and items on the Keep list are protected.")
-	tglDelCommon:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 22))
-	tglDelCommon:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglDelCommon = tglDelCommon
+	local tglRepairGuild = MakeSubToggle(card1, "Use Guild Bank money", C_DK_RED)
+	tglRepairGuild:SetPoint("TOPLEFT", SUBTGL_INDENT_GEN, -(CARD_INNER_PAD_Y + 66))
+	tglRepairGuild:SetWidth(cardW - SUBTGL_INDENT_GEN - CARD_INNER_PAD_X)
+	self._tglRepairGuild = tglRepairGuild
 
-	local tglSellGreensGen = MakeToggle(card2, "Auto-Sell Greens", C_ACCENT,
-		"Automatically sell Uncommon (green) gear at vendors. Equippable gear only. Quest items and items on the Keep list are protected.")
-	tglSellGreensGen:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
-	tglSellGreensGen:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglSellGreensGen = tglSellGreensGen
+	-- Card 2: Process Bags launcher (moved from Filters -> Card 3 per the
+	-- Option B reorg). General tab now carries the "I want to actively run
+	-- something" feature; the Filters tab is purely about which auto-rules
+	-- apply. Same layout as the old Process Bags card -- title, live count
+	-- summary that refreshes on BAG_UPDATE + panel Refresh, and an Open
+	-- Panel action button.
+	--
+	-- Wrapped in `do ... end` so the title/count/button locals don't bump
+	-- BuildUI past Lua 5.1's 200-local cap. The count FontString is
+	-- exported on `self._processCount` (read by self:_refreshProcessCount
+	-- below), so the wrapper's locals can vanish on block exit.
+	do
+		local card2Title = MakeText(card2, 11, C_ACCENT, "OUTLINE")
+		card2Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+		card2Title:SetText("Process Bags")
 
-	-- Scan Speed card (moved here from the old Scan Options left card)
+		local processCount = MakeText(card2, 9, C_DIM)
+		processCount:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+		processCount:SetPoint("TOPRIGHT", -CARD_INNER_PAD_X, -24)
+		processCount:SetJustifyH("LEFT")
+		processCount:SetWordWrap(true)
+		processCount:SetText("...")
+		self._processCount = processCount
+
+		-- Open Panel: launches the standalone Process Bags window. C_BLUE
+		-- (change/transform class). Sits at y=-68 to match the Audit Lists
+		-- button on Filters Card 2 (uniform row geometry across tabs).
+		local launchBtn = MakeActionButton(card2, "Open Panel", C_BLUE, function()
+			if _G.AutoDelete_ToggleProcessPanel then _G.AutoDelete_ToggleProcessPanel() end
+		end, cardW - CARD_INNER_PAD_X * 2, 20)
+		launchBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -68)
+		launchBtn:SetScript("OnEnter", function(btn)
+			-- Override MakeActionButton's hover so we can layer the tooltip
+			-- on top, same pattern Audit Lists + Scan Learned Affixes use.
+			btn:SetBackdropColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.3)
+			btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
+			btn._text:SetTextColor(1, 1, 1)
+			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+			GameTooltip:SetText("Open Panel", 1, 1, 1)
+			GameTooltip:AddLine("Opens the Process Bags window, a separate panel that lists every item in your bags eligible for One-Key Disenchant, Mill, Prospect, or Open. Click an item there to arm it for the next keybind press.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		launchBtn:SetScript("OnLeave", function(btn)
+			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+			btn._text:SetTextColor(unpack(C_TEXT))
+			GameTooltip:Hide()
+		end)
+	end
+
+	function self:_refreshProcessCount()
+		if not self._processCount then return end
+		local getter = _G.AutoDelete_ProcessScanCounts
+		if not getter then return end
+		local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
+		local c = getter(profile)
+		if not c or c.total == 0 then
+			self._processCount:SetText("No eligible items")
+			return
+		end
+		local parts = {}
+		if c.disenchant > 0 then table.insert(parts, c.disenchant .. " DE") end
+		if c.mill       > 0 then table.insert(parts, c.mill       .. " Mill") end
+		if c.prospect   > 0 then table.insert(parts, c.prospect   .. " Prospect") end
+		if c.open       > 0 then table.insert(parts, c.open       .. " Open") end
+		self._processCount:SetText(c.total .. " items: " .. table.concat(parts, ", "))
+	end
+
+	-- Card 3: Scan Speed (dot toggles moved to Filters -> Affix Display per
+	-- the Option B reorg). Card now has just the dropdown + a couple of
+	-- help lines + a detailed hover tooltip explaining the trade-off.
+	-- "Nobody knows what it does" was the original feedback that triggered
+	-- this rewrite -- the in-card description spells out concretely what
+	-- the scan does and the hover tooltip spells out the trade-off.
 	local scanSpeedCard = card3
 	local speedLabel = MakeText(scanSpeedCard, 10, C_TEXT, "OUTLINE")
 	speedLabel:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y - 2)
@@ -1079,11 +3018,31 @@ local function BuildUI(self)
 	speedDD:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 14))
 	self._speedDD = speedDD
 
+	-- Hover tooltip on the dropdown explaining the trade-off in detail.
+	-- The dropdown's main button is the OnEnter/OnLeave target -- the
+	-- arrow texture and bg both live under it so hovering anywhere on
+	-- the dropdown surfaces the tip. Mirrors the affixFloorRow pattern
+	-- used elsewhere in this file.
+	local SCAN_TIP_TITLE = "Scan Speed"
+	local SCAN_TIP_BODY  = "How often AutoDelete checks your bags for items on the Delete and Sell lists.\n\n|cffffd200Fast (0.5-1 sec):|r items disappear almost instantly. Tiny CPU cost.\n\n|cffffd200Slow (5-30 sec):|r quieter in the background. Short delay before items go.\n\n|cffffd200Very slow (1-5 min):|r runs once in a while. Good if you only want vendor cleanup.\n\nVendor selling always fires right when you open a merchant, no matter this setting."
+	speedDD:EnableMouse(true)
+	speedDD:SetScript("OnEnter", function(s)
+		GameTooltip:SetOwner(s, "ANCHOR_TOP")
+		GameTooltip:SetText(SCAN_TIP_TITLE, 1, 1, 1)
+		GameTooltip:AddLine(SCAN_TIP_BODY, C_DIM[1], C_DIM[2], C_DIM[3], true)
+		GameTooltip:Show()
+	end)
+	speedDD:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+	-- In-card description (2 lines, dim, wrapped) summarizing what the
+	-- option controls. Sits below the dropdown so the card visually
+	-- balances and the user has a hint without needing to hover.
 	local speedHelp = MakeText(scanSpeedCard, 9, C_DIM, "OUTLINE")
-	speedHelp:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 40))
-	speedHelp:SetPoint("TOPRIGHT", scanSpeedCard, "TOPRIGHT", -CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 40))
+	speedHelp:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 42))
+	speedHelp:SetPoint("TOPRIGHT", scanSpeedCard, "TOPRIGHT", -CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 42))
 	speedHelp:SetJustifyH("LEFT")
-	speedHelp:SetText("How often bags are scanned.")
+	speedHelp:SetWordWrap(true)
+	speedHelp:SetText("How often bags are checked against your Delete and Sell lists. Hover for the full trade-off.")
 
 	-- Toggle: show the affix dot indicator on bag slots. On by default.
 	local tglShowAffixDot = MakeToggle(scanSpeedCard, "Show affix dot", C_ACCENT,
@@ -1099,66 +3058,8 @@ local function BuildUI(self)
 	-- ========================================================================
 	local goblinPage = tabPages.goblin
 
-	-- Small helper for sub-toggles: smaller box (14x14), 9pt text, no description.
-	-- Used for the "Use Guild Bank money" / "After sell" / "After close vendor" rows.
-	local function MakeSubToggle(parent, label, color)
-		local row = CreateFrame("Button", nil, parent)
-		row:SetSize(120, 16)
-
-		local box = CreateFrame("Frame", nil, row)
-		box:SetSize(12, 12)
-		box:SetPoint("LEFT", 0, 0)
-		ApplyBackdrop(box, { 0.04, 0.04, 0.04, 1 }, { 0.33, 0.33, 0.33, 1 })
-
-		local indicator = box:CreateTexture(nil, "OVERLAY")
-		indicator:SetTexture("Interface\\AddOns\\AutoDelete\\textures\\checkmark.tga")
-		indicator:SetPoint("CENTER", box, "CENTER", 0, 0)
-		indicator:SetSize(12, 12)
-		indicator:SetVertexColor(1, 1, 1, 1)
-		indicator:Hide()
-
-		local text = row:CreateFontString(nil, "OVERLAY")
-		text:SetFont(FONT, 9, "OUTLINE")
-		text:SetTextColor(unpack(C_DIM))
-		text:SetPoint("LEFT", box, "RIGHT", 6, 0)
-		text:SetPoint("RIGHT", row, "RIGHT", -2, 0)
-		text:SetJustifyH("LEFT")
-		text:SetWordWrap(true)
-		text:SetText(label)
-
-		row._checked = false
-		local activeColor = color or C_ACCENT
-
-		local function UpdateVisual()
-			if row._checked then
-				local lighter = {
-					math.min(activeColor[1] + 0.10, 1),
-					math.min(activeColor[2] + 0.10, 1),
-					math.min(activeColor[3] + 0.10, 1),
-					1,
-				}
-				ApplyBackdrop(box, activeColor, lighter)
-				indicator:Show()
-				text:SetTextColor(unpack(C_TEXT))
-			else
-				ApplyBackdrop(box, { 0.04, 0.04, 0.04, 1 }, { 0.33, 0.33, 0.33, 1 })
-				indicator:Hide()
-				text:SetTextColor(unpack(C_DIM))
-			end
-		end
-
-		function row:SetChecked(val)
-			row._checked = val and true or false
-			UpdateVisual()
-		end
-		function row:GetChecked() return row._checked end
-		row:SetScript("OnClick", function()
-			row._checked = not row._checked
-			UpdateVisual()
-		end)
-
-		return row
-	end
+	-- MakeSubToggle was promoted to file scope (see top of file). BuildUI's
+	-- callers below resolve to that upvalue.
 
 	local function MakeGoblinCard(xOff)
 		local card = CreateFrame("Frame", nil, goblinPage)
@@ -1174,61 +3075,940 @@ local function BuildUI(self)
 	local gCard2 = MakeGoblinCard(cardW + CARD_GAP)
 	local gCard3 = MakeGoblinCard((cardW + CARD_GAP) * 2)
 
-	-- CARD 1: Auto-Repair (main + sub) + Hide Greedy Spam (main)
-	local tglRepair = MakeToggle(gCard1, "Auto-Repair", C_ACCENT,
-		"Repair your gear automatically when you open a vendor.")
-	tglRepair:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
-	tglRepair:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglRepair = tglRepair
+	-- Sub-toggle indent shared by Scavenger and Bag Warning rows below.
+	-- Lines up the sub-toggle's checkbox with the parent toggle's label text:
+	-- parent x=10, parent box=14, gap=8 -> text starts at 32.
+	local SUBTGL_INDENT = CARD_INNER_PAD_X + 14 + 8   -- 32
 
-	-- Sub-toggles indent to align their box with the parent toggle's TEXT.
-	-- Parent anchor = CARD_INNER_PAD_X (10), parent box = 14 wide, gap 8 → text starts at 32.
-	local SUBTGL_INDENT = CARD_INNER_PAD_X + 14 + 8   -- 32 (card pad + parent box + gap)
-	local tglRepairGuild = MakeSubToggle(gCard1, "Use Guild Bank money", C_DK_RED)
-	tglRepairGuild:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 20))
-	tglRepairGuild:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
-	self._tglRepairGuild = tglRepairGuild
-
-	-- Row 3 on Card 1: Hide Greedy Spam (main toggle).
-	local tglHideSpam = MakeToggle(gCard1, "Hide Greedy Spam", C_ACCENT,
-		"Hides Greedy Scavenger's chat messages and speech bubbles.")
-	tglHideSpam:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
-	tglHideSpam:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglHideSpam = tglHideSpam
-
-	-- CARD 2: Summon Scavenger (master + 3 sub-toggles)
-	local tglScav = MakeToggle(gCard2, "Summon Scavenger", C_ACCENT,
-		"Master toggle for Greedy Scavenger pet management. When enabled, the addon dismisses your Scavenger when you mount and re-summons on dismount, and re-summons it if it gets stuck or despawns. The summon itself is triggered by the After sell or After vendor close sub-toggles below. Gated by the AutoDelete master Enable on the General tab.")
+	-- CARD 1 (Pets, was Goblin's Scavenger card): master Summon Scavenger
+	-- toggle + 3 sub-toggles. Moved here from the old Goblin Card 2 so the
+	-- Scavenger pet feature lives in the leftmost slot of the Pets tab.
+	local tglScav = MakeToggle(gCard1, "Summon Scavenger", C_ACCENT,
+		"Manages your Greedy Scavenger pet. Brings it back when it gets stuck or after you mount up. Use the sub-toggles below to pick when to summon.")
 	tglScav:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglScav:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglScav = tglScav
 
-	local tglScavAfterSell = MakeSubToggle(gCard2, "After sell", C_DK_RED)
+	local tglScavAfterSell = MakeSubToggle(gCard1, "After sell", C_DK_RED)
 	tglScavAfterSell:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 20))
 	tglScavAfterSell:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglScavAfterSell = tglScavAfterSell
 
-	local tglScavAfterClose = MakeSubToggle(gCard2, "After vendor close", C_DK_RED)
+	local tglScavAfterClose = MakeSubToggle(gCard1, "After vendor close", C_DK_RED)
 	tglScavAfterClose:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 36))
 	tglScavAfterClose:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglScavAfterClose = tglScavAfterClose
 
-	local tglScavOnlyInCombat = MakeSubToggle(gCard2, "Only in Combat", C_DK_RED)
+	local tglScavOnlyInCombat = MakeSubToggle(gCard1, "Only in Combat", C_DK_RED)
 	tglScavOnlyInCombat:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 52))
 	tglScavOnlyInCombat:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglScavOnlyInCombat = tglScavOnlyInCombat
 
-	-- CARD 3: Summon Merchant on bags full (main toggle).
-	-- Shares the Summon Scavenger master toggle for mount-aware and
-	-- stuck-detection behavior.
-	local tglSummonMerchant = MakeToggle(gCard3, "Summon Goblin Merchant", C_ACCENT,
-		"Automatically summon your Goblin Merchant companion when your bags reach zero free slots and stay full for 3 seconds. The 3-second wait avoids stray summons from transient fills (e.g. stacks that auto-merge a moment later). You still need to target the merchant and press your Interact With Target keybind to open the vendor window. Gated by the Summon Scavenger master toggle and by the AutoDelete master Enable.")
+	-- CARD 2 (Pets): Summon Goblin Merchant. Moved here from the old Card 3
+	-- so Scavenger and Merchant sit adjacent. Gated by the Summon Scavenger
+	-- master + the AutoDelete master Enable.
+	-- Label is "Summon Merchant" (not "Summon Goblin Merchant"): the full
+	-- name truncated on the ~175px card width. Tooltip still names the
+	-- Goblin Merchant explicitly.
+	local tglSummonMerchant = MakeToggle(gCard2, "Summon Merchant", C_ACCENT,
+		"Summons your Goblin Merchant when your bags stay full for 2 seconds. Target the merchant and press your Interact key to open the shop.")
 	tglSummonMerchant:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglSummonMerchant:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	AddToggleDescription(tglSummonMerchant,
 		"Summons the Goblin Merchant when bags are full.",
 		cardW - CARD_INNER_PAD_X * 2 - 26)
 	self._tglSummonMerchant = tglSummonMerchant
+
+	-- CARD 3 (Pets): Bag Warning + Hide Greedy Spam. Two notification-style
+	-- toggles. Bag Warning fires a chat line when free slots fall below the
+	-- threshold (one-shot per low cycle). Hide Greedy Spam suppresses the
+	-- Scavenger's chat / speech-bubble strings. Threshold here also gates
+	-- the chat notification only; Goblin Merchant summon triggers at zero
+	-- free slots independently.
+	local tglBagSpaceWarn = MakeToggle(gCard3, "Bag warning", C_ACCENT,
+		"Tells you in chat when your free bag slots drop to the number below. Only warns once until your bags fill up again.")
+	tglBagSpaceWarn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
+	tglBagSpaceWarn:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglBagSpaceWarn = tglBagSpaceWarn
+
+	-- Threshold row beneath the Bag warning toggle. Small EditBox + label.
+	local thresholdRow = CreateFrame("Frame", nil, gCard3)
+	thresholdRow:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	thresholdRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 22))
+
+	local thresholdLabel = thresholdRow:CreateFontString(nil, "OVERLAY")
+	thresholdLabel:SetFont(FONT, 10, "OUTLINE")
+	thresholdLabel:SetTextColor(unpack(C_DIM))
+	thresholdLabel:SetPoint("LEFT", thresholdRow, "LEFT", 0, 0)
+	thresholdLabel:SetText("Free slots:")
+
+	local thresholdBox = CreateFrame("Frame", nil, thresholdRow)
+	thresholdBox:SetSize(44, 20)
+	thresholdBox:SetPoint("RIGHT", thresholdRow, "RIGHT", 0, 0)
+	ApplyBackdrop(thresholdBox, C_DROP_BG, C_DROP_BORDER)
+	local thresholdEdit = CreateFrame("EditBox", nil, thresholdBox)
+	thresholdEdit:SetFont(FONT, 10, "OUTLINE")
+	thresholdEdit:SetTextColor(unpack(C_TEXT))
+	thresholdEdit:SetAutoFocus(false)
+	thresholdEdit:SetNumeric(true)
+	thresholdEdit:SetMaxLetters(3)
+	thresholdEdit:SetPoint("TOPLEFT", 4, -1)
+	thresholdEdit:SetPoint("BOTTOMRIGHT", -4, 1)
+	thresholdEdit:SetJustifyH("CENTER")
+	thresholdEdit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
+	thresholdEdit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
+	thresholdEdit:SetScript("OnEditFocusLost", function(s)
+		local val = tonumber(s:GetText()) or 5
+		if val < 0 then val = 0 end
+		if val > 100 then val = 100 end
+		s:SetText(tostring(val))
+		local p = GetActiveProfile(db)
+		p.bagSpaceWarnThreshold = val
+		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+	end)
+	self._bagSpaceWarnEdit = thresholdEdit
+
+	-- Hide Greedy Spam at the bottom of card 3. Compact toggle, no
+	-- sub-description.
+	local tglHideSpam = MakeToggle(gCard3, "Hide Greedy Spam", C_ACCENT,
+		"Hides Greedy Scavenger's chat messages and speech bubbles.")
+	tglHideSpam:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 48))
+	tglHideSpam:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglHideSpam = tglHideSpam
+
+	-- ========================================================================
+	-- FILTERS TAB (internal key "tools" -- kept stable for SV migration):
+	--   Card 1: Auto Actions        (Del/Sell per quality)
+	--   Card 2: (DE Filters -- ported from popup, v3.20 work-in-progress)
+	--   Card 3: (Manage Ignored Items button -- v3.20 work-in-progress)
+	--
+	-- Affix Protection + Affix Display moved out to the AFFIX TAB below
+	-- (v3.20). The Filters tab still owns Auto Actions and will host the
+	-- DE Filters card + the Manage Ignored Items entrypoint once those
+	-- land in the same release. For now Cards 2 and 3 are placeholders
+	-- so the tab content area isn't visually empty after the move.
+	-- ========================================================================
+	local toolsPage = tabPages.tools
+
+	local function MakeToolsCard(xOff)
+		local card = CreateFrame("Frame", nil, toolsPage)
+		card:SetSize(cardW, cardH)
+		card:SetPoint("TOPLEFT", xOff, -4)
+		card:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
+		card:SetBackdropColor(0.04, 0.04, 0.04, 1)
+		card:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)
+		return card
+	end
+
+	local tCard1 = MakeToolsCard(0)
+	local tCard2 = MakeToolsCard(cardW + CARD_GAP)
+	local tCard3 = MakeToolsCard((cardW + CARD_GAP) * 2)
+	-- tCard1: Auto Actions, tCard2: DE Filters, tCard3: Ignored Items
+	-- (button opens the scrollable Manage Ignored Items popup). All three
+	-- populated in the blocks below.
+
+	-- ========================================================================
+	-- Filters Card 2: DE Filters (v3.20).
+	-- Ported inline from the standalone Disenchant Filters popup (which used
+	-- to be opened by a gear button on the Keybinds tab -- both the gear
+	-- button and the popup are gone in v3.20). Same controls, same profile
+	-- fields, same handlers: BoP / BoE bind-state toggles, Unc / Rare / Epic
+	-- quality toggles, iLvl min/max boxes. Wrapped in `do ... end` so the
+	-- card-internal locals don't bump BuildUI past Lua 5.1's 200-local cap
+	-- (the toggles + edit boxes are stored on self._tglDisenchant* and
+	-- self._editDisenchantIlvl* for Refresh()'s state restore).
+	-- ========================================================================
+	do
+		local card2Title = MakeText(tCard2, 11, C_ACCENT, "OUTLINE")
+		card2Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+		card2Title:SetText("DE Filters")
+
+		-- Row 1 (y=-24): BoP + BoE bind-state toggles, side by side.
+		-- C_ACCENT (orange) matches the popup's prior convention for these.
+		local BIND_TGL_W = 60
+		local tglDeBoP = MakeSubToggle(tCard2, "BoP", C_ACCENT)
+		tglDeBoP:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+		tglDeBoP:SetWidth(BIND_TGL_W)
+
+		local tglDeBoE = MakeSubToggle(tCard2, "BoE", C_ACCENT)
+		tglDeBoE:SetPoint("TOPLEFT", CARD_INNER_PAD_X + BIND_TGL_W + 8, -24)
+		tglDeBoE:SetWidth(BIND_TGL_W)
+
+		-- Row 2 (y=-46): Unc / Rare / Epic quality toggles, three across.
+		-- WoW item-quality colors so the checked fill communicates the
+		-- rarity tier at a glance (matches the popup's prior convention).
+		local QUAL_TGL_W = 48
+		local tglDeUnc = MakeSubToggle(tCard2, "Unc", C_Q_UNCOMMON)
+		tglDeUnc:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
+		tglDeUnc:SetWidth(QUAL_TGL_W)
+
+		local tglDeRare = MakeSubToggle(tCard2, "Rare", C_Q_RARE)
+		tglDeRare:SetPoint("TOPLEFT", CARD_INNER_PAD_X + QUAL_TGL_W + 4, -46)
+		tglDeRare:SetWidth(QUAL_TGL_W)
+
+		local tglDeEpic = MakeSubToggle(tCard2, "Epic", C_Q_EPIC)
+		tglDeEpic:SetPoint("TOPLEFT", CARD_INNER_PAD_X + (QUAL_TGL_W + 4) * 2, -46)
+		tglDeEpic:SetWidth(QUAL_TGL_W)
+
+		-- Row 3 (y=-70): iLvl label + min box + dash + max box. Compact
+		-- horizontal layout fits inside the 155px content width.
+		local ilvlLabel = MakeText(tCard2, 10, C_DIM, "OUTLINE")
+		ilvlLabel:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -70)
+		ilvlLabel:SetText("iLvl:")
+
+		local function MakeIlvlBox(xOff)
+			local frame = CreateFrame("Frame", nil, tCard2)
+			frame:SetSize(38, 18)
+			frame:SetPoint("TOPLEFT", xOff, -68)
+			ApplyBackdrop(frame, C_DROP_BG, C_DROP_BORDER)
+			local edit = CreateFrame("EditBox", nil, frame)
+			edit:SetFont(FONT, 10, "OUTLINE")
+			edit:SetTextColor(unpack(C_TEXT))
+			edit:SetAutoFocus(false)
+			edit:SetNumeric(true)
+			edit:SetMaxLetters(4)
+			edit:SetPoint("TOPLEFT", 3, -1)
+			edit:SetPoint("BOTTOMRIGHT", -3, 1)
+			edit:SetJustifyH("CENTER")
+			edit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
+			edit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
+			return edit
+		end
+		local ilvlMinEdit = MakeIlvlBox(CARD_INNER_PAD_X + 28)
+		local ilvlDash = MakeText(tCard2, 10, C_DIM, "OUTLINE")
+		ilvlDash:SetPoint("TOPLEFT", CARD_INNER_PAD_X + 28 + 40, -71)
+		ilvlDash:SetText("-")
+		local ilvlMaxEdit = MakeIlvlBox(CARD_INNER_PAD_X + 28 + 48)
+
+		-- Toggle handler: writes the profile boolean, refreshes the cached
+		-- profile, re-arms the secure button. Same logic the prior popup
+		-- handler used (see MakeFilterHandler in the Disenchant Filters
+		-- Popup block at file scope -- now orphaned but kept for one
+		-- release cycle as a safety net).
+		local function MakeDeToggleHandler(field)
+			return function(btn)
+				btn._checked = not btn._checked
+				btn:SetChecked(btn._checked)
+				GetActiveProfile(db)[field] = btn._checked
+				if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+				if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
+			end
+		end
+		tglDeBoP:SetScript("OnClick",  MakeDeToggleHandler("disenchantBoP"))
+		tglDeBoE:SetScript("OnClick",  MakeDeToggleHandler("disenchantBoE"))
+		tglDeUnc:SetScript("OnClick",  MakeDeToggleHandler("disenchantUncommon"))
+		tglDeRare:SetScript("OnClick", MakeDeToggleHandler("disenchantRare"))
+		tglDeEpic:SetScript("OnClick", MakeDeToggleHandler("disenchantEpic"))
+
+		local function MakeDeIlvlHandler(field)
+			return function(s)
+				local val = tonumber(s:GetText()) or 0
+				if val < 0 then val = 0 end
+				s:SetText(tostring(val))
+				GetActiveProfile(db)[field] = val
+				if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+				if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
+			end
+		end
+		ilvlMinEdit:SetScript("OnEditFocusLost", MakeDeIlvlHandler("disenchantIlvlMin"))
+		ilvlMaxEdit:SetScript("OnEditFocusLost", MakeDeIlvlHandler("disenchantIlvlMax"))
+
+		-- Store on self for Refresh()'s state-restore pass (added below).
+		self._tglDisenchantBoP      = tglDeBoP
+		self._tglDisenchantBoE      = tglDeBoE
+		self._tglDisenchantUnc      = tglDeUnc
+		self._tglDisenchantRare     = tglDeRare
+		self._tglDisenchantEpic     = tglDeEpic
+		self._editDisenchantIlvlMin = ilvlMinEdit
+		self._editDisenchantIlvlMax = ilvlMaxEdit
+	end
+
+	-- ========================================================================
+	-- Filters Card 3: Ignored Items (v3.20).
+	-- Single-button card: opens the Manage Ignored Items popup which lists
+	-- every (action, itemId) pair the user clicked Ignore on via the
+	-- Keep-list override popup. Per-row Unignore button in that popup lets
+	-- them undo the choice. Same y=-68 bottom-of-card slot as the Audit
+	-- Lists / Scan Learned Affixes buttons on the Affix tab for visual
+	-- alignment.
+	-- ========================================================================
+	do
+		local card3Title = MakeText(tCard3, 11, C_ACCENT, "OUTLINE")
+		card3Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+		card3Title:SetText("Ignored Items")
+
+		-- Hint text explains what lands in the list and why a player would
+		-- want to open the manager. Two short wrapped lines.
+		local hint = MakeText(tCard3, 9, C_DIM)
+		hint:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+		hint:SetWidth(cardW - CARD_INNER_PAD_X * 2)
+		hint:SetJustifyH("LEFT")
+		hint:SetWordWrap(true)
+		hint:SetNonSpaceWrap(false)
+		hint:SetText("Items you marked Ignore on the Keep-list popup land here. Open the list to unignore them.")
+
+		local manageBtn = MakeActionButton(tCard3, "Manage Ignored", C_BLUE, function()
+			if _G.AutoDelete_ShowIgnoredItemsWindow then
+				_G.AutoDelete_ShowIgnoredItemsWindow()
+			end
+		end, cardW - CARD_INNER_PAD_X * 2, 20)
+		manageBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -68)
+		manageBtn:SetScript("OnEnter", function(btn)
+			btn:SetBackdropColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.3)
+			btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
+			btn._text:SetTextColor(1, 1, 1)
+			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+			GameTooltip:SetText("Manage Ignored Items", 1, 1, 1)
+			GameTooltip:AddLine("Opens a window listing every item you have set to Ignore. Click the X next to an item to stop ignoring it.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		manageBtn:SetScript("OnLeave", function(btn)
+			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+			btn._text:SetTextColor(unpack(C_TEXT))
+			GameTooltip:Hide()
+		end)
+	end
+
+	-- ========================================================================
+	-- AFFIX TAB (internal key "affix", v3.20):
+	--   Card 1: Affix Protection    (No Auto-Sell + Min iLvl)
+	--   Card 2: Affix Display       (Show affix dot + Only missing affixes)
+	--   Card 3: Affix Tools         (Audit Lists + Scan Learned Affixes)
+	-- User feedback 2026-05-23: Cards 1 and 2 were too crowded with both
+	-- toggles AND their action button each, so the two buttons moved to a
+	-- dedicated Card 3.
+	-- ========================================================================
+	local affixPage = tabPages.affix
+
+	local function MakeAffixCard(xOff)
+		local card = CreateFrame("Frame", nil, affixPage)
+		card:SetSize(cardW, cardH)
+		card:SetPoint("TOPLEFT", xOff, -4)
+		card:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
+		card:SetBackdropColor(0.04, 0.04, 0.04, 1)
+		card:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)
+		return card
+	end
+
+	local aCard1 = MakeAffixCard(0)
+	local aCard2 = MakeAffixCard(cardW + CARD_GAP)
+	local aCard3 = MakeAffixCard((cardW + CARD_GAP) * 2)
+
+	-- Filters Card 1: Auto Actions. Each quality (Junk / Common / Greens)
+	-- is an independent segmented control showing Del / Sell pills (Greens
+	-- shows Sell only -- deleting greens by quality is rarely the intended
+	-- outcome; if a user wants that they can put a specific green on the
+	-- Delete list explicitly). The default state for every row is "off"
+	-- (no pill highlighted). Clicking a pill activates that action;
+	-- clicking the active pill again deselects (back to off). Colors
+	-- follow the semantic palette: red for delete, blue for sell.
+	-- Migration from the old three-checkbox layout (autoGray /
+	-- autoDeleteCommon / autoSellGreens booleans) runs at PLAYER_LOGIN
+	-- in RunDBMigrations v3. v4 normalizes any legacy
+	-- qualityActionGreens=="delete" back to "off" since Greens has no
+	-- Delete pill in this UI -- without the migration the stored "delete"
+	-- would render as no-pill-active (visually equivalent to off), but
+	-- it's cleaner to normalize the data than leave the gotcha lying.
+	--
+	-- Wrapped in `do ... end` so the per-state tables, helper, and three
+	-- pill locals don't bump BuildUI past Lua 5.1's 200-local cap. The
+	-- segmented controls themselves survive on self._pillJunk/_pillCommon/
+	-- _pillGreens for state restore in Refresh and the OnClick handlers
+	-- below.
+	do
+	local card1Title = MakeText(tCard1, 11, C_ACCENT, "OUTLINE")
+	card1Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+	card1Title:SetText("Auto Actions")
+
+	-- State definitions. Active appearance only; the segmented control
+	-- paints inactive segments with its own neutral-gray treatment so the
+	-- "all gray until you click one" visual works automatically. Labels
+	-- stay short because segments are narrow. 3-color semantic palette
+	-- HARD RULE (conventions §11): C_RED for destructive, C_BLUE for
+	-- transformational.
+	local QSTATE_DEL = {
+		value = "delete",
+		label = "Del",
+		tooltip = "Auto-deletes items of this quality. Click again to turn off. Keep-list items, quest items, shirts, and tabards are safe.",
+		bg     = { C_RED[1], C_RED[2], C_RED[3], 0.85 },
+		border = C_RED,
+		fg     = { 1, 1, 1, 1 },
+	}
+	local QSTATE_SELL = {
+		value = "sell",
+		label = "Sell",
+		tooltip = "Auto-sells items of this quality at vendors. Click again to turn off. Keep-list items and quest items are safe.",
+		bg     = { C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.85 },
+		border = C_BLUE,
+		fg     = { 1, 1, 1, 1 },
+	}
+	local QUALITY_STATES_DEL_SELL  = { QSTATE_DEL, QSTATE_SELL }
+	local QUALITY_STATES_SELL_ONLY = { QSTATE_SELL }
+
+	-- Helper that builds one row inside the card: [label LEFT, segments RIGHT].
+	-- Returns the segmented control so BuildUI can wire up state restore.
+	-- Profile-field arg is captured by the OnChange closure so a single
+	-- helper covers all three rows without per-row glue code.
+	--
+	-- Per-segment width is fixed (SEG_W) -- both 2-segment and 1-segment
+	-- rows use the same pill size. The control's total width grows with
+	-- segment count, and since each row anchors its RIGHT edge to the same
+	-- card boundary, the rightmost pill (Sell) always lines up vertically
+	-- across rows.
+	local SEG_W = 42
+	local SEG_H = 18
+	local function MakeQualityRow(label, profileField, states, tooltip, y)
+		local txt = MakeText(tCard1, 10, C_TEXT, "OUTLINE")
+		txt:SetPoint("LEFT", tCard1, "TOPLEFT", CARD_INNER_PAD_X, y - SEG_H/2)
+		txt:SetText(label)
+		local seg = MakeSegmentedControl(tCard1, SEG_W, SEG_H, states, "off", function(newValue)
+			-- Write the new value to the active profile and refresh the
+			-- cached-profile upvalue used by the hot path. No bag refresh
+			-- needed -- the next DeleteItems / SellItems tick reads the
+			-- new value naturally.
+			GetActiveProfile(GetDB())[profileField] = newValue
+			if _G.AutoDelete_RefreshCachedProfile then
+				_G.AutoDelete_RefreshCachedProfile()
+			end
+		end)
+		seg:SetPoint("RIGHT", tCard1, "TOPRIGHT", -CARD_INNER_PAD_X, y - SEG_H/2)
+		-- Tooltip on the label-side area (hover the row label for an
+		-- explanation of what the quality covers; segments have their own
+		-- per-action tooltips wired inside MakeSegmentedControl).
+		local tipFrame = CreateFrame("Frame", nil, tCard1)
+		tipFrame:SetPoint("TOPLEFT", txt, "TOPLEFT", 0, 0)
+		tipFrame:SetPoint("BOTTOMRIGHT", seg, "BOTTOMLEFT", -4, 0)
+		tipFrame:EnableMouse(true)
+		tipFrame:SetScript("OnEnter", function(self)
+			GameTooltip:SetOwner(self, "ANCHOR_TOP")
+			GameTooltip:SetText(label, 1, 1, 1)
+			GameTooltip:AddLine(tooltip, C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		tipFrame:SetScript("OnLeave", function() GameTooltip:Hide() end)
+		return seg
+	end
+
+	-- Three rows, anchored at the standard CARD_ROW1/2/3 y-positions so
+	-- they line up with widgets on Cards 2 and 3 (uniformity rule).
+	local pillJunk = MakeQualityRow(
+		"Junk",
+		"qualityActionJunk",
+		QUALITY_STATES_DEL_SELL,
+		"Gray-quality (poor) items. Quest items, shirts, tabards, and Keep-list items are always safe.",
+		-24)
+	self._pillJunk = pillJunk
+
+	local pillCommon = MakeQualityRow(
+		"Common",
+		"qualityActionCommon",
+		QUALITY_STATES_DEL_SELL,
+		"White-quality gear only. Reagents, consumables, quest items, and Keep-list items are always safe.",
+		-46)
+	self._pillCommon = pillCommon
+
+	local pillGreens = MakeQualityRow(
+		"Greens",
+		"qualityActionGreens",
+		QUALITY_STATES_DEL_SELL,
+		"Green-quality (uncommon) gear -- armor, weapons, rings, necks, trinkets, all armor slots. Reagents, consumables, bags, quest items, and Keep-list items are safe.",
+		-68)
+	self._pillGreens = pillGreens
+	end  -- /Filters Card 1: Auto Actions
+
+	-- Affix Tab Card 1: Affix Protection (moved from Filters tab in v3.20).
+	-- Layout:
+	--   y=-6   title
+	--   y=-24  No Auto-Sell toggle (only one toggle now -- the No Auto-Delete
+	--          one was dropped because Auto-Delete Junk/Common never fire on
+	--          Rare/Epic gear, which is the only quality range affixes
+	--          appear on; the toggle protected nothing in practice)
+	--   y=-46  Min iLvl row (label + input)
+	--   y=-70  Audit Lists button (scans Delete + Sell lists for affixed
+	--          items and prints a chat report)
+	local card2Title = MakeText(aCard1, 11, C_ACCENT, "OUTLINE")
+	card2Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+	card2Title:SetText("Affix Protection")
+
+	local tglProtectAffixFromSell = MakeToggle(aCard1, "No Auto-Sell", C_ACCENT,
+		"Stops Auto-Sell from selling items with a Project Ebonhold affix. Low-iLvl affix items below the number on the next row can still be sold.")
+	tglProtectAffixFromSell:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+	tglProtectAffixFromSell:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglProtectAffixFromSell = tglProtectAffixFromSell
+
+	-- Min iLvl row: label LEFT, small input RIGHT, same row.
+	local affixFloorRow = CreateFrame("Frame", nil, aCard1)
+	affixFloorRow:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	affixFloorRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
+
+	local affixFloorLabel = affixFloorRow:CreateFontString(nil, "OVERLAY")
+	affixFloorLabel:SetFont(FONT, 10, "OUTLINE")
+	affixFloorLabel:SetTextColor(unpack(C_DIM))
+	affixFloorLabel:SetPoint("LEFT", affixFloorRow, "LEFT", 0, 0)
+	affixFloorLabel:SetText("Min iLvl:")
+
+	-- Tooltip hook on the row so hovering either the label or empty area
+	-- explains what the value does. Same text mirrored on the input box
+	-- below so hovering the editbox surface also shows the tip.
+	local AFFIX_FLOOR_TOOLTIP_TITLE = "Min iLvl"
+	local AFFIX_FLOOR_TOOLTIP_BODY  = "Affix items at this iLvl or higher are protected. Lower iLvl affix items can still be sold or deleted normally. Set to 0 to protect every affix item."
+	affixFloorRow:EnableMouse(true)
+	affixFloorRow:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText(AFFIX_FLOOR_TOOLTIP_TITLE, 1, 1, 1)
+		GameTooltip:AddLine(AFFIX_FLOOR_TOOLTIP_BODY, C_DIM[1], C_DIM[2], C_DIM[3], true)
+		GameTooltip:Show()
+	end)
+	affixFloorRow:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+	local affixFloorBox = CreateFrame("Frame", nil, affixFloorRow)
+	affixFloorBox:SetSize(44, 20)
+	affixFloorBox:SetPoint("RIGHT", affixFloorRow, "RIGHT", 0, 0)
+	ApplyBackdrop(affixFloorBox, C_DROP_BG, C_DROP_BORDER)
+	affixFloorBox:EnableMouse(true)
+	affixFloorBox:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText(AFFIX_FLOOR_TOOLTIP_TITLE, 1, 1, 1)
+		GameTooltip:AddLine(AFFIX_FLOOR_TOOLTIP_BODY, C_DIM[1], C_DIM[2], C_DIM[3], true)
+		GameTooltip:Show()
+	end)
+	affixFloorBox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+	local affixFloorEdit = CreateFrame("EditBox", nil, affixFloorBox)
+	affixFloorEdit:SetFont(FONT, 10, "OUTLINE")
+	affixFloorEdit:SetTextColor(unpack(C_TEXT))
+	affixFloorEdit:SetAutoFocus(false)
+	affixFloorEdit:SetNumeric(true)
+	affixFloorEdit:SetMaxLetters(4)
+	affixFloorEdit:SetPoint("TOPLEFT", 4, -1)
+	affixFloorEdit:SetPoint("BOTTOMRIGHT", -4, 1)
+	affixFloorEdit:SetJustifyH("CENTER")
+	affixFloorEdit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
+	affixFloorEdit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
+	affixFloorEdit:SetScript("OnEditFocusLost", function(s)
+		local val = tonumber(s:GetText()) or 0
+		if val < 0 then val = 0 end
+		s:SetText(tostring(val))
+		local p = GetActiveProfile(db)
+		p.affixIlvlMin = val
+		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+	end)
+	self._affixIlvlEdit = affixFloorEdit
+
+	-- Plain-language description spanning the bottom of the card (where the
+	-- Audit Lists button used to live). Tells the player what Affix
+	-- Protection IS so they aren't guessing from the toggle/input alone.
+	--
+	-- Sizing math (UI Visual Audit, conventions §10.5):
+	--   Card height            = 92
+	--   Min iLvl row bottom    = -46 (top) - 20 (row height) = -66
+	--   Card bottom            = -92
+	--   Available vertical     = 92 - 66 = 22 px (y=-70 anchor to y=-92)
+	--   8pt OUTLINE line height ~= 10 px so safe budget = 2 lines.
+	--   At width = 155 px, ~30 chars per line -> text must be ~<= 60 chars
+	--   to stay within 2 lines.
+	-- Prior text overflowed (118 chars, ~5 lines, ~55 px) -- regression
+	-- caught by user 2026-05-23.
+	local affixProtHint = MakeText(aCard1, 8, C_DIM)
+	affixProtHint:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -70)
+	affixProtHint:SetWidth(cardW - CARD_INNER_PAD_X * 2)
+	affixProtHint:SetJustifyH("LEFT")
+	affixProtHint:SetWordWrap(true)
+	affixProtHint:SetNonSpaceWrap(false)
+	affixProtHint:SetText("Keeps Project Ebonhold items safe from auto-sell.")
+
+	-- (Audit Lists button moved to Card 3 in v3.20 -- user feedback said
+	-- Card 1 was too crowded with the No Auto-Sell toggle, the Min iLvl
+	-- row, AND the audit button all stacked. Card 3 hosts both diagnostic
+	-- buttons now.)
+
+	-- Affix Tab Card 2: Affix Display (moved from Filters tab in v3.20
+	-- alongside Affix Protection so all affix tooling lives together).
+	-- Two tightly-coupled toggles + a diagnostic button:
+	--   Row 1: Show affix dot              (master gate for any dot display)
+	--   Row 2: Only missing affixes        (collection mode, gated by Row 1)
+	--   Row 3: Scan Learned Affixes        (refresh PE mirror + print roster)
+	--
+	-- The Scan button shares the bottom-of-card slot with the Audit Lists
+	-- button on Card 1 (y=-68) so the two diagnostic actions line up
+	-- visually across the Affix tab.
+	--
+	-- Wrapped in `do ... end` so the card-internal locals (title FS,
+	-- toggle frames, scan button) don't bump BuildUI past Lua 5.1's
+	-- 200-local cap. The toggles are exported on self._tglShowAffixDot /
+	-- self._tglAffixCollection -- OnClick handlers and state restoration
+	-- below reach them through `self` so the bare locals can vanish.
+	do
+		local card3Title = MakeText(aCard2, 11, C_ACCENT, "OUTLINE")
+		card3Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+		card3Title:SetText("Affix Display")
+
+		local tglShowAffixDot = MakeToggle(aCard2, "Show affix dot", C_ACCENT,
+			"Puts a small dot on bag items that have a Project Ebonhold affix. Dot color shows the tier (I white, II green, III blue, IV purple, V orange). Gold dot means an affix you haven't learned yet. Works on default bags and ElvUI bags.")
+		tglShowAffixDot:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+		tglShowAffixDot:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+		self._tglShowAffixDot = tglShowAffixDot
+
+		local tglAffixCollection = MakeToggle(aCard2, "Only missing affixes", C_ACCENT,
+			"Only puts a gold dot on items with affixes you haven't learned yet. Items with affixes you already have stay clean. Also protects unknown affixes from being sold or deleted. Needs Show affix dot turned on.")
+		tglAffixCollection:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
+		tglAffixCollection:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+		self._tglAffixCollection = tglAffixCollection
+
+		-- (Scan Learned Affixes button moved to Card 3 in v3.20 -- see the
+		-- Affix Tools card construction below.)
+	end
+
+	-- ========================================================================
+	-- Affix Tab Card 3: Affix Tools (v3.20).
+	-- Hosts the two diagnostic buttons that used to live one-per-card on
+	-- Cards 1 and 2 (Audit Lists, Scan Learned Affixes). Stacking them on
+	-- their own card lets Cards 1 and 2 breathe (the toggles + Min iLvl
+	-- row were sharing a card with a button, which felt cramped).
+	-- C_BLUE for both (transform/report class -- they surface info, don't
+	-- add or remove anything).
+	-- Wrapped in do...end so the two button locals don't bump BuildUI past
+	-- Lua 5.1's 200-local cap.
+	-- ========================================================================
+	do
+		local card3Title = MakeText(aCard3, 11, C_ACCENT, "OUTLINE")
+		card3Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
+		card3Title:SetText("Affix Tools")
+
+		-- Audit Lists button (was on Card 1). Scans the user's Delete + Sell
+		-- lists for items carrying PE's @affix@ tooltip marker; prints a
+		-- chat summary. Doesn't modify the lists.
+		local auditBtn = MakeActionButton(aCard3, "Audit Lists", C_BLUE, function()
+			if _G.AutoDelete_AuditAffixOnLists then
+				_G.AutoDelete_AuditAffixOnLists(GetActiveProfile(db))
+			end
+		end, cardW - CARD_INNER_PAD_X * 2, 20)
+		auditBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+		auditBtn:SetScript("OnEnter", function(btn)
+			btn:SetBackdropColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.3)
+			btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
+			btn._text:SetTextColor(1, 1, 1)
+			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+			GameTooltip:SetText("Audit Lists", 1, 1, 1)
+			GameTooltip:AddLine("Checks your Delete and Sell lists for items with a Project Ebonhold affix. Prints what it finds in chat. Doesn't change your lists.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		auditBtn:SetScript("OnLeave", function(btn)
+			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+			btn._text:SetTextColor(unpack(C_TEXT))
+			GameTooltip:Hide()
+		end)
+
+		-- Scan Learned Affixes button (was on Card 2). Refreshes the
+		-- addon's owned-affix mirror from PE and opens the scrollable
+		-- Learned Affixes window grouped by tier.
+		local scanBtn = MakeActionButton(aCard3, "Scan Learned Affixes", C_BLUE, function()
+			if _G.AutoDelete_ScanLearnedAffixes then
+				_G.AutoDelete_ScanLearnedAffixes()
+			end
+		end, cardW - CARD_INNER_PAD_X * 2, 20)
+		scanBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
+		scanBtn:SetScript("OnEnter", function(btn)
+			btn:SetBackdropColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.3)
+			btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
+			btn._text:SetTextColor(1, 1, 1)
+			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+			GameTooltip:SetText("Scan Learned Affixes", 1, 1, 1)
+			GameTooltip:AddLine("Opens a window showing every affix you have learned, grouped by tier.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		scanBtn:SetScript("OnLeave", function(btn)
+			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+			btn._text:SetTextColor(unpack(C_TEXT))
+			GameTooltip:Hide()
+		end)
+	end
+
+	-- ========================================================================
+	-- KEYBINDS TAB: holds the secure-button features (One-Key Open, future
+	-- One-Key Disenchant migration). On WoW 3.3.5a the only path that can
+	-- fire a protected function (UseContainerItem, CastSpell on a bag item)
+	-- from addon code is a user-pressed key on a SecureActionButton. Each
+	-- card on this tab is one such feature. The key-capture row in each
+	-- card writes the binding via SetBinding + SaveBindings, so the addon
+	-- stays in two files (no Bindings.xml required).
+	--
+	-- Wrapped in a `do ... end` block so its locals stay out of the panel-
+	-- builder function's local-count (Lua 5.1 has a 200-local cap per
+	-- function and we'd otherwise bump against it). Widgets that need to
+	-- survive across scopes (OnClick handlers, Refresh path) are stored
+	-- on `self` and accessed via self._tglOpenEnabled etc. later.
+	-- ========================================================================
+	do
+	local keybindsPage = tabPages.keybinds
+
+	-- Reusable key-capture row. Renders a labelled button that displays the
+	-- currently bound key for `bindingCmd` (the BINDING name, e.g. "CLICK
+	-- AutoDeleteOpenButton:LeftButton"). Click to enter capture mode; the
+	-- next non-modifier key (with current modifiers) becomes the binding.
+	-- Right-click clears the binding. Returns the row Frame so the caller
+	-- can :SetPoint() it.
+	--
+	-- Combat-safe: SetBinding/SetBindingClick is taint-locked while combat
+	-- is active. We refuse to enter capture mode in combat and show a one-
+	-- shot chat note instead.
+	local function MakeKeyCaptureRow(parent, bindingCmd, width)
+		local row = CreateFrame("Frame", nil, parent)
+		row:SetSize(width or 200, 22)
+
+		local btn = CreateFrame("Button", nil, row)
+		btn:SetAllPoints(row)
+		ApplyBackdrop(btn, C_DROP_BG, C_DROP_BORDER)
+
+		local label = MakeText(btn, 10, C_TEXT, "OUTLINE")
+		label:SetPoint("CENTER", btn, "CENTER", 0, 0)
+
+		-- RefreshLabel reads the current binding and renders either the key
+		-- combo or a "click to bind" placeholder. Called after every state
+		-- change and on panel Refresh.
+		local capturing = false
+		local function RefreshLabel()
+			if capturing then
+				label:SetText("Press a key...")
+				label:SetTextColor(unpack(C_ACCENT))
+				return
+			end
+			local key1 = GetBindingKey(bindingCmd)
+			if key1 then
+				label:SetText(key1)
+				label:SetTextColor(unpack(C_TEXT))
+			else
+				label:SetText("Click to bind")
+				label:SetTextColor(unpack(C_DIM))
+			end
+			-- Optional hook the panel sets so it can refresh the row's
+			-- status text the moment a key is bound or cleared (without
+			-- waiting for the next BAG_UPDATE to do it).
+			if row._onBindingChanged then row._onBindingChanged() end
+		end
+		row._refresh = RefreshLabel
+		RefreshLabel()
+
+		-- Enter / exit capture mode. EnableKeyboard captures every key
+		-- press globally (game input also runs, but our handler grabs the
+		-- key first). We use a propagation block (return true semantics
+		-- by setting PropagateKeyboardInput on later clients; 3.3.5a does
+		-- not have it, so we just live with the side effect that the key
+		-- ALSO fires its normal binding once during capture -- this is a
+		-- one-frame inconvenience and matches how Blizzard's own
+		-- KeyBindingFrame handles it on this client).
+		local function StartCapture()
+			if InCombatLockdown and InCombatLockdown() then
+				print("|cffff8000[AutoDelete]|r Can't change keybinds in combat.")
+				return
+			end
+			capturing = true
+			btn:EnableKeyboard(true)
+			RefreshLabel()
+		end
+		local function StopCapture()
+			capturing = false
+			btn:EnableKeyboard(false)
+			RefreshLabel()
+		end
+
+		btn:SetScript("OnKeyDown", function(self, key)
+			-- Skip modifier-only presses so a combo like SHIFT-A waits for
+			-- the actual letter rather than binding to SHIFT alone.
+			if key == "LSHIFT" or key == "RSHIFT"
+				or key == "LCTRL"  or key == "RCTRL"
+				or key == "LALT"   or key == "RALT" then
+				return
+			end
+			-- Escape cancels.
+			if key == "ESCAPE" then StopCapture(); return end
+			-- Build the combo string. Order matches Blizzard convention
+			-- so SetBinding's lookup matches what the binding UI shows.
+			local combo = ""
+			if IsAltKeyDown()     then combo = combo .. "ALT-"   end
+			if IsControlKeyDown() then combo = combo .. "CTRL-"  end
+			if IsShiftKeyDown()   then combo = combo .. "SHIFT-" end
+			combo = combo .. key
+			-- Clear any prior binding of this combo first so two features
+			-- never collide on the same key. SetBinding(key, nil) unbinds.
+			SetBinding(combo, bindingCmd)
+			SaveBindings(GetCurrentBindingSet())
+			StopCapture()
+		end)
+
+		btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+		btn:SetScript("OnClick", function(self, mouseButton)
+			if mouseButton == "RightButton" then
+				if InCombatLockdown and InCombatLockdown() then
+					print("|cffff8000[AutoDelete]|r Can't change keybinds in combat.")
+					return
+				end
+				local existing = GetBindingKey(bindingCmd)
+				if existing then SetBinding(existing) end
+				SaveBindings(GetCurrentBindingSet())
+				RefreshLabel()
+				return
+			end
+			if capturing then StopCapture() else StartCapture() end
+		end)
+
+		-- Tooltip explains the click semantics.
+		btn:SetScript("OnEnter", function(self)
+			GameTooltip:SetOwner(self, "ANCHOR_TOP")
+			GameTooltip:SetText("Keybind", 1, 1, 1)
+			GameTooltip:AddLine("Left-click and press a key (with modifiers) to bind.", C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:AddLine("Right-click to clear.", C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:AddLine("Cannot bind in combat.", 1, 0.4, 0.4, true)
+			GameTooltip:Show()
+		end)
+		btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+		row._button = btn
+		return row
+	end
+
+	-- Keybinds tab layout: four vertical rows, one per feature. Each row
+	-- is ~22px tall and renders inline as:
+	--   [x] Feature Name  [Key Button]  Status text  [⚙]
+	-- The gear button on the right opens a feature-specific filter popup
+	-- when the feature has filterable options (Disenchant, Open). Mill
+	-- and Prospect have no per-item filters, so their gear button is
+	-- omitted. Total content: 4 rows * 22px + small top pad = ~92px,
+	-- fits inside the standard 100px tab content area.
+	local KEYBIND_ROW_H   = 22
+	local KEYBIND_ROW_GAP = 2
+	local KEYBIND_PAD_X   = 8
+	local KEYBIND_TGL_W   = 16              -- the small checkbox-only width
+	local KEYBIND_NAME_W  = 140
+	local KEYBIND_KEY_W   = 110
+	-- Widened from 22 (gear-glyph era) to 56 to fit "Filters" text label.
+	-- The glyph (`*`) was confusing -- it read like a footnote marker. The
+	-- explicit text button is unambiguous and tells the user what the
+	-- button does without needing a hover tooltip.
+	local KEYBIND_GEAR_W  = 56
+	local CONTENT_W_KEYBINDS = genContentW - KEYBIND_PAD_X * 2
+
+	-- Reusable row factory. Each row has the slots described above; the
+	-- caller passes a config table with the feature's labels, binding
+	-- command, and an optional `openFilters` function to wire the gear
+	-- button. Returns { toggle, keyRow, status, gear } so OnClick handlers
+	-- and the panel Refresh path can address each piece.
+	local function MakeKeybindRow(opts, yOffset)
+		local row = CreateFrame("Frame", nil, keybindsPage)
+		row:SetSize(CONTENT_W_KEYBINDS, KEYBIND_ROW_H)
+		row:SetPoint("TOPLEFT", KEYBIND_PAD_X, yOffset)
+
+		-- Master toggle on the far left. Compact icon-only width; the
+		-- feature name label sits next to it as the "real" label.
+		-- Pass opts.label as the explicit tooltipTitle so the GameTooltip
+		-- header still reads the feature name ("One-Key Open" etc.) even
+		-- though the checkbox itself has no inline label (the name lives in
+		-- a sibling FontString in the row).
+		local tgl = MakeToggle(row, "", C_ACCENT, opts.tooltip, opts.label)
+		tgl:SetPoint("LEFT", row, "LEFT", 0, 0)
+		tgl:SetSize(KEYBIND_TGL_W, KEYBIND_TGL_W)
+
+		local nameText = row:CreateFontString(nil, "OVERLAY")
+		nameText:SetFont(FONT, 11, "OUTLINE")
+		nameText:SetTextColor(unpack(C_TEXT))
+		nameText:SetPoint("LEFT", tgl, "RIGHT", 6, 0)
+		nameText:SetWidth(KEYBIND_NAME_W)
+		nameText:SetJustifyH("LEFT")
+		nameText:SetText(opts.label)
+
+		local keyRow = MakeKeyCaptureRow(row, opts.bindingCmd, KEYBIND_KEY_W)
+		keyRow:SetPoint("LEFT", nameText, "RIGHT", 4, 0)
+
+		local statusText = row:CreateFontString(nil, "OVERLAY")
+		statusText:SetFont(FONT, 9, "OUTLINE")
+		statusText:SetTextColor(unpack(C_DIM))
+		statusText:SetPoint("LEFT", keyRow, "RIGHT", 6, 0)
+		statusText:SetPoint("RIGHT", row, "RIGHT", -(KEYBIND_GEAR_W + 4), 0)
+		statusText:SetJustifyH("LEFT")
+		statusText:SetWordWrap(false)
+		statusText:SetText("")
+
+		-- Stash the binding command on the row so the panel's status
+		-- composer can call GetBindingKey() to check whether the user has
+		-- actually bound a key. The composer uses this to switch between
+		-- "Bind a key" (no key) and "[KEY] [Item]" (key + target) status.
+		row._bindingCmd = opts.bindingCmd
+
+		-- Filters button on the far right; opens the filter popup for this
+		-- v3.20: removed the per-row Filters button. DE Filters now live as
+		-- a card on the Filters tab (and the other three one-key actions
+		-- never had filters), so the Keybinds tab is just keybinding now.
+		-- The unused `openFilters` opts field is silently ignored.
+
+		return tgl, keyRow, statusText
+	end
+
+	-- Row 1: One-Key Open (y=-6). No gear / filter popup -- the only
+	-- option (autoOpenIncludeLocked) defaults to true and the cost of a
+	-- popup for one toggle exceeds the value. If we add more Open options
+	-- later, restore the openFilters callback.
+	local tglOpenEnabled, openKeyRow, openStatus = MakeKeybindRow({
+		label      = "One-Key Open",
+		bindingCmd = "CLICK AutoDeleteOpenButton:LeftButton",
+		tooltip    = "Press one button to open the next clam, coin purse, or egg in your bags. Locked boxes are skipped until you can pick the lock.",
+	}, -6)
+	self._tglOpenEnabled  = tglOpenEnabled
+	self._openKeyRow      = openKeyRow
+	self._openStatus      = openStatus
+	self._openBindingCmd  = "CLICK AutoDeleteOpenButton:LeftButton"
+
+	-- Row 2: One-Key Disenchant (y=-30).
+	local tglDisenchant, disenchantKeyRow, disenchantStatus = MakeKeybindRow({
+		label      = "One-Key Disenchant",
+		bindingCmd = "CLICK AutoDeleteDisenchantButton:LeftButton",
+		tooltip    = "Press one button to disenchant your next green or higher item. You need the Enchanting profession. Pick which items count on the Filters tab.",
+	}, -(6 + (KEYBIND_ROW_H + KEYBIND_ROW_GAP)))
+	self._tglDisenchant         = tglDisenchant
+	self._disenchantKeyRow      = disenchantKeyRow
+	self._disenchantStatus      = disenchantStatus
+	self._disenchantBindingCmd  = "CLICK AutoDeleteDisenchantButton:LeftButton"
+
+	-- Row 3: One-Key Mill (y=-54).
+	local tglMill, millKeyRow, millStatus = MakeKeybindRow({
+		label      = "One-Key Mill",
+		bindingCmd = "CLICK AutoDeleteMillButton:LeftButton",
+		tooltip    = "Press one button to mill the next stack of herbs in your bags. The stack needs at least 5 herbs. You need the Inscription profession.",
+	}, -(6 + (KEYBIND_ROW_H + KEYBIND_ROW_GAP) * 2))
+	self._tglMill        = tglMill
+	self._millKeyRow     = millKeyRow
+	self._millStatus     = millStatus
+	self._millBindingCmd = "CLICK AutoDeleteMillButton:LeftButton"
+
+	-- Row 4: One-Key Prospect (y=-78).
+	local tglProspect, prospectKeyRow, prospectStatus = MakeKeybindRow({
+		label      = "One-Key Prospect",
+		bindingCmd = "CLICK AutoDeleteProspectButton:LeftButton",
+		tooltip    = "Press one button to prospect the next stack of ore in your bags. The stack needs at least 5 ore. You need the Jewelcrafting profession.",
+	}, -(6 + (KEYBIND_ROW_H + KEYBIND_ROW_GAP) * 3))
+	self._tglProspect        = tglProspect
+	self._prospectKeyRow     = prospectKeyRow
+	self._prospectStatus     = prospectStatus
+	self._prospectBindingCmd = "CLICK AutoDeleteProspectButton:LeftButton"
+
+	-- Wire the key-row's _onBindingChanged callbacks so the row's status
+	-- text refreshes the moment a key is bound or cleared. Without these,
+	-- the row would say "Bind a key" until the next BAG_UPDATE fired.
+	openKeyRow._onBindingChanged       = function()
+		if self._refreshOpenStatus       then self:_refreshOpenStatus()       end
+	end
+	disenchantKeyRow._onBindingChanged = function()
+		if self._refreshDisenchantStatus then self:_refreshDisenchantStatus() end
+	end
+	millKeyRow._onBindingChanged       = function()
+		if self._refreshMillStatus       then self:_refreshMillStatus()       end
+	end
+	prospectKeyRow._onBindingChanged   = function()
+		if self._refreshProspectStatus   then self:_refreshProspectStatus()   end
+	end
+	end  -- end of Keybinds-tab `do` block
 
 	-- ========================================================================
 	-- TOOLS TAB: utility features.
@@ -1410,7 +4190,7 @@ local function BuildUI(self)
 
 	-- CARD 1: Auto-Invite master toggle + keyword text input
 	local tglAutoInvite = MakeToggle(aCard1, "Auto-Invite", C_ACCENT,
-		"Whispers containing any configured keyword trigger auto-invite. Requires you to be group leader or raid assistant.")
+		"When someone whispers you one of the keywords below, you invite them to your group. You need to be the leader or a raid assistant.")
 	tglAutoInvite:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglAutoInvite:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglAutoInvite = tglAutoInvite
@@ -1473,7 +4253,7 @@ local function BuildUI(self)
 
 	-- CARD 2: Apply loot rule (main toggle) + dropdown
 	local tglLootRule = MakeToggle(aCard2, "Apply loot rule", C_ACCENT,
-		"After auto-inviting, set the party's loot rule to your chosen method.")
+		"After someone is auto-invited, sets the party's loot rule to the one you pick below.")
 	tglLootRule:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglLootRule:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglLootRule = tglLootRule
@@ -1643,64 +4423,55 @@ local function BuildUI(self)
 	do
 		local profilesPage = tabPages.profiles
 
-		-- 4-column layout inside the 498px tab content area.
-		--   Col 1 (X=8,   W=113): Row 1 = "Current: <char>" header.
-		--   Col 2 (X=131, W=113): Row 1 = empty.
-		--   Col 3 (X=254, W=113): Row 1 = Copy;   Row 2 = Import Lists.
-		--   Col 4 (X=377, W=113): Row 1 = Delete; Row 2 = Clear List.
-		-- Dropdown spans Col 1+2 on Row 2 (width = 2*113 + 10 = 236).
+		-- Left-stack + right 2x2 grid layout inside the tab content area.
+		--
+		--   LEFT half (x=8, width=236):
+		--     "Current: <char>" label at y=-10 (top)
+		--     Profile dropdown at  y=-30 (below label, 22 tall)
+		--
+		--   RIGHT half (cols 3+4):
+		--     Row 1 (y=-10): [Copy]        [Delete]
+		--     Row 2 (y=-40): [Import Lists] [Clear List]
+		--     Buttons are 113 wide, 26 tall, 6px gap between rows.
+		--
+		-- Semantic colors per Addon_UI_StyleGuide.md:
+		--   Copy / Import Lists  -> C_GREEN (additive, copies data in)
+		--   Delete / Clear List  -> C_RED   (destructive)
+		-- Both sides are independently top-aligned. Each side is read
+		-- top-down so the user does not have to scan diagonally.
 		local PROF_LEFT_PAD = 8
 		local PROF_COL_W    = 113
 		local PROF_COL_GAP  = 10
-		local PROF_COL2_X   = PROF_LEFT_PAD + PROF_COL_W + PROF_COL_GAP           -- 131
-		local PROF_COL3_X   = PROF_COL2_X   + PROF_COL_W + PROF_COL_GAP           -- 254
+		local PROF_COL3_X   = PROF_LEFT_PAD + PROF_COL_W * 2 + PROF_COL_GAP * 2   -- 254
 		local PROF_COL4_X   = PROF_COL3_X   + PROF_COL_W + PROF_COL_GAP           -- 377
-		local PROF_BTN_H    = 22
+		local PROF_BTN_H    = 26
 		local PROF_BTN_GAP  = 6
-		local PROF_ROW1_Y   = -14
-		local PROF_ROW2_Y   = PROF_ROW1_Y - PROF_BTN_H - PROF_BTN_GAP             -- -42
 		local PROF_DD_W     = PROF_COL_W * 2 + PROF_COL_GAP                       -- 236
+		local PROF_LABEL_Y  = -10
+		local PROF_DD_Y     = PROF_LABEL_Y - 20                                   -- -30
+		local PROF_ROW1_Y   = PROF_LABEL_Y                                        -- top-aligned with LEFT label
+		local PROF_ROW2_Y   = PROF_ROW1_Y - PROF_BTN_H - PROF_BTN_GAP             -- -42
 
-		-- Row 1 / Col 1: "Current: <charname>" header. Nudged down a few pixels
-		-- so the text baseline sits roughly centered with the button row.
+		-- LEFT half / row 1: "Current: <charname>" label (small accent text).
 		local curHeader = MakeText(profilesPage, 10, C_TITLE, "OUTLINE")
-		curHeader:SetPoint("TOPLEFT", PROF_LEFT_PAD, PROF_ROW1_Y - 4)
+		curHeader:SetPoint("TOPLEFT", PROF_LEFT_PAD, PROF_LABEL_Y)
 		curHeader:SetJustifyH("LEFT")
 		curHeader:SetText("Current: " .. (UnitName("player") or "?"))
 
 		-- Selected-character state (tracked on self since the dropdown is built
-		-- dynamically in Refresh. We can't capture it as a BuildUI local or
-		-- it won't update when characters are added/deleted).
+		-- dynamically in Refresh. We cannot capture it as a BuildUI local or
+		-- it will not update when characters are added/deleted).
 		self._selectedProfile = nil
 
-		-- Row 2 / Col 1+2 spanning: profile dropdown.
+		-- LEFT half / row 2: profile dropdown (sits directly below the label).
 		local profileDD = MakeDropdown(profilesPage, PROF_DD_W, {}, function(val)
 			self._selectedProfile = val
 		end)
-		profileDD:SetPoint("TOPLEFT", PROF_LEFT_PAD, PROF_ROW2_Y)
+		profileDD:SetPoint("TOPLEFT", PROF_LEFT_PAD, PROF_DD_Y)
 		self._profileDD = profileDD
 
-		-- Action buttons.
-		local function MakeActionBtn(label, onClick)
-			local btn = CreateFrame("Button", nil, profilesPage)
-			btn:SetSize(80, 22)
-			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
-			local txt = MakeText(btn, 10, C_DIM, "OUTLINE")
-			txt:SetPoint("CENTER")
-			txt:SetText(label)
-			btn:SetScript("OnEnter", function()
-				ApplyBackdrop(btn, C_ROW_HOVER, C_BORDER)
-				txt:SetTextColor(unpack(C_TEXT))
-			end)
-			btn:SetScript("OnLeave", function()
-				ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
-				txt:SetTextColor(unpack(C_DIM))
-			end)
-			btn:SetScript("OnClick", onClick)
-			return btn
-		end
-
-		local copyBtn = MakeActionBtn("Copy", function()
+		-- RIGHT half / row 1: Copy (green) and Delete (red).
+		local copyBtn = MakeActionButton(profilesPage, "Copy", C_GREEN, function()
 			local sel = self._selectedProfile
 			if not sel or sel == "" then
 				print("|cffff8000[AutoDelete]|r: Select a profile first.")
@@ -1709,9 +4480,10 @@ local function BuildUI(self)
 			local dlg = StaticPopup_Show("AUTODELETE_PROFILE_COPY", sel,
 				_G.AutoDelete_Profiles.GetCurrentCharacter())
 			if dlg then dlg.data = sel end
-		end)
+		end, PROF_COL_W, PROF_BTN_H)
+		copyBtn:SetPoint("TOPLEFT", PROF_COL3_X, PROF_ROW1_Y)
 
-		local deleteBtn = MakeActionBtn("Delete", function()
+		local deleteBtn = MakeActionButton(profilesPage, "Delete", C_RED, function()
 			local sel = self._selectedProfile
 			if not sel or sel == "" then
 				print("|cffff8000[AutoDelete]|r: Select a profile first.")
@@ -1719,12 +4491,14 @@ local function BuildUI(self)
 			end
 			local dlg = StaticPopup_Show("AUTODELETE_PROFILE_DELETE", sel)
 			if dlg then dlg.data = sel end
-		end)
+		end, PROF_COL_W, PROF_BTN_H)
+		deleteBtn:SetPoint("TOPLEFT", PROF_COL4_X, PROF_ROW1_Y)
 
-		-- Import button: merges the 3 lists (Delete/Sell/Keep) from the selected
+		-- RIGHT half / row 2: Import Lists (green) and Clear List (red).
+		-- Import merges the 3 lists (Delete/Sell/Keep) from the selected
 		-- profile into the current character's profile. Never touches other
 		-- settings. Duplicates are skipped; cross-list conflicts open a popup.
-		local importBtn = MakeActionBtn("Import Lists", function()
+		local importBtn = MakeActionButton(profilesPage, "Import Lists", C_GREEN, function()
 			local sel = self._selectedProfile
 			if not sel or sel == "" then
 				print("|cffff8000[AutoDelete]|r: Select a profile first.")
@@ -1748,37 +4522,72 @@ local function BuildUI(self)
 			end
 			if #preview.conflicts == 0 then
 				-- Fast path: just additions, no conflicts. Confirm and apply.
-				local msg = string.format("Import %d item(s) from %s into your lists?", #preview.additions, sel)
 				StaticPopup_Show("AUTODELETE_PROFILE_IMPORT_SIMPLE", sel, tostring(#preview.additions)).data = sel
 				return
 			end
 			-- Conflicts exist. Open the conflict resolution popup.
 			_G.AutoDelete_ShowImportConflicts(sel, preview)
-		end)
+		end, PROF_COL_W, PROF_BTN_H)
+		importBtn:SetPoint("TOPLEFT", PROF_COL3_X, PROF_ROW2_Y)
 
-		-- Clear List button: wipes one list (Delete/Sell/Keep) or all three
-		-- on the current character's profile. Opens a small picker popup; the
-		-- destructive action is then confirmed via a StaticPopup.
-		local clearBtn = MakeActionBtn("Clear List", function()
+		-- Clear List opens a picker that wipes one list (Delete/Sell/Keep)
+		-- or all three on the current character. The destructive action is
+		-- then confirmed via a StaticPopup inside the picker.
+		local clearBtn = MakeActionButton(profilesPage, "Clear List", C_RED, function()
 			if _G.AutoDelete_ShowClearListPicker then
 				_G.AutoDelete_ShowClearListPicker()
 			end
+		end, PROF_COL_W, PROF_BTN_H)
+		clearBtn:SetPoint("TOPLEFT", PROF_COL4_X, PROF_ROW2_Y)
+
+		-- v3.20 Row 3: Import Raw (left) + Export Raw (right). Same column
+		-- positions as rows 1-2 so the 3-row grid stays aligned. C_GREEN
+		-- for Import (additive: brings data IN), C_BLUE for Export
+		-- (transform: shows existing data, doesn't change it).
+		local PROF_ROW3_Y = PROF_ROW2_Y - PROF_BTN_H - PROF_BTN_GAP
+		local importRawBtn = MakeActionButton(profilesPage, "Import Raw", C_GREEN, function()
+			if _G.AutoDelete_ShowImportRawWindow then
+				_G.AutoDelete_ShowImportRawWindow()
+			end
+		end, PROF_COL_W, PROF_BTN_H)
+		importRawBtn:SetPoint("TOPLEFT", PROF_COL3_X, PROF_ROW3_Y)
+		importRawBtn:SetScript("OnEnter", function(btn)
+			btn:SetBackdropColor(C_GREEN[1], C_GREEN[2], C_GREEN[3], 0.3)
+			btn:SetBackdropBorderColor(C_GREEN[1], C_GREEN[2], C_GREEN[3], 1)
+			btn._text:SetTextColor(1, 1, 1)
+			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+			GameTooltip:SetText("Import Raw", 1, 1, 1)
+			GameTooltip:AddLine("Paste a list of item names and add them to your Delete, Sell, or Keep list. AutoDelete looks each name up and adds it for you.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		importRawBtn:SetScript("OnLeave", function(btn)
+			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+			btn._text:SetTextColor(unpack(C_TEXT))
+			GameTooltip:Hide()
 		end)
 
-		-- Buttons: column 3 is Copy + Import Lists (stacked); column 4 is
-		-- Delete + Clear List (stacked). All buttons are identically sized
-		-- to match the column width.
-		copyBtn:SetSize(PROF_COL_W, PROF_BTN_H)
-		copyBtn:SetPoint("TOPLEFT", PROF_COL3_X, PROF_ROW1_Y)
-
-		deleteBtn:SetSize(PROF_COL_W, PROF_BTN_H)
-		deleteBtn:SetPoint("TOPLEFT", PROF_COL4_X, PROF_ROW1_Y)
-
-		importBtn:SetSize(PROF_COL_W, PROF_BTN_H)
-		importBtn:SetPoint("TOPLEFT", PROF_COL3_X, PROF_ROW2_Y)
-
-		clearBtn:SetSize(PROF_COL_W, PROF_BTN_H)
-		clearBtn:SetPoint("TOPLEFT", PROF_COL4_X, PROF_ROW2_Y)
+		local exportRawBtn = MakeActionButton(profilesPage, "Export Raw", C_BLUE, function()
+			if _G.AutoDelete_ShowExportRawWindow then
+				_G.AutoDelete_ShowExportRawWindow()
+			end
+		end, PROF_COL_W, PROF_BTN_H)
+		exportRawBtn:SetPoint("TOPLEFT", PROF_COL4_X, PROF_ROW3_Y)
+		exportRawBtn:SetScript("OnEnter", function(btn)
+			btn:SetBackdropColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.3)
+			btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
+			btn._text:SetTextColor(1, 1, 1)
+			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+			GameTooltip:SetText("Export Raw", 1, 1, 1)
+			GameTooltip:AddLine("Copy your Delete, Sell, or Keep list as plain item names so you can share or paste them somewhere else.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		exportRawBtn:SetScript("OnLeave", function(btn)
+			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+			btn._text:SetTextColor(unpack(C_TEXT))
+			GameTooltip:Hide()
+		end)
 
 		-- Register StaticPopups (once). Unique names to avoid collisions.
 		if not StaticPopupDialogs["AUTODELETE_PROFILE_COPY"] then
@@ -1931,6 +4740,44 @@ local function BuildUI(self)
 						end
 					else
 						print("|cffff4444[AutoDelete]|r: Remove junk failed (" .. (result or "unknown") .. ").")
+					end
+				end,
+				timeout = 0, whileDead = true, hideOnEscape = true, preferredIndex = 3,
+			}
+		end
+
+		-- Remove-patterns popup: scans all three lists (Delete + Sell + Keep)
+		-- for items whose itemSubType matches the chosen profession token
+		-- (passed via popup.data). One popup serves all eight profession
+		-- options on the sub-window; popup.data carries the localized
+		-- subtype string ("Pattern", "Recipe", "Plans", etc.) and a
+		-- display label for the prompt text.
+		if not StaticPopupDialogs["AUTODELETE_PROFILE_REMOVE_PATTERNS"] then
+			StaticPopupDialogs["AUTODELETE_PROFILE_REMOVE_PATTERNS"] = {
+				text = "Remove all %s items from your Delete, Sell, and Keep lists? This cannot be undone.",
+				button1 = "Remove", button2 = "Cancel",
+				OnAccept = function(popup)
+					local payload = popup.data
+					if type(payload) ~= "table" or not payload.subtype then return end
+					if not _G.AutoDelete_Profiles or not _G.AutoDelete_Profiles.RemovePatternsBySubtype then return end
+					local ok, result = _G.AutoDelete_Profiles.RemovePatternsBySubtype(payload.subtype)
+					if ok then
+						print(string.format(
+							"|cffff8000[AutoDelete]|r: Removed %s (Delete: %d, Sell: %d, Keep: %d).",
+							payload.label or payload.subtype,
+							result.deleteRemoved or 0,
+							result.sellRemoved or 0,
+							result.keepRemoved or 0))
+						if (result.uncached or 0) > 0 then
+							print(string.format(
+								"  |cff999999%d entry(ies) skipped (item data not cached). Open the item or reload to refresh the cache.|r",
+								result.uncached))
+						end
+						if _G.AutoDeleteOptionsPanel and _G.AutoDeleteOptionsPanel.Refresh then
+							_G.AutoDeleteOptionsPanel:Refresh()
+						end
+					else
+						print("|cffff4444[AutoDelete]|r: Remove patterns failed (" .. tostring(result) .. ").")
 					end
 				end,
 				timeout = 0, whileDead = true, hideOnEscape = true, preferredIndex = 3,
@@ -2111,15 +4958,15 @@ local function BuildUI(self)
 
 	-- Card 1: BoE Armor
 	local boeArmor = MakeSellCategoryCard(self, "BoE Armor", yOff, CARD_H, {
-		enableTooltip = "Sell Bind-on-Equip armor and accessories (rings, necks, trinkets, etc.) that match the Rare/Epic toggles and fall inside the iLvl range. Excludes weapons and other Hand Affix Enchant eligible items, which have their own section. Quest items and items on the Keep list are protected.",
-		rarityNoun    = "BoE armor (excludes weapons and Hand-Affix targets)",
+		enableTooltip = "Sells Bind-on-Equip armor and accessories (rings, necks, trinkets) that match the Rare/Epic toggles and the iLvl range below. Weapons go in the BoE Weapons section. Keep-list and quest items are safe.",
+		rarityNoun    = "BoE armor (no weapons)",
 	})
 	self._boeArmor = boeArmor
 	yOff = yOff - 16 - CARD_H - SECTION_GAP
 
 	-- Card 2: BoP
 	local bop = MakeSellCategoryCard(self, "BoP", yOff, CARD_H, {
-		enableTooltip = "Sell Bind-on-Pickup gear (any slot, including weapons) that matches the Rare/Epic toggles and falls inside the iLvl range. Quest items and items on the Keep list are protected.",
+		enableTooltip = "Sells Bind-on-Pickup gear (any slot, including weapons) that matches the Rare/Epic toggles and the iLvl range below. Keep-list and quest items are safe.",
 		rarityNoun    = "BoP gear",
 	})
 	self._bop = bop
@@ -2127,7 +4974,7 @@ local function BuildUI(self)
 
 	-- Card 3: BoE Weapons
 	local boeWeapons = MakeSellCategoryCard(self, "BoE Weapons", yOff, CARD_H, {
-		enableTooltip = "Sell Bind-on-Equip weapon-slot items (weapons, shields, holdables, ranged, thrown, relics) that match the Rare/Epic toggles and fall inside the iLvl range. Quest items and items on the Keep list are protected. Takes priority over BoE Armor for items that match both.",
+		enableTooltip = "Sells Bind-on-Equip weapons, shields, ranged, thrown, and relics that match the Rare/Epic toggles and the iLvl range below. Wins over BoE Armor when an item fits both. Keep-list and quest items are safe.",
 		rarityNoun    = "BoE weapon-slot items",
 	})
 	self._boeWeapons = boeWeapons
@@ -2139,7 +4986,10 @@ local function BuildUI(self)
 	-- the three list-mode tab buttons that drive the list view below.
 	-- ========================================================================
 	local scanCardH = 34                                                   -- fits 26-tall buttons + 4px pad top/bot
-	local scanBox = MakeSection(self, "Scan Options", yOff, 1)
+	-- Section renamed from "Scan Options" to "List Mode": the contained
+	-- buttons select Delete / Sell / Keep list view, not scan settings.
+	-- Scan Speed lives on the General tab.
+	local scanBox = MakeSection(self, "List Mode", yOff, 1)
 	-- Hide the outer section border so it doesn't double up with the inner
 	-- scanRightCard's border below. The inner card is the visible frame.
 	scanBox:SetBackdropBorderColor(0, 0, 0, 0)
@@ -2825,23 +5675,10 @@ local function BuildUI(self)
 		end
 	end)
 
-	tglGray:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).autoGray = btn._checked
-	end)
-
-	tglDelCommon:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).autoDeleteCommon = btn._checked
-	end)
-
-	tglSellGreensGen:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).autoSellGreens = btn._checked
-	end)
+	-- (Old tglGray / tglDelCommon / tglSellGreensGen OnClick wiring
+	-- removed -- Filters Card 1 now uses cycle pills. The pill's
+	-- onChange closure writes to the profile directly, so no separate
+	-- wiring block is needed here. See MakeQualityRow above.)
 
 	-- =========================================================================
 	-- Sell-rule wiring (v3.02 category-based schema)
@@ -2953,17 +5790,197 @@ local function BuildUI(self)
 		GetActiveProfile(db).autoInviteConvertToRaid = btn._checked
 	end)
 
-	-- Tools tab: Affix Protection toggles. Same RefreshCachedProfile call
-	-- so the delete scanner and sell loop see the new setting on the next
-	-- tick without waiting for a profile reload.
-	tglProtectAffixFromDelete:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).protectAffixFromDelete = btn._checked
-		if _G.AutoDelete_RefreshCachedProfile then
-			_G.AutoDelete_RefreshCachedProfile()
+	-- Keybinds tab: One-Key Disenchant. Each toggle writes to the profile,
+	-- refreshes the cached profile, re-arms the secure button, and pokes
+	-- the status text. Inputs (iLvl min/max) wire their own OnEditFocusLost
+	-- handlers at construction time; nothing to do here for them.
+	local function MakeDisenchantToggleHandler(field)
+		return function(btn)
+			btn._checked = not btn._checked
+			btn:SetChecked(btn._checked)
+			GetActiveProfile(db)[field] = btn._checked
+			if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+			if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
+			if self._refreshDisenchantStatus then self:_refreshDisenchantStatus() end
 		end
-	end)
+	end
+	-- Only the master Enabled toggle lives on the Keybinds-tab row. The
+	-- BoP/BoE/Unc/Rare/Epic/iLvl filters moved into the gear-button popup
+	-- (AutoDeleteDisenchantFiltersPopup) which wires its own handlers.
+	if self._tglDisenchant then
+		self._tglDisenchant:SetScript("OnClick", MakeDisenchantToggleHandler("disenchantEnabled"))
+	end
+
+	-- Updates the disenchant status line from the live module. Stored on
+	-- self so both the Keybinds-tab card's handlers and the Refresh path
+	-- below share one implementation. Safe to call before AutoDelete.lua
+	-- exports the accessor (falls back to a dim "..." string).
+
+	-- Status composer for all four Keybinds-tab rows. Takes the raw text
+	-- the addon-side getter returns ("Disabled" / "Requires X" / "Next: ..."
+	-- / "No ... in bags") and rewrites it in plain English that explains
+	-- the next step the user should take. Reads the current keybind via
+	-- GetBindingKey() so a feature that's enabled but unbound surfaces
+	-- "Bind a key" instead of misleading "Next: <item>" text.
+	--
+	-- Returns: (text, r, g, b). Always returns a string + a color triple,
+	-- even on error paths, so callers can SetText/SetTextColor unconditionally.
+	function self:_buildKeybindStatus(rawText, bindingCmd, r, g, b)
+		if not rawText or rawText == "" then
+			return "...", 0.55, 0.55, 0.55
+		end
+
+		-- Checkbox is off. The addon getter returns "Disabled" only in
+		-- this case (profession requirements have their own branch).
+		if rawText == "Disabled" then
+			return "Off -- tick the box to enable", 0.55, 0.55, 0.55
+		end
+
+		-- Profession requirement not met. Re-word "Requires Enchanting"
+		-- as "Needs Enchanting profession" so it reads as an action
+		-- prompt rather than a flat label.
+		local profMatch = rawText:match("^Requires (.+)$")
+		if profMatch then
+			return "Needs " .. profMatch .. " profession", 1.0, 0.4, 0.4
+		end
+
+		-- Feature is enabled; check whether the user has actually
+		-- bound a key. If not, surface that as the next step regardless
+		-- of whether the bags have a valid target.
+		local boundKey = bindingCmd and GetBindingKey(bindingCmd)
+		if not boundKey then
+			return "Bind a key (button to the left)", 1.0, 0.7, 0.0
+		end
+
+		-- "Next: <link>" -> "[KEY] <link>". The item link is colored
+		-- by WoW so we don't need a special color triple on the whole
+		-- string; the leading "[KEY] " inherits the cyan tint from the
+		-- addon getter's r/g/b.
+		local link = rawText:match("^Next:%s*(.+)$")
+		if link then
+			return "[" .. boundKey .. "] " .. link, r or 0.7, g or 0.85, b or 1.0
+		end
+
+		-- "No ... in bags" -> "Nothing to <feature> right now". Trim
+		-- the addon's wordy phrasing to one short line. Bag-empty is a
+		-- transient state, not a problem to fix, so use the dim color.
+		if rawText:find("^No ") then
+			return "Nothing to do right now", 0.55, 0.55, 0.55
+		end
+
+		-- Unknown shape; pass through with the original color so we
+		-- don't lose information.
+		return rawText, r or 0.55, g or 0.55, b or 0.55
+	end
+
+	function self:_refreshDisenchantStatus()
+		if not self._disenchantStatus then return end
+		local getter = _G.AutoDelete_GetDisenchantStatus
+		if not getter then
+			self._disenchantStatus:SetText("...")
+			self._disenchantStatus:SetTextColor(0.55, 0.55, 0.55)
+			return
+		end
+		local rawText, r, g, b = getter()
+		local text, nr, ng, nb = self:_buildKeybindStatus(rawText, self._disenchantBindingCmd, r, g, b)
+		self._disenchantStatus:SetText(text)
+		self._disenchantStatus:SetTextColor(nr, ng, nb)
+	end
+
+	-- Keybinds tab: One-Key Open. Toggle + sub-toggle update the profile
+	-- and immediately re-arm the secure button so the next-target pointer
+	-- reflects the new eligibility set. Self references for both toggles
+	-- because they live inside a `do ... end` block above and are out of
+	-- this scope's view by lexical reach.
+	if self._tglOpenEnabled then
+		self._tglOpenEnabled:SetScript("OnClick", function(btn)
+			btn._checked = not btn._checked
+			btn:SetChecked(btn._checked)
+			GetActiveProfile(db).autoOpenEnabled = btn._checked
+			if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+			if _G.AutoDelete_UpdateOpenButton then _G.AutoDelete_UpdateOpenButton() end
+			if self._refreshOpenStatus then self:_refreshOpenStatus() end
+		end)
+	end
+	-- autoOpenIncludeLocked has no on-tab UI in the row-based Keybinds
+	-- layout (the single-toggle popup would be overkill). Profile field
+	-- defaults to true via DEFAULT_PROFILE and stays there until a
+	-- future filter popup is added for the Open row.
+
+	-- Pulls the current "Next: <item>" / "Disabled" / "No openable items"
+	-- string from the One-Key Open module and paints the status text.
+	-- Called from the toggle handlers above, from the Refresh path below,
+	-- and from AutoDelete.lua's UpdateOpenButton when the panel is open.
+	function self:_refreshOpenStatus()
+		if not self._openStatus then return end
+		local getter = _G.AutoDelete_GetOpenStatus
+		if not getter then
+			self._openStatus:SetText("...")
+			self._openStatus:SetTextColor(0.55, 0.55, 0.55)
+			return
+		end
+		local rawText, r, g, b = getter()
+		local text, nr, ng, nb = self:_buildKeybindStatus(rawText, self._openBindingCmd, r, g, b)
+		self._openStatus:SetText(text)
+		self._openStatus:SetTextColor(nr, ng, nb)
+	end
+
+	-- Keybinds tab Row 2: Mill (Inscription) and Prospect (Jewelcrafting).
+	-- Both are simple single-toggle features so we factor the handler and
+	-- status-refresher pair into a tiny closure-builder. `field` is the
+	-- profile key, `updateFn` is the AutoDelete.lua exported updater, and
+	-- `statusKey` / `getterKey` plug into the per-feature self fields.
+	local function MakeSecureCastWiring(field, updateGlobalName, getterGlobalName, statusFieldKey, refreshSelfKey, bindingCmdKey)
+		local function OnClickHandler(btn)
+			btn._checked = not btn._checked
+			btn:SetChecked(btn._checked)
+			GetActiveProfile(db)[field] = btn._checked
+			if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+			local up = _G[updateGlobalName]
+			if up then up() end
+			if self[refreshSelfKey] then self[refreshSelfKey](self) end
+		end
+		self[refreshSelfKey] = function(s)
+			local widget = s[statusFieldKey]
+			if not widget then return end
+			local getter = _G[getterGlobalName]
+			if not getter then
+				widget:SetText("...")
+				widget:SetTextColor(0.55, 0.55, 0.55)
+				return
+			end
+			local rawText, r, g, b = getter()
+			local text, nr, ng, nb = s:_buildKeybindStatus(rawText, s[bindingCmdKey], r, g, b)
+			widget:SetText(text)
+			widget:SetTextColor(nr, ng, nb)
+		end
+		return OnClickHandler
+	end
+
+	if self._tglMill then
+		self._tglMill:SetScript("OnClick", MakeSecureCastWiring(
+			"millEnabled",
+			"AutoDelete_UpdateMillButton",
+			"AutoDelete_GetMillStatus",
+			"_millStatus",
+			"_refreshMillStatus",
+			"_millBindingCmd"))
+	end
+	if self._tglProspect then
+		self._tglProspect:SetScript("OnClick", MakeSecureCastWiring(
+			"prospectEnabled",
+			"AutoDelete_UpdateProspectButton",
+			"AutoDelete_GetProspectStatus",
+			"_prospectStatus",
+			"_refreshProspectStatus",
+			"_prospectBindingCmd"))
+	end
+
+	-- Filters tab: Affix Protection toggles. Same RefreshCachedProfile call
+	-- so the sell loop sees the new setting on the next tick without
+	-- waiting for a profile reload. Only the No Auto-Sell toggle remains;
+	-- the No Auto-Delete one was dropped (auto-delete never fires on
+	-- Rare/Epic gear where affixes appear).
 	tglProtectAffixFromSell:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
@@ -2973,10 +5990,12 @@ local function BuildUI(self)
 		end
 	end)
 
-	-- General tab: Show affix dot toggle (sits next to Scan Speed). Forces
-	-- an immediate dot refresh so the visual state matches the toggle
-	-- without waiting for a natural bag event.
-	tglShowAffixDot:SetScript("OnClick", function(btn)
+	-- Filters tab -> Affix Display: Show affix dot toggle. Forces an
+	-- immediate dot refresh so the visual state matches the toggle
+	-- without waiting for a natural bag event. Accessed through `self`
+	-- because the toggle's local scope was wrapped in a `do/end` to
+	-- relieve BuildUI's 200-local cap.
+	self._tglShowAffixDot:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
 		GetActiveProfile(db).showAffixDot = btn._checked
@@ -2985,6 +6004,45 @@ local function BuildUI(self)
 		end
 		if _G.AutoDelete_RefreshAffixDots then
 			_G.AutoDelete_RefreshAffixDots()
+		end
+	end)
+
+	-- Filters tab -> Affix Display: Collection Mode toggle. Mirrors the
+	-- `/del collection` slash command. On toggle-on we re-pull PE's
+	-- learned-affix table (it may have grown since the player last
+	-- reloaded) and force a dot refresh so existing bag slots reflect
+	-- the new owned/missing partition immediately. Accessed through
+	-- `self` for the same do/end-scope reason as Show affix dot above.
+	self._tglAffixCollection:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		local p = GetActiveProfile(db)
+		p.affixCollectionMode = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+		-- Re-mirror PE's learned-affix map so the next dot evaluation
+		-- sees current data. Safe no-op if PE isn't loaded.
+		if _G.AutoDelete_RefreshOwnedAffixes then
+			_G.AutoDelete_RefreshOwnedAffixes()
+		end
+		if _G.AutoDelete_RefreshAffixDots then
+			_G.AutoDelete_RefreshAffixDots()
+		end
+		-- Chat confirmation matching the slash-command output so the user
+		-- gets the same "37 owned affixes mirrored from PE" signal whether
+		-- they toggle via UI or slash.
+		if btn._checked then
+			local count = 0
+			for _ in pairs(_G.AutoDelete_OwnedAffixes or {}) do
+				count = count + 1
+			end
+			print("|cffff8000[AutoDelete]|r affix collection mode |cff00ff00ON|r. "
+				.. count .. " owned affixes mirrored from PE. Dots will now "
+				.. "show ONLY for missing affixes (in gold).")
+		else
+			print("|cffff8000[AutoDelete]|r affix collection mode |cffff5555OFF|r. "
+				.. "Dots show on all affixed items, colored by tier.")
 		end
 	end)
 
@@ -3122,6 +6180,10 @@ local function BuildUI(self)
 		tglRaw:SetChecked(false)
 		rawBoxHolder:Hide()
 		listBox:Show()
+		-- Switching lists -> the previous page index belongs to the OLD list
+		-- and means nothing in the new one. Reset before Refresh so the user
+		-- lands on page 1 of whatever they switched to.
+		self._currentPage = 1
 		self:Refresh()
 	end
 	deleteTab:SetScript("OnClick", function() SwitchTab("delete") end)
@@ -3154,6 +6216,10 @@ local function BuildUI(self)
 		if self._searchClear then
 			if text ~= "" then self._searchClear:Show() else self._searchClear:Hide() end
 		end
+		-- Filter changed -> the visible set is now a different identity, so
+		-- the user's previous page index is no longer meaningful. Reset to
+		-- page 1 so they see results from the top of the filtered list.
+		self._currentPage = 1
 		self:Refresh()
 	end)
 
@@ -3262,12 +6328,60 @@ local function BuildUI(self)
 		tglEnable:SetChecked(p.enabled)
 		tglAutoAddEquipped:SetChecked(p.autoAddEquipped)
 
-		-- Tools tab: Affix Protection
-		tglProtectAffixFromDelete:SetChecked(p.protectAffixFromDelete)
+		-- Keybinds tab rows. Only the master toggle and the key-capture
+		-- row live on each feature's row; per-feature filters (BoP/BoE/
+		-- qualities/iLvl for Disenchant; Include-locked-tier for Open)
+		-- live in the gear-button popup, which refreshes itself on Show.
+		if self._tglDisenchant     then self._tglDisenchant:SetChecked(p.disenchantEnabled) end
+		if self._disenchantKeyRow  and self._disenchantKeyRow._refresh then self._disenchantKeyRow:_refresh() end
+		if self._refreshDisenchantStatus then self:_refreshDisenchantStatus() end
+
+		if self._tglOpenEnabled then self._tglOpenEnabled:SetChecked(p.autoOpenEnabled) end
+		if self._openKeyRow and self._openKeyRow._refresh then self._openKeyRow:_refresh() end
+		if self._refreshOpenStatus then self:_refreshOpenStatus() end
+
+		-- If the Disenchant filters popup is currently open, refresh its
+		-- contents from the new profile values.
+		if _G.AutoDelete_DisenchantFiltersPopup and
+		   _G.AutoDelete_DisenchantFiltersPopup:IsShown() and
+		   _G.AutoDelete_RefreshDisenchantFilters then
+			_G.AutoDelete_RefreshDisenchantFilters()
+		end
+
+		-- Tools Card 1: Process Bags count summary.
+		if self._refreshProcessCount then self:_refreshProcessCount() end
+
+		-- Keybinds tab: Mill (Inscription)
+		if self._tglMill then self._tglMill:SetChecked(p.millEnabled) end
+		if self._millKeyRow and self._millKeyRow._refresh then
+			self._millKeyRow:_refresh()
+		end
+		if self._refreshMillStatus then self:_refreshMillStatus() end
+
+		-- Keybinds tab: Prospect (Jewelcrafting)
+		if self._tglProspect then self._tglProspect:SetChecked(p.prospectEnabled) end
+		if self._prospectKeyRow and self._prospectKeyRow._refresh then
+			self._prospectKeyRow:_refresh()
+		end
+		if self._refreshProspectStatus then self:_refreshProspectStatus() end
+
+		-- Affix tab: Affix Protection (Card 1). Only the No Auto-Sell
+		-- toggle remains; No Auto-Delete was dropped.
 		tglProtectAffixFromSell:SetChecked(p.protectAffixFromSell)
 		affixFloorEdit:SetText(tostring(p.affixIlvlMin or 0))
 
-		-- Tools tab: Bag Space (single threshold drives both warn + summon)
+		-- Filters tab: DE Filters (Card 2, v3.20 -- ported from the old
+		-- Disenchant Filters popup that opened from a gear button on the
+		-- Keybinds tab). Same profile fields as the popup version.
+		if self._tglDisenchantBoP      then self._tglDisenchantBoP:SetChecked(p.disenchantBoP)          end
+		if self._tglDisenchantBoE      then self._tglDisenchantBoE:SetChecked(p.disenchantBoE)          end
+		if self._tglDisenchantUnc      then self._tglDisenchantUnc:SetChecked(p.disenchantUncommon)     end
+		if self._tglDisenchantRare     then self._tglDisenchantRare:SetChecked(p.disenchantRare)        end
+		if self._tglDisenchantEpic     then self._tglDisenchantEpic:SetChecked(p.disenchantEpic)        end
+		if self._editDisenchantIlvlMin then self._editDisenchantIlvlMin:SetText(tostring(p.disenchantIlvlMin or 0)) end
+		if self._editDisenchantIlvlMax then self._editDisenchantIlvlMax:SetText(tostring(p.disenchantIlvlMax or 0)) end
+
+		-- Pets tab: Bag Warning + threshold (Card 3, moved from Tools tab)
 		tglBagSpaceWarn:SetChecked(p.bagSpaceWarnEnabled)
 		thresholdEdit:SetText(tostring(p.bagSpaceWarnThreshold or 5))
 
@@ -3292,15 +6406,20 @@ local function BuildUI(self)
 		boeWeapons.minBox:SetText(tostring(p.boeWeaponsIlvlMin or 1))
 		boeWeapons.maxBox:SetText(tostring(p.boeWeaponsIlvlMax or 199))
 
-		-- General tab: Auto-Delete Junk + Auto-Delete Common + Auto-Sell Greens
-		tglGray:SetChecked(p.autoGray)
-		tglDelCommon:SetChecked(p.autoDeleteCommon)
-		tglSellGreensGen:SetChecked(p.autoSellGreens)
+		-- Filters tab: Quality Filters (Card 1, moved from General tab)
+		-- Quality Filters card now uses cycle pills, not checkboxes.
+		-- Read the tri-state enum field; default to "off" if the migration
+		-- somehow hasn't run yet (defensive; shouldn't happen post-v3).
+		self._pillJunk:SetValue(p.qualityActionJunk or "off")
+		self._pillCommon:SetValue(p.qualityActionCommon or "off")
+		self._pillGreens:SetValue(p.qualityActionGreens or "off")
 
-		tglScav:SetChecked(p.summonScavenger)
-		-- Goblin tab toggles
+		-- General tab: Auto-Repair (Card 2, moved from Goblin tab)
 		tglRepair:SetChecked(p.autoRepair)
 		tglRepairGuild:SetChecked(p.autoRepairUseGuildBank)
+
+		-- Pets tab: Scavenger + Goblin Merchant + Hide Greedy Spam
+		tglScav:SetChecked(p.summonScavenger)
 		tglScavAfterSell:SetChecked(p.summonAfterSell)
 		tglScavAfterClose:SetChecked(p.summonAfterClose)
 		tglScavOnlyInCombat:SetChecked(p.summonOnlyInCombat)
@@ -3313,7 +6432,8 @@ local function BuildUI(self)
 		lootDD:SetValue(p.autoInviteLootRule or "freeforall")
 		tglConvertRaid:SetChecked(p.autoInviteConvertToRaid)
 		speedDD:SetValue((p.scanInterval and p.scanInterval >= 0.5) and p.scanInterval or 0.5)
-		tglShowAffixDot:SetChecked(p.showAffixDot ~= false)  -- default true if nil
+		self._tglShowAffixDot:SetChecked(p.showAffixDot ~= false)  -- default true if nil
+		self._tglAffixCollection:SetChecked(p.affixCollectionMode == true)  -- default false if nil
 		UpdateTabColors()
 
 		-- Also refresh tracking stats if the Tracking tab is currently shown.
@@ -3339,10 +6459,15 @@ local function BuildUI(self)
 					table.insert(self._filtered, e)
 				end
 			end
-			-- Reset to page 1 when filter/text changes
-			self._currentPage = 1
-			-- Tell FauxScrollFrame about the items in the current page so scrollbar
-			-- appears and can scroll through the items within the page.
+			-- DO NOT reset self._currentPage here. Refresh runs on every
+			-- list mutation (X-button delete, drag-add, cache poll), and
+			-- a blanket reset jumps the user off whatever page they were
+			-- viewing -- exactly the bug we hit when deleting from page 2+.
+			-- Page-1 resets are triggered explicitly at the two call sites
+			-- where the visible set genuinely changes identity: search-box
+			-- OnTextChanged (filter applied) and SwitchTab (list switched).
+			-- The UpdateListRows clamp below handles the "deleted the last
+			-- item on the page" edge case by stepping back one page.
 			local pageItemCount = math.min(self._pageSize, #self._filtered)
 			FauxScrollFrame_Update(scroll, pageItemCount, NUM_ROWS, ROW_HEIGHT)
 			self:UpdateListRows()
@@ -3557,27 +6682,6 @@ local function BuildPopupSkeleton(globalName, title, W, H)
 
 	f._body = body
 	return f, body
-end
-
--- Shared "dialog button" builder (Apply/Cancel style).
-local function MakeDialogButton(parent, label, onClick)
-	local btn = CreateFrame("Button", nil, parent)
-	btn:SetSize(90, 24)
-	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
-	local txt = MakeText(btn, 11, C_TEXT, "OUTLINE")
-	txt:SetPoint("CENTER")
-	txt:SetText(label)
-	btn._text = txt
-	btn:SetScript("OnEnter", function(b)
-		ApplyBackdrop(b, C_ROW_HOVER, C_BORDER)
-		txt:SetTextColor(1, 1, 1)
-	end)
-	btn:SetScript("OnLeave", function(b)
-		ApplyBackdrop(b, C_ROW_ODD, C_BORDER)
-		txt:SetTextColor(unpack(C_TEXT))
-	end)
-	btn:SetScript("OnClick", onClick)
-	return btn
 end
 
 -- ============================================================================
@@ -3803,12 +6907,12 @@ local function BuildClearListWindow()
 	--   Card:          y=-32 to y=-(body_H - 50)
 	--   Footer:        50px (Cancel at BOTTOMRIGHT -15, 15 = 24 tall + 15 bottom pad + 11 top pad)
 	--
-	-- Card needs to fit 6 buttons (26 tall) with 4px gaps, plus 8px top pad
-	-- and some bottom pad. Required card height = 8 + 6*26 + 5*4 + bottom_pad.
-	-- With bottom_pad=10 that's 194. Working backwards:
-	--   card_H = body_H - 32 - 50  →  body_H = card_H + 82 = 276
-	--   frame_H = body_H + 24     →  300
-	local W, H = 340, 300
+	-- Card needs to fit 7 buttons (26 tall) with 4px gaps, plus 8px top pad
+	-- and some bottom pad. Required card height = 8 + 7*26 + 6*4 + bottom_pad.
+	-- With bottom_pad=10 that's 224. Working backwards:
+	--   card_H = body_H - 32 - 50  →  body_H = card_H + 82 = 306
+	--   frame_H = body_H + 24     →  330
+	local W, H = 340, 330
 	local f, body = BuildPopupSkeleton("AutoDeleteClearListPickerFrame",
 		"Clear List", W, H)
 	clearFrame = f
@@ -3828,37 +6932,42 @@ local function BuildClearListWindow()
 
 	local BTN_W, BTN_H = 290, 26
 	local BTN_GAP = 4
+	-- 3-color semantic palette per Addon_UI_StyleGuide.md:
+	--   Six options destructive (clear / remove user data) -> C_RED
+	--   "Remove recipes & patterns..." opens a sub-picker  -> C_BLUE
 	local options = {
-		{ value = "Delete",   label = "Delete list",                     color = C_RED },
-		{ value = "Sell",     label = "Sell list",                       color = C_ACCENT },
-		{ value = "Keep",     label = "Keep list",                       color = C_GREEN },
-		{ value = "All",      label = "All three lists",                 color = { 0.85, 0.25, 0.85, 1 } },
+		{ value = "Delete",   label = "Delete list",                     color = C_RED  },
+		{ value = "Sell",     label = "Sell list",                       color = C_RED  },
+		{ value = "Keep",     label = "Keep list",                       color = C_RED  },
+		{ value = "All",      label = "All three lists",                 color = C_RED  },
 		-- Remove Junk: scans Delete + Sell only, removes gray-quality items.
-		{ value = "Junk",     label = "Remove junk items",               color = { 0.55, 0.55, 0.55, 1 } },
+		{ value = "Junk",     label = "Remove junk items",               color = C_RED  },
 		-- Remove Sellable: scans Delete only, removes items with vendor value.
-		{ value = "Sellable", label = "Remove items with vendor value",  color = { 0.95, 0.80, 0.20, 1 } },
+		{ value = "Sellable", label = "Remove items with vendor value",  color = C_RED  },
+		-- Remove Patterns: opens a sub-window listing each profession-style
+		-- subtype (Pattern / Recipe / Plans / Schematic / Formula / Design /
+		-- Technique / Manual). This is navigational, not directly destructive,
+		-- so it gets C_BLUE per the change/transform class. Ellipsis on the
+		-- label signals "opens another window."
+		{ value = "Patterns", label = "Remove recipes & patterns...",    color = C_BLUE },
 	}
 
 	for i, opt in ipairs(options) do
-		local b = CreateFrame("Button", nil, card)
-		b:SetSize(BTN_W, BTN_H)
+		local b = MakeActionButton(card, opt.label, opt.color, nil, BTN_W, BTN_H)
 		b:SetPoint("TOP", 0, -8 - ((i - 1) * (BTN_H + BTN_GAP)))
-		ApplyBackdrop(b, C_ROW_ODD, C_BORDER)
-		local txt = MakeText(b, 11, C_TEXT, "OUTLINE")
-		txt:SetPoint("CENTER")
-		txt:SetText(opt.label)
-		b:SetScript("OnEnter", function(btn)
-			local c = opt.color
-			btn:SetBackdropColor(c[1], c[2], c[3], 0.3)
-			btn:SetBackdropBorderColor(c[1], c[2], c[3], 1)
-			txt:SetTextColor(1, 1, 1)
-		end)
-		b:SetScript("OnLeave", function(btn)
-			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
-			txt:SetTextColor(unpack(C_TEXT))
-		end)
+		-- MakeActionButton wires its own OnEnter/OnLeave (hover tint + white
+		-- text). Only the click action is bespoke per row.
 		b:SetScript("OnClick", function()
 			clearFrame:Hide()
+			-- "Patterns" routes to a sub-window (sibling, not confirm) so
+			-- the user can pick which profession's items to remove. Every
+			-- other option fires a confirm StaticPopup directly.
+			if opt.value == "Patterns" then
+				if _G.AutoDelete_ShowRemovePatternsPicker then
+					_G.AutoDelete_ShowRemovePatternsPicker()
+				end
+				return
+			end
 			local dlg
 			if opt.value == "All" then
 				dlg = StaticPopup_Show("AUTODELETE_PROFILE_CLEAR_ALL")
@@ -3881,4 +6990,97 @@ end
 _G.AutoDelete_ShowClearListPicker = function()
 	BuildClearListWindow()
 	clearFrame:Show()
+end
+
+-- ============================================================================
+-- Remove Patterns by Profession Window
+-- ============================================================================
+-- Sub-window opened from the Clear List window's "Remove recipes & patterns..."
+-- option. Lists each profession's craft-item subtype (Pattern / Recipe / Plans
+-- / Schematic / Formula / Design / Technique / Manual). Clicking a row fires
+-- the shared AUTODELETE_PROFILE_REMOVE_PATTERNS confirm popup with the chosen
+-- subtype in popup.data; the OnAccept handler walks all three lists and
+-- removes matching entries.
+
+local removePatternsFrame
+
+-- 8 profession buttons + chrome math:
+--   card_H = 8 (top pad) + 8 * 26 (buttons) + 7 * 4 (gaps) + 10 (bottom pad) = 254
+--   body_H = card_H + 32 (subtitle) + 50 (footer) = 336
+--   frame_H = body_H + 24 (title bar) = 360
+local PROFESSIONS_LIST = {
+	-- Subtype string matches GetItemInfo()'s 7th return on 3.3.5a enUS.
+	-- TODO: localize -- subtype strings differ on non-enUS clients.
+	{ subtype = "Pattern",   label = "Patterns (Tailoring + Leatherworking)" },
+	{ subtype = "Recipe",    label = "Recipes (Cooking + Alchemy)" },
+	{ subtype = "Plans",     label = "Plans (Blacksmithing)" },
+	{ subtype = "Schematic", label = "Schematics (Engineering)" },
+	{ subtype = "Formula",   label = "Formulas (Enchanting)" },
+	{ subtype = "Design",    label = "Designs (Jewelcrafting)" },
+	{ subtype = "Technique", label = "Techniques (Inscription)" },
+	{ subtype = "Manual",    label = "Manuals (First Aid)" },
+}
+
+local function BuildRemovePatternsWindow()
+	if removePatternsFrame then return end
+
+	local W, H = 360, 360
+	local f, body = BuildPopupSkeleton("AutoDeleteRemovePatternsFrame",
+		"Remove Patterns by Profession", W, H)
+	removePatternsFrame = f
+
+	-- Instruction text
+	local sub = MakeText(body, 10, C_TEXT, "OUTLINE", "LEFT")
+	sub:SetPoint("TOPLEFT", 15, -10)
+	sub:SetPoint("TOPRIGHT", -15, -10)
+	sub:SetHeight(16)
+	sub:SetText("Pick which crafting items to scrub from your lists:")
+
+	-- Card for the 8 buttons
+	local card = CreateFrame("Frame", nil, body)
+	card:SetPoint("TOPLEFT", 15, -32)
+	card:SetPoint("BOTTOMRIGHT", -15, 50)
+	ApplyBackdrop(card, { 14/255, 14/255, 14/255, 1 }, C_BORDER)
+
+	local BTN_W, BTN_H = 310, 26
+	local BTN_GAP = 4
+	local PROF_COLOR = { 0.45, 0.85, 0.55, 1 }  -- match the launcher option color
+
+	for i, prof in ipairs(PROFESSIONS_LIST) do
+		local b = CreateFrame("Button", nil, card)
+		b:SetSize(BTN_W, BTN_H)
+		b:SetPoint("TOP", 0, -8 - ((i - 1) * (BTN_H + BTN_GAP)))
+		ApplyBackdrop(b, C_ROW_ODD, C_BORDER)
+		local txt = MakeText(b, 11, C_TEXT, "OUTLINE")
+		txt:SetPoint("CENTER")
+		txt:SetText(prof.label)
+		b:SetScript("OnEnter", function(btn)
+			btn:SetBackdropColor(PROF_COLOR[1], PROF_COLOR[2], PROF_COLOR[3], 0.3)
+			btn:SetBackdropBorderColor(PROF_COLOR[1], PROF_COLOR[2], PROF_COLOR[3], 1)
+			txt:SetTextColor(1, 1, 1)
+		end)
+		b:SetScript("OnLeave", function(btn)
+			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+			txt:SetTextColor(unpack(C_TEXT))
+		end)
+		b:SetScript("OnClick", function()
+			removePatternsFrame:Hide()
+			-- Confirm popup gets a payload table with both the subtype to
+			-- match and a friendlier label for the prompt text. %s in the
+			-- popup text expects a single string -- we use the label.
+			local dlg = StaticPopup_Show("AUTODELETE_PROFILE_REMOVE_PATTERNS", prof.label)
+			if dlg then
+				dlg.data = { subtype = prof.subtype, label = prof.label }
+			end
+		end)
+	end
+
+	-- Cancel button in footer
+	local cancelBtn = MakeDialogButton(body, "Cancel", function() removePatternsFrame:Hide() end)
+	cancelBtn:SetPoint("BOTTOMRIGHT", -15, 15)
+end
+
+_G.AutoDelete_ShowRemovePatternsPicker = function()
+	BuildRemovePatternsWindow()
+	removePatternsFrame:Show()
 end

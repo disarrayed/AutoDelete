@@ -4,7 +4,7 @@
 
 WoW 3.3.5a inventory manager for Project Ebonhold. Mark items to **Delete**, **Sell**, or **Keep**. Every automatic feature is opt-in.
 
-![version](https://img.shields.io/badge/version-v3.19-ff8000?style=for-the-badge) ![downloads](https://img.shields.io/github/downloads/disarrayed/AutoDelete/total?style=for-the-badge&color=ff8000) ![platform](https://img.shields.io/badge/PROJECT%20EBONHOLD-3.3.5a-e6cc80?style=for-the-badge)
+![version](https://img.shields.io/badge/version-v3.20-ff8000?style=for-the-badge) ![downloads](https://img.shields.io/github/downloads/disarrayed/AutoDelete/total?style=for-the-badge&color=ff8000) ![platform](https://img.shields.io/badge/PROJECT%20EBONHOLD-3.3.5a-e6cc80?style=for-the-badge)
 
 [**Download**](https://github.com/disarrayed/AutoDelete/releases/latest) · [**Source**](https://github.com/disarrayed/AutoDelete)
 
@@ -58,6 +58,12 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 - Mount-aware dismiss and re-summon
 - Stuck detection via loot-event tracking
 
+**One-Key Disenchant** (Tools tab)
+- Bind a key in Key Bindings → AutoDelete → "Disenchant next BoP item"
+- Each press casts Disenchant on the next eligible BoP item in your bags
+- Optional toggle to include Rare (blue) gear
+- Status line shows the next target, or "Requires Enchanting" if the character can't disenchant
+
 **Quality of life**
 - Bags stay open when the vendor closes
 - Auto-repair with optional guild bank fallback
@@ -93,7 +99,7 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 
 Feature ideas suggested by the community.
 
-- **Affix Protection** (Tools tab) — suggested by Discord user Biboup! on 5/13/26 at 4:23 PM:
+- **Affix Protection** (Tools tab) — suggested by Biboup! [SBTL] on 5/13/26 at 4:23 PM:
   > Would it be possible to have an option to not delete items with affix or that's hard to do ?
 
 ---

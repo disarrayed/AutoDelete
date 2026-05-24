@@ -13,8 +13,13 @@ Thumbs.db
 # WoW SavedVariables — never commit these, they contain per-character data
 *.lua.bak
 
+# luacheck (static analyzer) — config and cache stay local
+.luacheckrc
+.luacheckcache/
+luacheck.txt
+
 # Local-only reference material that lives in the parent folder
-# (F:\Claude\Addons\). Never commit copies of these even if someone
+# (D:\Claude\Addons\). Never commit copies of these even if someone
 # accidentally drags them into the repo directory.
 addon-conventions.md
 lua-reference/

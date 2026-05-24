@@ -2,16 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.20] - 2026-05-24
+
+### Added
+
+- **Scan Learned Affixes button** on the Filters tab (Affix Display card). Opens a themed scrollable window listing every Project Ebonhold affix you've learned, grouped by tier. Affix names without a tier suffix (e.g. weapon affixes) appear under a separate "Weapon Affix" section.
+- **Keybinds tab** with One-Key Disenchant, Open, Mill, and Prospect. Bind a key to each in the in-panel capture row; each row has a "Filters" button to tune what that one-key action targets.
+- **Process Bags panel.** Standalone window showing what AutoDelete would do to each item in your bags (delete / sell / keep / leave alone). Open via the Tools tab "Open Panel" button or `/del process`.
+- **Audit Lists button** on the Affix Protection card. Scans your Delete and Sell lists for affixed items that would now be protected by Affix Protection.
+- **`/del bench`, `/del spike`, `/del goblin`** — power-user diagnostic commands for measuring loot-burst performance and the auto-summon decision. See in-game help via `/del`.
+
+### Changed
+
+- **Quality Filters card renamed to Auto Actions.** The Off / Delete / Sell cycle pill is replaced with a Del / Sell segmented control: click a pill to light it up, click the lit pill again to turn it off (= no auto-action). Greens shows only Sell to prevent accidental bulk-delete of green gear. Existing settings carry over via a silent migration.
+- **Tooltips across the settings panel rewritten** for clarity. Shorter, plain-language, less jargon.
+- **Affix Display tier-color reference moved** into the "Show affix dot" toggle's tooltip — the inline footer that listed the color key is gone.
+
+### Improved
+
+- **Delete bursts no longer freeze the frame.** The delete pipeline now processes items at a steady throttle (~9/sec) instead of bursting 8 at a time. Per-frame cost dropped from ~41 ms to under 10 ms — no more visible chug when AutoDelete is clearing loot.
+- **Goblin Merchant won't pop too early during a loot storm.** The bag-full timer now waits until AutoDelete has actually had a chance to scan and start clearing before counting down. Only fires the Merchant when drain genuinely can't keep up.
+- **Safer mid-burst Keep-list changes.** Items are re-checked against your Keep list and Affix Protection one final time right before being deleted. Add an item to Keep while a burst is clearing and it gets skipped, not deleted under the old decision.
+- **Disable mid-burst now stops the queue.** Re-enabling does a fresh scan; it doesn't resume deleting items queued under prior conditions.
+
+### Fixed
+
+- **Deleting an item with the X button from page 2 or later no longer kicks the list back to page 1.** The page index is preserved across deletes; the list automatically steps back one page only if you delete the last item on the last page.
+- **Open Panel and Filters buttons on the Tools tab now show a hover tooltip** explaining what they do.
+- **Bag-space warning no longer spams chat** when bags hover around the threshold. The warning was removed entirely — the Goblin Merchant arriving is the visible "bags filling up" signal now.
+- **Process Bags window now opens in front of the settings panel** instead of behind it. Was caused by a frame-strata mismatch on the launcher button.
+
+### Performance note — ElvUI bag UI at high loot rates
+
+If you still see pickup stutter with v3.20 and use ElvUI, the cost is in ElvUI's bag UI rather than AutoDelete. ElvUI's "Show Bind on Equip/Use Text" option runs a hidden tooltip scan on every bag slot every time bags update. At loot-bot or AOE-farm rates that's hundreds of tooltip scans per frame.
+
+**Fix:** open `/ec` → Bags and uncheck **Show Bind on Equip/Use Text**. In our testing this dropped worst-frame stutter by ~10× during heavy loot bursts. AutoDelete's own measured contribution during those frames was ~1% of frame time.
+
 ## [3.19] - 2026-05-13
 
 ### Added
 
-- Tools tab in the settings panel.
-- Affix Protection. Skip Auto-Delete and Auto-Sell on items carrying PE's @affix@ tooltip marker. Optional iLvl floor so low-iLvl affix junk can still be cleared. Idea from Discord user Biboup! on 5/13/26 at 4:23 PM.
-- Cyan dot on bag slots holding affixed items. Toggle on the General tab.
-- Bag Space warning + Goblin Merchant summon use a single shared threshold.
-- Sortable columns in the list views.
-- Confirmation popup before resetting stats.
+- One-Key Disenchant. Bind a key in Key Bindings → AutoDelete to disenchant the next BoP item in your bags. Optional toggle to include Rare (blue). Requires the Enchanting profession.
 
 ### Removed
 
