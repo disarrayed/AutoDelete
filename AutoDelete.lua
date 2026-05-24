@@ -6418,11 +6418,11 @@ end
 
 -- Scans bags for the next disenchant target. Returns (bag, slot, link, name)
 -- or nil. Walks bag/slot in ascending order and returns the FIRST eligible
--- item — matching FindMillTarget / FindProspectTarget / FindNextOpenable.
+-- item, matching FindMillTarget / FindProspectTarget / FindNextOpenable.
 -- v3.20: switched from "lowest iLvl wins" to bag-slot order per user
 -- feedback (2026-05-23). The old lowest-iLvl heuristic was meant to clear
 -- trash first, but it surprised users who expected the keybind to consume
--- the item they were looking at — i.e. the topmost eligible item in their
+-- the item they were looking at (i.e. the topmost eligible item in their
 -- bag UI. Bag-slot order is consistent with the other three one-key
 -- actions and matches what the player sees in their bags.
 local function FindDisenchantTarget(profile)
@@ -9462,7 +9462,7 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		print("|cffff8000[AutoDelete]|r ElvUI bag hook |cffff5555OFF|r -- AutoDelete will skip ALL per-slot work in ElvUI's UpdateSlot. Affix dots will NOT update on ElvUI bags until you turn this back on. Diagnostic use only.")
 		return
 	end
-	-- v3.20 /del goblin — live diagnostic for the bag-full auto-summon
+	-- v3.20 /del goblin: live diagnostic for the bag-full auto-summon
 	-- gate. Prints what state the Goblin defer logic last saw so the
 	-- user can see WHY Goblin did or didn't fire.
 	if arg == "goblin" then
@@ -9490,7 +9490,7 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		print("  Negative \"ago\" values = event hasn't happened this session.")
 		return
 	end
-	-- v3.20 /del bench — auto-arming benchmark harness. One macro, hit it
+	-- v3.20 /del bench: auto-arming benchmark harness. One macro, hit it
 	-- to start. Auto-finalizes 5s after bag activity stops. See the
 	-- "Bench harness" block above for the state machine + save semantics.
 	if arg == "bench" then

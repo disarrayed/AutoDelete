@@ -1246,7 +1246,7 @@ footer:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 0, 0)
 footer:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 0)
 footer:SetHeight(PROCESS_FOOTER_H)
 -- v3.21 §6.3: kept as raw SetBackdrop intentionally. Fill-only (no border) to
--- match the headerRow band — together they bracket the scroll area without a
+-- match the headerRow band; together they bracket the scroll area without a
 -- visible 1px seam.
 footer:SetBackdrop({ bgFile = WHITE8x8 })
 footer:SetBackdropColor(0.07, 0.07, 0.07, 1)
