@@ -18,9 +18,8 @@ Thumbs.db
 .luacheckcache/
 luacheck.txt
 
-# Local-only reference material that lives in the parent folder
-# (D:\Claude\Addons\). Never commit copies of these even if someone
-# accidentally drags them into the repo directory.
+# Local-only reference material. Never commit copies of these even if
+# someone accidentally drags them into the repo directory.
 addon-conventions.md
 lua-reference/
 wow-api/
@@ -28,3 +27,11 @@ AutoDelete_Architecture.md
 Addon_UI_StyleGuide.md
 CLAUDE.md
 handoff/
+
+# Harness / dev environment scripts and logs. These contain absolute
+# machine paths and personal config that must never be committed.
+.claude/
+launch-claude.*
+claude-monitor.*
+claude-watch.*
+claude-session.*

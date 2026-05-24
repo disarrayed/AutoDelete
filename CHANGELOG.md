@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.20.1] - 2026-05-24
+
+### Fixed
+
+- **Addon failed to load on a fresh install of v3.20.** The shipped v3.20 zip tripped Lua 5.1's "main function has more than 200 local variables" error on load, which meant the addon appeared enabled in the AddOns list but no slash commands worked and the settings panel never opened. Caused by a release-time merge that retained duplicate code blocks from the pre-release branch state. v3.20.1 ships the correct, audited file. If you already had v3.20 installed, re-download and replace.
+
 ## [3.20] - 2026-05-24
 
 ### Added
