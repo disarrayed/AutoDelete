@@ -44,6 +44,16 @@ local C_ROW_HOVER = { RGB(20, 45, 70, 1) }    -- mage blue row hover #142D46
 local C_DROP_BG   = { RGB(14, 14, 14, 1) }
 local C_DROP_BORDER = { 0.25, 0.25, 0.25, 1 }
 local C_TITLEBAR  = { RGB(16, 16, 16, 1) }
+-- v3.21 SetBackdrop consolidation (wiki §6.3): inner-card pattern shared by
+-- five section cards (Affix Display, Affix Protection, Auto Actions, Disenchant
+-- card, Manage Ignored launcher card). Slightly darker than the outer frame
+-- so cards visually recede from the surrounding panel.
+local C_CARD_BG   = { 0.04, 0.04, 0.04, 1 }   -- #0a0a0a inner card bg
+local C_CARD_BORDER = { 0.14, 0.14, 0.14, 1 } -- #242424 inner card border
+-- Dark button base used by the custom dropdown trigger and the spinner-input
+-- arrow buttons. Pure-black 1px border + near-black fill on hover-out.
+local C_BTN_BASE_BG = { 0.09, 0.09, 0.09, 1 }
+local C_BTN_BASE_BORDER = { 0, 0, 0, 1 }
 
 -- ============================================================================
 -- Helper Functions
@@ -351,9 +361,9 @@ local function MakeDropdown(parent, width, options, onChange)
 	-- highlight line, teal-tinted border on hover.
 	local btn = CreateFrame("Button", nil, dd)
 	btn:SetAllPoints()
-	btn:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-	btn:SetBackdropColor(0.09, 0.09, 0.09, 1)
-	btn:SetBackdropBorderColor(0, 0, 0, 1)
+	-- v3.21 §6.3: canonical ApplyBackdrop helper. Was three raw SetBackdrop /
+	-- SetBackdropColor / SetBackdropBorderColor calls; same visual result.
+	ApplyBackdrop(btn, C_BTN_BASE_BG, C_BTN_BASE_BORDER)
 	btn:SetFrameStrata(parent:GetFrameStrata() or "DIALOG")
 	btn:SetFrameLevel((parent:GetFrameLevel() or 1) + 5)
 
@@ -1191,6 +1201,10 @@ local headerRow = CreateFrame("Frame", nil, panel)
 headerRow:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, -2)
 headerRow:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT", 0, -2)
 headerRow:SetHeight(PROCESS_HEADER_H)
+-- v3.21 §6.3: kept as raw SetBackdrop intentionally. ApplyBackdrop always sets
+-- a 1px edge file; this Process Bags header band is fill-only (no border) and
+-- abuts the title bar visually. Adding a 1px border would create a visible
+-- seam right under the title bar.
 headerRow:SetBackdrop({ bgFile = WHITE8x8 })
 headerRow:SetBackdropColor(0.10, 0.10, 0.10, 1)
 
@@ -1231,6 +1245,9 @@ local footer = CreateFrame("Frame", nil, panel)
 footer:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 0, 0)
 footer:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 0)
 footer:SetHeight(PROCESS_FOOTER_H)
+-- v3.21 §6.3: kept as raw SetBackdrop intentionally. Fill-only (no border) to
+-- match the headerRow band — together they bracket the scroll area without a
+-- visible 1px seam.
 footer:SetBackdrop({ bgFile = WHITE8x8 })
 footer:SetBackdropColor(0.07, 0.07, 0.07, 1)
 
@@ -2881,9 +2898,8 @@ local function BuildUI(self)
 		local card = CreateFrame("Frame", nil, generalPage)
 		card:SetSize(cardW, cardH)
 		card:SetPoint("TOPLEFT", xOff, -4)
-		card:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-		card:SetBackdropColor(0.04, 0.04, 0.04, 1)    -- #0b0b0b per CSS
-		card:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)  -- #252525 per CSS
+		-- v3.21 §6.3: shared inner-card pattern via ApplyBackdrop + constants.
+		ApplyBackdrop(card, C_CARD_BG, C_CARD_BORDER)
 		return card
 	end
 
@@ -3058,9 +3074,8 @@ local function BuildUI(self)
 		local card = CreateFrame("Frame", nil, goblinPage)
 		card:SetSize(cardW, cardH)
 		card:SetPoint("TOPLEFT", xOff, -4)
-		card:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-		card:SetBackdropColor(0.04, 0.04, 0.04, 1)
-		card:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)
+		-- v3.21 §6.3: shared inner-card pattern via ApplyBackdrop + constants.
+		ApplyBackdrop(card, C_CARD_BG, C_CARD_BORDER)
 		return card
 	end
 
@@ -3187,9 +3202,8 @@ local function BuildUI(self)
 		local card = CreateFrame("Frame", nil, toolsPage)
 		card:SetSize(cardW, cardH)
 		card:SetPoint("TOPLEFT", xOff, -4)
-		card:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-		card:SetBackdropColor(0.04, 0.04, 0.04, 1)
-		card:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)
+		-- v3.21 §6.3: shared inner-card pattern via ApplyBackdrop + constants.
+		ApplyBackdrop(card, C_CARD_BG, C_CARD_BORDER)
 		return card
 	end
 
@@ -3378,9 +3392,8 @@ local function BuildUI(self)
 		local card = CreateFrame("Frame", nil, affixPage)
 		card:SetSize(cardW, cardH)
 		card:SetPoint("TOPLEFT", xOff, -4)
-		card:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-		card:SetBackdropColor(0.04, 0.04, 0.04, 1)
-		card:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)
+		-- v3.21 §6.3: shared inner-card pattern via ApplyBackdrop + constants.
+		ApplyBackdrop(card, C_CARD_BG, C_CARD_BORDER)
 		return card
 	end
 
@@ -4013,9 +4026,8 @@ local function BuildUI(self)
 		local card = CreateFrame("Frame", nil, autoInvPage)
 		card:SetSize(cardW, cardH)
 		card:SetPoint("TOPLEFT", xOff, -4)
-		card:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-		card:SetBackdropColor(0.04, 0.04, 0.04, 1)
-		card:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)
+		-- v3.21 §6.3: shared inner-card pattern via ApplyBackdrop + constants.
+		ApplyBackdrop(card, C_CARD_BG, C_CARD_BORDER)
 		return card
 	end
 
@@ -4040,9 +4052,8 @@ local function BuildUI(self)
 	kwFrame:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 40))
 	kwFrame:SetPoint("TOPRIGHT", aCard1, "TOPRIGHT", -CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 40))
 	kwFrame:SetHeight(20)
-	kwFrame:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-	kwFrame:SetBackdropColor(unpack(C_DROP_BG))
-	kwFrame:SetBackdropBorderColor(unpack(C_DROP_BORDER))
+	-- v3.21 §6.3: ApplyBackdrop helper.
+	ApplyBackdrop(kwFrame, C_DROP_BG, C_DROP_BORDER)
 
 	local kwBox = CreateFrame("EditBox", nil, kwFrame)
 	kwBox:SetFont(FONT, 10, "OUTLINE")
@@ -4773,9 +4784,8 @@ local function BuildUI(self)
 	banner:SetPoint("TOPLEFT", self, "TOPLEFT", 15, yOff)
 	banner:SetPoint("TOPRIGHT", self, "TOPRIGHT", -15, yOff)
 	banner:SetHeight(BANNER_H)
-	banner:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-	banner:SetBackdropColor(unpack(C_BG))                     -- black to match the panel
-	banner:SetBackdropBorderColor(unpack(C_HOVER))            -- mage blue accent
+	-- v3.21 §6.3: ApplyBackdrop helper. Black to match the panel + mage blue accent border.
+	ApplyBackdrop(banner, C_BG, C_HOVER)
 	local bannerIcon = banner:CreateFontString(nil, "OVERLAY")
 	bannerIcon:SetFont(FONT, 12, "OUTLINE")
 	bannerIcon:SetPoint("LEFT", banner, "LEFT", 8, 0)
@@ -4837,9 +4847,9 @@ local function BuildUI(self)
 	scanRightCard:SetHeight(scanCardH)
 	scanRightCard:SetPoint("TOPLEFT", scanBox, "TOPLEFT", 1, -1)
 	scanRightCard:SetPoint("TOPRIGHT", scanBox, "TOPRIGHT", -1, -1)
-	scanRightCard:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-	scanRightCard:SetBackdropColor(0.03, 0.03, 0.03, 1)  -- #080808
-	scanRightCard:SetBackdropBorderColor(0.14, 0.14, 0.14, 1)  -- #232323
+	-- v3.21 §6.3: ApplyBackdrop helper. Slightly darker than C_CARD_BG (#080808 vs
+	-- #0a0a0a) so the Scan Speed dropdown reads as a recessed sub-card.
+	ApplyBackdrop(scanRightCard, { 0.03, 0.03, 0.03, 1 }, C_CARD_BORDER)
 
 	-- Equal-width tabs filling the card horizontally, vertically centered
 	local TAB_GAP = 6
@@ -5047,9 +5057,9 @@ local function BuildUI(self)
 	itemNameHeader:SetPoint("TOPLEFT", 1, -40)
 	itemNameHeader:SetPoint("TOPRIGHT", -1, -40)
 	itemNameHeader:SetHeight(22)
-	itemNameHeader:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-	itemNameHeader:SetBackdropColor(0.063, 0.063, 0.063, 1)  -- #101010 (slightly lighter than listBox)
-	itemNameHeader:SetBackdropBorderColor(0.15, 0.15, 0.15, 1)  -- #262626, matches listBox
+	-- v3.21 §6.3: ApplyBackdrop helper. Slightly lighter than the listBox below
+	-- so the column header reads as a header band.
+	ApplyBackdrop(itemNameHeader, { 0.063, 0.063, 0.063, 1 }, { 0.15, 0.15, 0.15, 1 })
 	local itemNameLabel = MakeText(itemNameHeader, 10, C_TEXT, "OUTLINE")
 	itemNameLabel:SetPoint("LEFT", 10, 0)
 	itemNameLabel:SetText("Item Name")
@@ -5079,9 +5089,9 @@ local function BuildUI(self)
 	local listBox = CreateFrame("Frame", nil, manageBox)
 	listBox:SetPoint("TOPLEFT", 1, -62)                                    -- below header (40) + header height (22)
 	listBox:SetPoint("BOTTOMRIGHT", -1, 36)                                -- reserve 36px at bottom for pagination
-	listBox:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-	listBox:SetBackdropColor(0.035, 0.035, 0.035, 1)  -- #090909
-	listBox:SetBackdropBorderColor(0.15, 0.15, 0.15, 1)  -- #262626
+	-- v3.21 §6.3: ApplyBackdrop helper. Matches the column-header border so
+	-- the list reads as a single bordered region.
+	ApplyBackdrop(listBox, { 0.035, 0.035, 0.035, 1 }, { 0.15, 0.15, 0.15, 1 })
 	self._listBox = listBox
 
 	emptyText = MakeText(listBox, 9, C_DIM, "OUTLINE")
@@ -5331,10 +5341,8 @@ local function BuildUI(self)
 		local btn = CreateFrame("Button", nil, pagingFrame)
 		btn:SetSize(w or 28, 22)
 
-		-- Base backdrop: near-black bg, pure-black 1px border
-		btn:SetBackdrop({ bgFile = WHITE8x8, edgeFile = WHITE8x8, edgeSize = 1 })
-		btn:SetBackdropColor(0.09, 0.09, 0.09, 1)
-		btn:SetBackdropBorderColor(0, 0, 0, 1)
+		-- v3.21 §6.3: ApplyBackdrop helper. Near-black bg + pure-black 1px border.
+		ApplyBackdrop(btn, C_BTN_BASE_BG, C_BTN_BASE_BORDER)
 
 		-- Thin top highlight line
 		local gloss = btn:CreateTexture(nil, "OVERLAY")

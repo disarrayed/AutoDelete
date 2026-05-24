@@ -5942,7 +5942,10 @@ function _G.AutoDelete_IsMillable_IgnoringKeep(profile, bag, slot)
 	if not count or count < 5 then return false end
 	local name, _, _, _, _, itemType, itemSubType = GetItemInfo(link)
 	if not name then return false end
-	-- Herb classification via localized strings. TODO: localize for non-enUS.
+	-- Herb classification via the localized "Trade Goods / Herb" subtype.
+	-- NOTE: enUS-only by design. Project Ebonhold is English. If AutoDelete
+	-- is ever ported to another locale fork, swap to numeric item subclass
+	-- IDs (3.3.5a Trade Goods herbs = LE_ITEM_TRADE_GOODS_HERB).
 	if itemType ~= "Trade Goods" then return false end
 	if itemSubType ~= "Herb" then return false end
 	return true
@@ -6122,7 +6125,8 @@ function _G.AutoDelete_IsProspectable_IgnoringKeep(profile, bag, slot)
 	if not name then return false end
 	if itemType ~= "Trade Goods" then return false end
 	-- "Metal & Stone" is the localized enUS string for the ore subtype.
-	-- TODO: localize for non-enUS.
+	-- NOTE: enUS-only by design. PE is English. For a non-English port,
+	-- use numeric item subclass IDs (Trade Goods Metal & Stone = LE_ITEM_TRADE_GOODS_METAL_STONE).
 	if itemSubType ~= "Metal & Stone" then return false end
 	return true
 end
