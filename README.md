@@ -34,8 +34,12 @@ Quest items are protected from every auto-rule, regardless of list state.
 
 **Lists**
 - Drag-and-drop or shift-click to add items
-- Per-character lists with profile copy and import
+- Per-character lists with profile copy
 - Built-in search and raw view
+- **Import Raw** (Profile tab): paste item names or links into a popup, then pick Delete, Sell, or Keep. Bulk-loads a list from text in one go.
+- **Import Lists** (Profile tab): copy lists from a known item-name catalog
+- **Export Raw** (Profile tab): dumps any list as plain text for sharing or backup. Pre-selected on open so Ctrl+C grabs it.
+- **Manage Ignored Items** (Filters tab): view and clear the per-item skip list that builds up when you accept Keep-override popups
 
 **ElvUI bag buttons**
 - Three buttons next to your bag frame: Delete, Sell, Keep
@@ -48,21 +52,34 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 - BoP (bind-on-pickup gear)
 - BoE Weapons (bind-on-equip weapon-slot items, priority over BoE Armor)
 
-**Quality actions** (General tab)
-- Auto-Delete junk (gray)
-- Auto-Delete common (white gear)
-- Auto-Sell greens (uncommon gear)
+**Auto Actions** (Filters tab)
+- Per-quality Del / Sell pills for Junk, Common, and Greens
+- Click a pill to light it red (delete) or blue (sell). Click again to turn it off.
+- Greens defaults to off. Green gear stays in bags unless you opt in.
+- Cosmetic slots (shirts, tabards) and quest items are always protected
+
+**Affix Protection** (Affix tab)
+- Skip Auto-Delete and Auto-Sell for items carrying Project Ebonhold's affix marker
+- Optional minimum iLvl floor so low-iLvl affix junk can still be cleared
+- "Audit Lists" button scans your Delete / Sell lists for items the filter would now save
+- "Scan Learned Affixes" opens a scrollable window of every PE affix you've learned, grouped by tier
+- **Affix Collection Mode** (`/del collection`): only show the affix dot on items whose affixes you haven't learned yet. Helps you spot fresh affixes worth keeping.
 
 **Companion management**
 - Auto-summon Greedy Scavenger and Goblin Merchant
 - Mount-aware dismiss and re-summon
 - Stuck detection via loot-event tracking
+- Three-state Goblin defer: won't summon until AutoDelete has had a chance to clear bags
 
-**One-Key Disenchant** (Tools tab)
-- Bind a key in Key Bindings → AutoDelete → "Disenchant next BoP item"
-- Each press casts Disenchant on the next eligible BoP item in your bags
-- Optional toggle to include Rare (blue) gear
-- Status line shows the next target, or "Requires Enchanting" if the character can't disenchant
+**One-Key actions** (Keybinds tab)
+- Bind a key to any of: Disenchant, Mill, Prospect, or Open a container
+- Each press acts on the next eligible item in your bags
+- Status line per row shows the next target, or "Requires <profession>" if the character can't perform the action
+- Per-action Filters button to tune what each one targets
+
+**Process Bags panel** (`/del process`)
+- Standalone window showing what AutoDelete would do to each bag slot
+- Inspect what's about to happen before it does
 
 **Quality of life**
 - Bags stay open when the vendor closes
@@ -90,6 +107,12 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 /del clean         Remove duplicates across Delete and Sell lists
 /del sell          Force a sell pass at the current vendor
 /del setup         Reopen the welcome popup
+/del process       Open the Process Bags inspection window
+/del collection    Toggle Affix Collection Mode (show only unlearned affixes)
+/del debug         Toggle the auto-sell / auto-delete debug trace
+/del bench         Run a loot-burst performance benchmark (diagnostic)
+/del spike         Capture frame-level performance spikes (diagnostic)
+/del goblin        Show the auto-summon decision state (diagnostic)
 /autodelete        Alias for /del
 ```
 
@@ -97,10 +120,14 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 
 ## 🙏 Credits
 
-Feature ideas suggested by the community.
+Feature ideas and patterns from the community.
 
-- **Affix Protection** (Tools tab) — suggested by Biboup! [SBTL] on 5/13/26 at 4:23 PM:
+- **Affix Protection**, suggested by Biboup! [SBTL] on 5/13/26 at 4:23 PM:
   > Would it be possible to have an option to not delete items with affix or that's hard to do ?
+- **Delete queue throttle pattern**, adapted from [Qloot](https://github.com/mmobrain/Qloot) by **Skulltrail**. AutoDelete v3.20 uses the same OnUpdate-drained queue approach to spread bag-delete API costs across frames instead of bursting them.
+- **Performance feedback and Qloot pointer.** **Xurkon** flagged the delete-burst stutter on PE Discord and pointed at Qloot's throttle implementation.
+- **Auto-Sell options for Junk and Common** (Filters tab), suggested by Sanavesa on 5/21/26 at 8:48 AM:
+  > thanks for this addon. is it possible to add auto-sell junk/common? currently i see there is auto-delete options
 
 ---
 
@@ -118,7 +145,7 @@ Got good ideas? Use 'em anytime. Thanks for the shoutouts!
 
 An attempt to auto-open lootable containers (clams, crates, mysterious eggs, etc.) on bag update shipped in development but was removed before the public release.
 
-WoW 3.3.5a flags `UseContainerItem` as a protected function for many container types. When called from an addon scan or event handler — rather than from a real player click or keypress — the client rejects the call and fires `ADDON_ACTION_BLOCKED`. This is documented Blizzard behavior, not a server modification, and it affects every addon that attempts the same approach. The supported workaround is a secure button bound to a user keybind or macro, which is a manual interaction rather than a true automatic open.
+WoW 3.3.5a flags `UseContainerItem` as a protected function for many container types. When called from an addon scan or event handler (rather than from a real player click or keypress) the client rejects the call and fires `ADDON_ACTION_BLOCKED`. This is documented Blizzard behavior, not a server modification, and it affects every addon that attempts the same approach. The supported workaround is a secure button bound to a user keybind or macro, which is a manual interaction rather than a true automatic open.
 
 We may revisit this as a keybind-driven feature in a future release. Until then, containers that don't respond to automatic opens must be right-clicked manually.
 
