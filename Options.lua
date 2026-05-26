@@ -1842,7 +1842,7 @@ bodyFS:SetJustifyH("LEFT")
 bodyFS:SetJustifyV("TOP")
 bodyFS:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
 -- Fixed width so the FontString wraps cleanly within the scroll child.
--- Per CLAUDE.md FontString rule §10.9: width MUST come from SetWidth(N),
+-- Per AGENTS.md FontString rule §10.9: width MUST come from SetWidth(N),
 -- never from a RIGHT-anchor SetPoint. SetWordWrap + SetNonSpaceWrap
 -- explicit per the same rule.
 local CONTENT_FS_W = POPUP_W - BODY_PAD_X - SCROLLBAR_W
