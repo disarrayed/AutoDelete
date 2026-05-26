@@ -1751,7 +1751,13 @@ local function Trim(s)
 	return (string.gsub(string.gsub(tostring(s or ""), "^%s+", ""), "%s+$", ""))
 end
 
-local function Normalize(s) return string.lower(Trim(s)) end
+local function Normalize(s)
+	-- Project Ebonhold can surface apostrophes differently between its
+	-- learned-affix table and item names (for example Val'anyr vs
+	-- Val\'anyr). Canonicalize the backslash-escaped form before using
+	-- strings as lookup keys or suffix-match operands.
+	return (string.gsub(string.lower(Trim(s)), "\\'", "'"))
+end
 
 local function GetItemIDFromLink(link)
 	if not link then return nil end
@@ -3538,6 +3544,7 @@ end
 -- State lives on _G to keep the main chunk under Lua 5.1's 200-local
 -- cap (we've already had to globalize a lot for this reason).
 _G.AutoDelete_OwnedAffixes = _G.AutoDelete_OwnedAffixes or {}
+_G.AutoDelete_KnownAffixes = _G.AutoDelete_KnownAffixes or {}
 
 -- Mirror of PE's AFFIX_ALIASES table at extraction.lua:129. PE's
 -- internal spell names don't always match the names that appear in
@@ -3551,8 +3558,8 @@ _G.AutoDelete_OwnedAffixes = _G.AutoDelete_OwnedAffixes or {}
 -- KEEP THIS TABLE IN SYNC with PE's extraction.lua AFFIX_ALIASES.
 -- If PE adds/changes an alias, add/change it here too. The table is
 -- small and stable (6 entries as of PE 2026-05-20), so mirroring is
--- cheaper than RPC into PE's file-local. Documented in
--- D:\Claude\Addons\AutoDelete\CLAUDE.md PE-integration table.
+-- cheaper than RPC into PE's file-local. Documented in the local
+-- AGENTS.md PE-integration table.
 local AUTODELETE_AFFIX_ALIASES = {
 	["cold"]            = "precision",
 	["enduring flesh"]  = "ironhide",
@@ -3569,13 +3576,17 @@ local AUTODELETE_AFFIX_ALIASES = {
 -- affixes mirrored, useful for a debug print.
 function AutoDelete_RefreshOwnedAffixes()
 	local map = {}
+	local known = {}
 	local count = 0
 	if _G.ExtractionService and _G.ExtractionService.learnedAffixes then
 		for _, entry in ipairs(_G.ExtractionService.learnedAffixes) do
-			if entry and entry.learned and entry.name then
-				local lname = entry.name:lower()
-				map[lname] = true
-				count = count + 1
+			if entry and entry.name then
+				local lname = Normalize(entry.name)
+				known[lname] = true
+				if entry.learned then
+					map[lname] = true
+					count = count + 1
+				end
 				-- Alias expansion: if PE renames this spell for item
 				-- naming purposes, also store the renamed form so the
 				-- suffix-match check at AutoDelete_IsAffixOwnedByItemName
@@ -3585,16 +3596,22 @@ function AutoDelete_RefreshOwnedAffixes()
 				local roman = lname:match("%s+([iv]+)$")
 				local alias = AUTODELETE_AFFIX_ALIASES[base]
 				if alias then
+					local aliasName
 					if roman then
-						map[alias .. " " .. roman] = true
+						aliasName = alias .. " " .. roman
 					else
-						map[alias] = true
+						aliasName = alias
+					end
+					known[aliasName] = true
+					if entry.learned then
+						map[aliasName] = true
 					end
 				end
 			end
 		end
 	end
 	_G.AutoDelete_OwnedAffixes = map
+	_G.AutoDelete_KnownAffixes = known
 	if _G.AutoDelete_DebugSell then
 		print(string.format(
 			"|cffff8000[AutoDelete DEBUG]|r owned-affix map rebuilt: %d learned affixes mirrored (alias expansion included).",
@@ -3634,12 +3651,11 @@ function AutoDelete_InstallPEAffixHook()
 	hooksecurefunc(_G.ExtractionUI, "OnLearnedAffixesReceived", function()
 		-- PE just rebuilt learnedAffixes. Mirror it now.
 		AutoDelete_RefreshOwnedAffixes()
-		-- Only repaint dots if collection mode is active. When OFF, dot
-		-- color is purely tier-based and an ownership refresh changes
-		-- nothing visible -- skipping the repaint avoids a no-op walk
-		-- across every visible bag slot + a B:UpdateAllBagSlots() call
-		-- on ElvUI.
-		if cachedProfile and cachedProfile.affixCollectionMode then
+		-- Missing-affix gold is visible even when collection mode is off,
+		-- so any ownership refresh can change dots: recognized missing
+		-- affixes turn gold, newly learned affixes return to tier color or
+		-- hide if Only Missing is on.
+		if cachedProfile and cachedProfile.showAffixDot ~= false then
 			if _G.AutoDelete_RefreshAffixDots then
 				_G.AutoDelete_RefreshAffixDots()
 			end
@@ -3649,6 +3665,7 @@ function AutoDelete_InstallPEAffixHook()
 		end
 	end)
 	_G.AutoDelete_PEAffixHookInstalled = true
+
 	if _G.AutoDelete_DebugSell then
 		print("|cffff8000[AutoDelete DEBUG]|r installed ExtractionUI.OnLearnedAffixesReceived hook.")
 	end
@@ -3668,7 +3685,7 @@ function AutoDelete_IsAffixOwnedByItemName(itemName)
 	if not _G.ExtractionService or not _G.ExtractionService.learnedAffixes then
 		return nil
 	end
-	local lower = itemName:lower()
+	local lower = Normalize(itemName)
 	for affixName in pairs(_G.AutoDelete_OwnedAffixes) do
 		-- Item names follow "<base item> of <affix name>" so the affix
 		-- name appears as a suffix preceded by " of ". Match against the
@@ -4165,23 +4182,32 @@ function AutoDelete_SetButtonAffixDot(button, affixLevel, colorOverride)
 		local color = colorOverride
 			or AFFIX_DOT_COLORS[affixLevel]
 			or AFFIX_DOT_COLORS[1]
-		-- Backing first (lower sublevel = drawn underneath the colored dot).
+		-- Backing goes on ARTWORK, not OVERLAY. WoW 3.3.5 clients do not
+		-- reliably honor texture sublevels the way modern clients do, so a
+		-- black backing created on the same draw layer can sometimes sit on
+		-- top of the colored dot. Wellspring V exposed this as a plain black
+		-- dot: classification found tier 5, but the orange texture was hidden
+		-- behind the backing. Keep the ring below the dot by using separate
+		-- draw layers and re-assert them for already-created textures.
 		if not back then
-			back = button:CreateTexture(nil, "OVERLAY", nil, 1)
+			back = button:CreateTexture(nil, "ARTWORK")
 			back:SetTexture(AFFIX_DOT_TEXTURE)
 			back:SetSize(AFFIX_DOT_BACKING_SIZE, AFFIX_DOT_BACKING_SIZE)
 			back:SetPoint("BOTTOMLEFT", 0, 0)
-			back:SetVertexColor(0, 0, 0, 1)
 			button._autoDeleteAffixBacking = back
 		end
+		if back.SetDrawLayer then back:SetDrawLayer("ARTWORK") end
+		back:SetVertexColor(0, 0, 0, 1)
 		back:Show()
-		-- Colored dot on top. We re-apply SetVertexColor on every call (not
-		-- just on first creation) because the same button can be reused
-		-- across items of different affix levels as the player moves items
-		-- between slots; the dot must recolor immediately, not wait for a
-		-- frame teardown.
+		-- Colored dot on top. Use OVERLAY while the backing stays ARTWORK;
+		-- this is more reliable on 3.3.5 than relying on the 4th
+		-- CreateTexture sublevel argument. We re-apply SetVertexColor on
+		-- every call (not just on first creation) because the same button can
+		-- be reused across items of different affix levels as the player moves
+		-- items between slots; the dot must recolor immediately, not wait for
+		-- a frame teardown.
 		if not dot then
-			dot = button:CreateTexture(nil, "OVERLAY", nil, 2)
+			dot = button:CreateTexture(nil, "OVERLAY")
 			dot:SetTexture(AFFIX_DOT_TEXTURE)
 			dot:SetSize(AFFIX_DOT_SIZE, AFFIX_DOT_SIZE)
 			-- Offset 2 px from BOTTOMLEFT keeps the 9 px dot centered in
@@ -4189,6 +4215,7 @@ function AutoDelete_SetButtonAffixDot(button, affixLevel, colorOverride)
 			dot:SetPoint("BOTTOMLEFT", 2, 2)
 			button._autoDeleteAffixDot = dot
 		end
+		if dot.SetDrawLayer then dot:SetDrawLayer("OVERLAY") end
 		dot:SetVertexColor(color[1], color[2], color[3], 1)
 		dot:Show()
 	else
@@ -4215,8 +4242,9 @@ local affixDotVersion = 0
 --
 -- Decision tree:
 --   no marker / showAffixDot off       -> (false, nil)  hide
---   affixCollectionMode OFF            -> (tier, nil)   tier color
---   collection ON, PE data unknown     -> (tier, nil)   fall back to tier
+--   PE data unknown                    -> (tier, nil)   tier color
+--   collection OFF, affix is owned     -> (tier, nil)   tier color
+--   collection OFF, affix is missing   -> (tier, GOLD)  gold "you need this"
 --   collection ON, affix is owned      -> (false, nil)  hide (dup)
 --   collection ON, affix is missing    -> (tier, GOLD)  gold "you need this"
 --
@@ -4234,22 +4262,23 @@ _G.AutoDelete_DecideDot = function(link, bag, slot, button)
 	local tier = ClassifyAffixByLink(link, bag, slot, button)
 	if not tier then return false, nil end
 
-	if not (cachedProfile and cachedProfile.affixCollectionMode) then
-		return tier, nil
-	end
-
-	-- Collection mode is ON. Check ownership against PE's data.
+	-- If PE ownership data is available, missing affixes should always
+	-- use the gold attention dot. "Only missing affixes" only changes
+	-- what happens to owned affixes: hide them instead of tier-coloring
+	-- them. If PE data is not ready yet, keep the tier color so dots do
+	-- not silently disappear during PE's startup window.
 	local itemName = GetItemInfo(link)
 	local owned = AutoDelete_IsAffixOwnedByItemName(itemName)
 	if owned == nil then
-		-- PE data not observed yet; fall back to non-collection behavior
-		-- so dots aren't silently hidden during PE's startup window.
 		return tier, nil
 	end
 	if owned then
-		-- User already has this affix at this tier; suppress dot so
-		-- duplicates blend with regular sell/delete-eligible items.
-		return false, nil
+		if cachedProfile and cachedProfile.affixCollectionMode then
+			-- User already has this affix at this tier; suppress dot so
+			-- duplicates blend with regular sell/delete-eligible items.
+			return false, nil
+		end
+		return tier, nil
 	end
 	-- Missing affix -> gold "attention" dot regardless of tier.
 	return tier, AFFIX_GOLD
@@ -7112,7 +7141,7 @@ local function ShowWelcomePopup()
 	-- Canonical design tokens (mirrored from Options.lua's local C_* constants
 	-- because this file can't see those locals). Keep these values in sync
 	-- with Options.lua if the design system ever shifts. Documented in
-	-- D:\Claude\Addons\AutoDelete\CLAUDE.md PE-integration / design table.
+	-- the local AGENTS.md PE-integration / design table.
 	local C_BG       = { 5/255,  5/255,  5/255, 1 }     -- #050505 panel bg
 	local C_BORDER   = { 0.16, 0.16, 0.16, 1 }          -- #2a2a2a outer border
 	local C_TITLEBAR = { 16/255, 16/255, 16/255, 1 }    -- #101010 title bar bg

@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.20.2] - 2026-05-26
+
+### Fixed
+
+- **Fixed an affix dot bug.** Some affix items could show as a black dot.
+- **Unlearned affixes now show the gold dot.** This works even when "Only missing affixes" is turned off.
+- **Val'anyr now works correctly.** AutoDelete now matches both ways the name can appear.
+
+### Notes
+
+- **Clean install recommended.** If you have v3.20.1 installed, delete your existing `Interface\AddOns\AutoDelete` folder before extracting v3.20.2. The new folder must be named exactly `AutoDelete`. Fully restart WoW after extracting, `/reload` is not enough.
+
 ## [3.20.1] - 2026-05-24
 
 ### Fixed
