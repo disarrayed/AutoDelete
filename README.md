@@ -4,11 +4,9 @@
 
 WoW 3.3.5a inventory manager for Project Ebonhold. Mark items to **Delete**, **Sell**, or **Keep**. Every automatic feature is opt-in.
 
-<p>
-  <a href="https://github.com/disarrayed/AutoDelete/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/disarrayed/AutoDelete?style=for-the-badge&color=ff8000"></a>
-  <a href="https://github.com/disarrayed/AutoDelete/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/disarrayed/AutoDelete/total.svg?label=downloads&style=for-the-badge&color=ff8000"></a>
-  <img alt="Project Ebonhold 3.3.5a" src="https://img.shields.io/badge/Project%20Ebonhold-3.3.5a-e6cc80?style=for-the-badge">
-</p>
+[![Latest release](https://img.shields.io/github/v/release/disarrayed/AutoDelete.svg?style=for-the-badge&color=ff8000)](https://github.com/disarrayed/AutoDelete/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/disarrayed/AutoDelete/total.svg?label=downloads&style=for-the-badge&color=ff8000)](https://github.com/disarrayed/AutoDelete/releases)
+![Project Ebonhold 3.3.5a](https://img.shields.io/badge/Project%20Ebonhold-3.3.5a-e6cc80.svg?style=for-the-badge)
 
 [**Download**](https://github.com/disarrayed/AutoDelete/releases/latest) · [**Source**](https://github.com/disarrayed/AutoDelete)
 
