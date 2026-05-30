@@ -935,7 +935,12 @@ local function Trim(s)
 	-- Parens truncate gsub's multi-return (string + count) to just the string.
 	return (string.gsub(string.gsub(tostring(s or ""), "^%s+", ""), "%s+$", ""))
 end
-local function Normalize(s) return string.lower(Trim(s)) end
+local function Normalize(s)
+	if _G.AutoDelete_NormalizeTextKey then
+		return _G.AutoDelete_NormalizeTextKey(s)
+	end
+	return string.lower(Trim(s))
+end
 local function GetItemIDFromLink(link)
 	if not link then return nil end
 	return tonumber(string.match(link, "item:(%d+)"))
@@ -1396,9 +1401,17 @@ local function GetOrCreateRow(i)
 			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 			GameTooltip:SetHyperlink(self._entry.link)
 			GameTooltip:AddLine(" ", 1, 1, 1)
+			if (self._entry.count or 1) > 1 then
+				GameTooltip:AddLine("|cffffd200" .. tostring(self._entry.count) .. " matching copies|r share this item ID.",
+					C_DIM[1], C_DIM[2], C_DIM[3], true)
+				if self._entry.variantNames then
+					GameTooltip:AddLine("Affix names may differ, but Process Bags groups them by item ID to limit spam.",
+						C_DIM[1], C_DIM[2], C_DIM[3], true)
+				end
+			end
 			GameTooltip:AddLine("|cff00ff00Left-click|r to arm this item for the action's keybind.",
 				C_DIM[1], C_DIM[2], C_DIM[3], true)
-			GameTooltip:AddLine("|cffff8000Right-click|r to ignore this item on this character.",
+			GameTooltip:AddLine("|cffff8000Right-click|r for Keep, Sell, Delete, Ignore for Process, or Why.",
 				C_DIM[1], C_DIM[2], C_DIM[3], true)
 			GameTooltip:Show()
 		end
@@ -1408,18 +1421,15 @@ local function GetOrCreateRow(i)
 		GameTooltip:Hide()
 	end)
 
-	-- Click dispatch. Left arms, right ignores. The button-arg form
+	-- Click dispatch. Left arms, right opens the item quick action menu. The button-arg form
 	-- (RegisterForClicks("LeftButtonUp", "RightButtonUp") + OnClick
 	-- receives the button name) is the Postal/Bagnon idiom.
 	row:SetScript("OnClick", function(self, mouseButton)
 		local entry = self._entry
 		if not entry then return end
 		if mouseButton == "RightButton" then
-			if _G.AutoDelete_SetProcessIgnored then
-				_G.AutoDelete_SetProcessIgnored(entry.itemId, true)
-			end
-			if _G.AutoDelete_RefreshProcessPanel then
-				_G.AutoDelete_RefreshProcessPanel()
+			if _G.AutoDelete_ShowItemQuickMenu then
+				_G.AutoDelete_ShowItemQuickMenu(entry, self)
 			end
 			return
 		end
@@ -1481,7 +1491,11 @@ local function RefreshProcessPanel()
 			-- Item icon. GetItemInfo's 10th return is the texture path.
 			local _, _, _, _, _, _, _, _, _, texture = GetItemInfo(entry.link)
 			row.icon:SetTexture(texture or "Interface\\Icons\\INV_Misc_QuestionMark")
-			row.nameText:SetText(entry.link)
+			if (entry.count or 1) > 1 then
+				row.nameText:SetText(entry.link .. " |cff737373x" .. tostring(entry.count) .. "|r")
+			else
+				row.nameText:SetText(entry.link)
+			end
 			local meta = actionsTable[entry.action]
 			if meta then
 				row.actionTag:SetText(meta.label)
@@ -1512,9 +1526,21 @@ local function RefreshProcessPanel()
 		end
 	end
 	if ignoredCount > 0 then
-		footerCount:SetText(total .. " items, " .. ignoredCount .. " ignored")
+		local copies = 0
+		for _, entry in ipairs(results) do copies = copies + (entry.count or 1) end
+		if copies > total then
+			footerCount:SetText(total .. " rows (" .. copies .. " copies), " .. ignoredCount .. " ignored")
+		else
+			footerCount:SetText(total .. " items, " .. ignoredCount .. " ignored")
+		end
 	else
-		footerCount:SetText(total .. " items")
+		local copies = 0
+		for _, entry in ipairs(results) do copies = copies + (entry.count or 1) end
+		if copies > total then
+			footerCount:SetText(total .. " rows (" .. copies .. " copies)")
+		else
+			footerCount:SetText(total .. " items")
+		end
 	end
 end
 
@@ -2309,6 +2335,7 @@ local function MakeRawPopup(globalName, titleText, w, h)
 	local title = MakeText(tb, 12, C_TITLE, "OUTLINE")
 	title:SetPoint("LEFT", tb, "LEFT", 10, 0)
 	title:SetText(titleText)
+	p._titleText = title
 	local x = CreateFrame("Button", nil, tb)
 	x:SetSize(24, 24)
 	x:SetPoint("TOPRIGHT", tb, "TOPRIGHT", 0, 0)
@@ -2688,6 +2715,278 @@ end
 end  -- end of Spike Report Popup `do` block
 
 -- ============================================================================
+-- General Report popup
+-- ============================================================================
+-- Copyable report surface for /del report and item Why? reports. Mirrors the Spike
+-- Report popup: plain text, pre-selected, no local paths or process docs.
+
+do
+
+local POPUP_W = 640
+local POPUP_H = 430
+local TITLE_H = 24
+local PAD_X   = 10
+
+local popup = MakeRawPopup("AutoDeleteReportPopup", "AutoDelete Report", POPUP_W, POPUP_H)
+
+local hint = MakeText(popup, 10, C_DIM, "OUTLINE")
+hint:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8))
+hint:SetWidth(POPUP_W - PAD_X * 2)
+hint:SetJustifyH("LEFT")
+hint:SetWordWrap(true)
+hint:SetNonSpaceWrap(false)
+hint:SetText("Report text is pre-selected. Press Ctrl+C to copy.")
+
+local txtHolder = CreateFrame("Frame", nil, popup)
+txtHolder:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8 + 18))
+txtHolder:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 8 + 18))
+txtHolder:SetHeight(POPUP_H - TITLE_H - 8 - 18 - 12)
+ApplyBackdrop(txtHolder, C_DROP_BG, C_DROP_BORDER)
+
+local txtScroll = CreateFrame("ScrollFrame", nil, txtHolder)
+txtScroll:SetPoint("TOPLEFT", 4, -4)
+txtScroll:SetPoint("BOTTOMRIGHT", -4, 4)
+
+local txtEdit = CreateFrame("EditBox", nil, txtScroll)
+txtEdit:SetMultiLine(true)
+txtEdit:SetAutoFocus(false)
+txtEdit:EnableMouse(true)
+txtEdit:EnableKeyboard(true)
+txtEdit:SetFont(FONT, 10, "OUTLINE")
+txtEdit:SetTextColor(unpack(C_TEXT))
+txtEdit:SetWidth(POPUP_W - PAD_X * 2 - 8)
+txtScroll:SetScrollChild(txtEdit)
+txtEdit:SetScript("OnEscapePressed", function(eb) eb:ClearFocus() end)
+txtEdit:SetScript("OnTextChanged", function(eb)
+	if eb._suppress then return end
+	eb._suppress = true
+	eb:SetText(eb._stash or "")
+	eb._suppress = false
+end)
+
+txtHolder:EnableMouse(true)
+txtHolder:SetScript("OnMouseDown", function() txtEdit:SetFocus() end)
+txtScroll:EnableMouseWheel(true)
+txtScroll:SetScript("OnMouseWheel", function(sf, delta)
+	local v = math.max(0, math.min(sf:GetVerticalScrollRange(),
+		sf:GetVerticalScroll() - delta * 30))
+	sf:SetVerticalScroll(v)
+end)
+
+local function FillWith(text)
+	txtEdit._suppress = true
+	txtEdit._stash = text or ""
+	txtEdit:SetText(text or "")
+	txtEdit._suppress = false
+	txtEdit:SetFocus()
+	txtEdit:HighlightText()
+end
+
+popup:SetScript("OnShow", function(self)
+	if not self._everShown then
+		self:ClearAllPoints()
+		self:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+		self._everShown = true
+	end
+end)
+
+function _G.AutoDelete_ShowReportWindow(text, title)
+	if popup._titleText then
+		popup._titleText:SetText(title or "AutoDelete Report")
+	end
+	FillWith(text)
+	popup:Show()
+end
+
+end  -- end of General Report Popup `do` block
+
+-- ============================================================================
+-- Help Topic popup
+-- ============================================================================
+-- Dedicated readable help surface. Unlike report popups, this is formatted:
+-- topic title, colored section headers, body copy, and separators.
+
+local HELP_ACTION = { 0.18, 0.62, 0.95, 1 } -- blue: what to click or change
+local HELP_CHECK  = { 0.26, 0.86, 0.36, 1 } -- green: what to verify
+local HELP_SAFE   = { 0.95, 0.30, 0.30, 1 } -- red: risk or caution
+local HELP_INFO   = { 0.75, 0.75, 0.75, 1 } -- neutral: reference facts
+
+local HELP_CODES = {
+	action = "|cff2e9ef2",
+	check = "|cff42db5c",
+	safety = "|cfff24d4d",
+	info = "|cffbfbfbf",
+}
+
+local function HelpColor(kind)
+	if kind == "action" then return HELP_ACTION end
+	if kind == "check" then return HELP_CHECK end
+	if kind == "safety" then return HELP_SAFE end
+	return HELP_INFO
+end
+
+local function HelpTag(kind)
+	if kind == "action" then return HELP_CODES.action .. "Use:|r " end
+	if kind == "check" then return HELP_CODES.check .. "Check:|r " end
+	if kind == "safety" then return HELP_CODES.safety .. "Careful:|r " end
+	return HELP_CODES.info .. "Note:|r "
+end
+
+local function HelpKind(section)
+	if section and section.kind then return section.kind end
+	local heading = string.lower((section and section.heading) or "")
+	local body = string.lower((section and section.body) or "")
+	if heading:find("care", 1, true) or heading:find("safe", 1, true) or heading:find("wrong", 1, true)
+		or heading:find("normal right", 1, true) or body:find("that is a bug", 1, true)
+		or body:find("risky", 1, true) or body:find("with care", 1, true) then
+		return "safety"
+	end
+	if heading:find("check", 1, true) or heading:find("watch", 1, true) or heading:find("verify", 1, true)
+		or heading:find("read", 1, true) or heading:find("review", 1, true)
+		or heading:find("audit", 1, true) or heading:find("requirements", 1, true)
+		or heading:find("dot", 1, true) or heading:find("totals", 1, true)
+		or heading:find("next target", 1, true) then
+		return "check"
+	end
+	if heading:find("use", 1, true) or heading:find("set", 1, true) or heading:find("open", 1, true)
+		or heading:find("protect", 1, true) or heading:find("summon", 1, true)
+		or heading:find("choose", 1, true) or heading:find("enable", 1, true)
+		or heading:find("bind", 1, true) or heading:find("adjust", 1, true)
+		or heading:find("pick", 1, true) or heading:find("copy", 1, true)
+		or heading:find("import", 1, true) or heading:find("drag", 1, true)
+		or heading:find("left%-click") or heading:find("right%-click")
+		or heading:find("tune", 1, true) then
+		return "action"
+	end
+	return "info"
+end
+
+function _G.AutoDelete_ShowHelpTopicWindow(titleText, sections)
+	if not _G.AutoDeleteHelpTopicPopup then
+		local POPUP_W = 470
+		local POPUP_H = 390
+		local TITLE_H = 24
+		local PAD_X   = 12
+		local popup = MakeRawPopup("AutoDeleteHelpTopicPopup", "AutoDelete Help", POPUP_W, POPUP_H)
+
+		local topicTitle = MakeText(popup, 14, C_ACCENT, "OUTLINE")
+		topicTitle:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 10))
+		topicTitle:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 10))
+		topicTitle:SetJustifyH("LEFT")
+		topicTitle:SetText("Help")
+		popup._helpTopicTitle = topicTitle
+
+		local legend = MakeText(popup, 9, C_DIM)
+		legend:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 13))
+		legend:SetJustifyH("RIGHT")
+		legend:SetText(HELP_CODES.action .. "Use|r  " .. HELP_CODES.check .. "Check|r  " .. HELP_CODES.safety .. "Careful|r")
+		popup._helpLegend = legend
+
+		local introRule = popup:CreateTexture(nil, "ARTWORK")
+		introRule:SetTexture(WHITE8x8)
+		introRule:SetHeight(1)
+		introRule:SetPoint("TOPLEFT", topicTitle, "BOTTOMLEFT", 0, -8)
+		introRule:SetPoint("TOPRIGHT", topicTitle, "BOTTOMRIGHT", 0, -8)
+		introRule:SetVertexColor(C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.55)
+
+		local holder = CreateFrame("Frame", nil, popup)
+		holder:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 42))
+		holder:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -PAD_X, 12)
+		ApplyBackdrop(holder, C_DROP_BG, C_DROP_BORDER)
+
+		local scroll = CreateFrame("ScrollFrame", "AutoDeleteHelpTopicScroll", holder, "UIPanelScrollFrameTemplate")
+		scroll:SetPoint("TOPLEFT", holder, "TOPLEFT", 8, -8)
+		scroll:SetPoint("BOTTOMRIGHT", holder, "BOTTOMRIGHT", -26, 8)
+
+		local content = CreateFrame("Frame", nil, scroll)
+		content:SetWidth(POPUP_W - PAD_X * 2 - 42)
+		content:SetHeight(1)
+		scroll:SetScrollChild(content)
+
+		popup._helpScroll = scroll
+		popup._helpContent = content
+		popup._helpRows = {}
+		_G.AutoDeleteHelpTopicPopup = popup
+	end
+
+	local popup = _G.AutoDeleteHelpTopicPopup
+	if popup._titleText then popup._titleText:SetText("AutoDelete Help") end
+	popup._helpTopicTitle:SetText(titleText or "Help")
+
+	local rows = popup._helpRows
+	for _, row in ipairs(rows) do
+		row.swatch:Hide()
+		row.header:Hide()
+		row.body:Hide()
+		row.sep:Hide()
+	end
+
+	local content = popup._helpContent
+	local width = content:GetWidth() or 420
+	local y = -2
+
+	for i, section in ipairs(sections or {}) do
+		local row = rows[i]
+		if not row then
+			row = {}
+			row.swatch = content:CreateTexture(nil, "ARTWORK")
+			row.swatch:SetTexture(WHITE8x8)
+			row.swatch:SetSize(4, 14)
+			row.header = MakeText(content, 11, C_TEXT, "OUTLINE")
+			row.header:SetJustifyH("LEFT")
+			row.body = MakeText(content, 10, C_TEXT)
+			row.body:SetJustifyH("LEFT")
+			row.body:SetWordWrap(true)
+			row.body:SetNonSpaceWrap(false)
+			row.sep = content:CreateTexture(nil, "ARTWORK")
+			row.sep:SetTexture(WHITE8x8)
+			row.sep:SetHeight(1)
+			row.sep:SetVertexColor(C_BORDER[1], C_BORDER[2], C_BORDER[3], 1)
+			rows[i] = row
+		end
+
+		local kind = HelpKind(section)
+		local c = HelpColor(kind)
+		row.swatch:ClearAllPoints()
+		row.swatch:SetPoint("TOPLEFT", content, "TOPLEFT", 2, y - 1)
+		row.swatch:SetVertexColor(c[1], c[2], c[3], 1)
+		row.swatch:Show()
+
+		row.header:ClearAllPoints()
+		row.header:SetPoint("TOPLEFT", content, "TOPLEFT", 12, y)
+		row.header:SetWidth(width - 14)
+		row.header:SetTextColor(c[1], c[2], c[3], 1)
+		row.header:SetText(section.heading or "")
+		row.header:Show()
+
+		row.body:ClearAllPoints()
+		row.body:SetPoint("TOPLEFT", content, "TOPLEFT", 12, y - 18)
+		row.body:SetWidth(width - 14)
+		row.body:SetText(HelpTag(kind) .. (section.body or ""))
+		row.body:Show()
+
+		local bodyH = row.body:GetStringHeight() or 14
+		y = y - 18 - bodyH - 10
+
+		row.sep:ClearAllPoints()
+		row.sep:SetPoint("TOPLEFT", content, "TOPLEFT", 12, y)
+		row.sep:SetPoint("RIGHT", content, "RIGHT", -2, 0)
+		row.sep:SetVertexColor(c[1], c[2], c[3], 0.28)
+		row.sep:Show()
+		y = y - 10
+	end
+
+	content:SetHeight(math.max(1, -y + 6))
+	popup._helpScroll:SetVerticalScroll(0)
+	if not popup._everShown then
+		popup:ClearAllPoints()
+		popup:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+		popup._everShown = true
+	end
+	popup:Show()
+end
+
+-- ============================================================================
 -- Build UI
 -- ============================================================================
 
@@ -2785,12 +3084,12 @@ local function BuildUI(self)
 	-- affix tooling that previously lived on Filters. Filters now hosts
 	-- DE Filters + Manage Ignored Items.
 	--
-	-- Order (2026-05-23 spec): General > Pets > Affix > Invites > Filters >
-	-- Keybinds > Tracking > Profiles. Internal keys stay STABLE (the SV
+	-- Order (2026-05-27 spec): General > Pets > Affix > Invites > Filters >
+	-- Keybinds > Tracking > Profiles > Help. Internal keys stay STABLE (the SV
 	-- has `tools` for Filters and `goblin` for Pets from earlier renames)
 	-- so the visual reorder is just rearranging these two arrays.
-	local TAB_KEYS = { "general", "goblin", "affix", "autoinv", "tools", "keybinds", "tracking", "profiles" }
-	local TAB_LABELS = { "General", "Pets", "Affix", "Invites", "Filters", "Keybinds", "Tracking", "Profiles" }
+	local TAB_KEYS = { "general", "goblin", "affix", "autoinv", "tools", "keybinds", "tracking", "profiles", "help" }
+	local TAB_LABELS = { "General", "Pets", "Affix", "Invites", "Filters", "Keybinds", "Tracking", "Profiles", "Help" }
 	for i, key in ipairs(TAB_KEYS) do
 		local page = CreateFrame("Frame", nil, tabContent)
 		page:SetAllPoints(tabContent)
@@ -3006,7 +3305,11 @@ local function BuildUI(self)
 		if c.mill       > 0 then table.insert(parts, c.mill       .. " Mill") end
 		if c.prospect   > 0 then table.insert(parts, c.prospect   .. " Prospect") end
 		if c.open       > 0 then table.insert(parts, c.open       .. " Open") end
-		self._processCount:SetText(c.total .. " items: " .. table.concat(parts, ", "))
+		if (c.copies or c.total) > c.total then
+			self._processCount:SetText(c.total .. " rows (" .. c.copies .. " copies): " .. table.concat(parts, ", "))
+		else
+			self._processCount:SetText(c.total .. " items: " .. table.concat(parts, ", "))
+		end
 	end
 
 	-- Card 3: Scan Speed (dot toggles moved to Filters -> Affix Display per
@@ -3059,6 +3362,158 @@ local function BuildUI(self)
 	speedHelp:SetJustifyH("LEFT")
 	speedHelp:SetWordWrap(true)
 	speedHelp:SetText("How often bags are checked against your Delete and Sell lists. Hover for the full trade-off.")
+
+	-- ========================================================================
+	-- HELP TAB: topic buttons, each opening a formatted help popup.
+	-- ========================================================================
+	do
+		local helpPage = tabPages.help
+		local helpBox = CreateFrame("Frame", nil, helpPage)
+		helpBox:SetPoint("TOPLEFT", 0, -4)
+		helpBox:SetPoint("BOTTOMRIGHT", 0, 4)
+		ApplyBackdrop(helpBox, C_CARD_BG, C_CARD_BORDER)
+
+		local topics = {
+			{
+				label = "General",
+				title = "General",
+				sections = {
+					{ heading = "Protect Gear First", body = "Click Auto-Add Equipped after you change gear or copy a profile. AutoDelete adds your equipped items to Keep, then skips shirts and tabards. Use this before turning on broad delete or sell rules." },
+					{ heading = "Open Process Bags", body = "Click Process Bags when you want to preview DE, Mill, Prospect, or Open targets. Review the rows first, then use the matching keybind when the next item is the one you expect." },
+					{ heading = "Set Scan Speed", body = "Use fast scans when you want Delete and Sell list matches handled quickly. Use slower scans if you only want quiet background cleanup. Vendor selling still runs when a merchant is open." },
+				}
+			},
+			{
+				label = "Pets",
+				title = "Pets",
+				sections = {
+					{ heading = "Summon Scavenger", body = "Turn this on if you want AutoDelete to call the Scavenger for cleanup support. If nothing happens, check that the feature is enabled and that combat is not blocking the action." },
+					{ heading = "Use Goblin Merchant", body = "Enable this when you want merchant help as your bags fill up. Set the free-slot warning low enough that you have time to react before bags are full." },
+					{ heading = "Set Bag Warning", body = "Choose the number of free bag slots that should trigger a warning. Raise the number if you want an earlier heads-up, lower it if you only care when bags are nearly full." },
+					{ heading = "Quiet Repeated Messages", body = "Turn on Hide Greedy Spam if the Scavenger messages are distracting. This only quiets repeated chat noise; it does not change cleanup rules." },
+				}
+			},
+			{
+				label = "Affix",
+				title = "Affix",
+				sections = {
+					{ heading = "Protect Affix Items", body = "Turn on No Auto-Sell when you are collecting Project Ebonhold affixes. AutoDelete will block automatic sell and delete decisions for protected affix gear." },
+					{ heading = "Choose Min iLvl", body = "Set the minimum item level for affix protection. Items below this floor can still be cleaned up, which keeps old low-level affix junk from clogging your bags." },
+					{ heading = "Read The Dot", body = "Turn on Show Dot to mark affix items in your bags. Gold means AutoDelete thinks the affix is missing or unlearned. Use Why? if a dot or decision looks wrong." },
+					{ heading = "Audit Your Lists", body = "Run the audit before a release, after importing lists, or after a big rules change. It checks Delete and Sell lists for affix items so you can fix risky entries." },
+				}
+			},
+			{
+				label = "Invites",
+				title = "Invites",
+				sections = {
+					{ heading = "Set The Keyword", body = "Pick the whisper keyword first, then turn Auto Invite on. A player who whispers that exact keyword can be invited automatically." },
+					{ heading = "Use Loot Rule Carefully", body = "Enable the loot rule option only if you want AutoDelete to set group loot after invites. Leave it off when another addon, raid lead, or manual setup controls loot." },
+					{ heading = "Convert When Needed", body = "Use Convert Raid only when the group should become a raid automatically. Leave it off for normal party invites." },
+					{ heading = "Safe Setup", body = "Test the keyword with one trusted player before using it publicly. Turn Auto Invite off whenever whispers should not change your group." },
+				}
+			},
+			{
+				label = "Filters",
+				title = "Filters",
+				sections = {
+					{ heading = "Set Auto Actions", body = "Choose Off, Delete, or Sell for Junk, Common, and Greens. Start with Off if you are unsure, then move one quality at a time once the preview looks right." },
+					{ heading = "Know Delete vs Sell", body = "Delete happens during bag scans. Sell happens when a merchant is open. Keep list entries win before either action." },
+					{ heading = "Tune DE Filters", body = "Use the DE filters to control One-Key Disenchant targets. These filters do not change normal Delete, Sell, or Keep list behavior." },
+					{ heading = "Use Ignore For Process Only", body = "Ignore hides an item from Process Bags on this character. It is not a Keep rule and it does not protect the item from Delete or Sell list matches." },
+				}
+			},
+			{
+				label = "Keybinds",
+				title = "Keybinds",
+				sections = {
+					{ heading = "Bind One-Key Actions", body = "Set keys for Disenchant, Mill, Prospect, and Open before using Process Bags. Each key acts on the next eligible row for that action." },
+					{ heading = "Check The Next Target", body = "Open Process Bags and read the row status before pressing a key. If the next target is wrong, change filters or use Ignore for Process first." },
+					{ heading = "Watch Requirements", body = "If a row says a feature is off or a profession is missing, fix that first. The keybind will not make an unavailable action work." },
+					{ heading = "Adjust Filters", body = "Change DE target rules on the Filters tab. Reopen or refresh Process Bags after changing rules so the next target is current." },
+				}
+			},
+			{
+				label = "Tracking",
+				title = "Tracking",
+				sections = {
+					{ heading = "Read Your Totals", body = "Use Tracking to check gold earned, items sold, items deleted, repairs, repair cost, and average inventory value. It is a quick sanity check after testing rules." },
+					{ heading = "Reset On Purpose", body = "Click Reset only when you want a clean counter for a new test or session. If you are comparing before and after values, write the old totals down first." },
+					{ heading = "Verify A Rule Change", body = "After changing a Sell or Delete rule, watch Tracking while you test on known items. The totals should move only for the action you expected." },
+				}
+			},
+			{
+				label = "Profiles",
+				title = "Profiles",
+				sections = {
+					{ heading = "Pick The Right Character", body = "Profiles keep settings and lists per character. Confirm the active character/profile before making big list or filter changes." },
+					{ heading = "Copy A Full Setup", body = "Use Copy when a new character should inherit another character's full AutoDelete setup. Review risky rules afterward, especially Sell, Delete, and Affix protection." },
+					{ heading = "Import Only Lists", body = "Use Import Lists when you want another profile's item lists but not its toggles, scan speed, invite settings, or filter choices." },
+					{ heading = "Use Raw Tools For Bulk Edits", body = "Export Raw before a large manual edit. Import Raw only after checking the item IDs and names, because raw imports can change many entries at once." },
+				}
+			},
+			{
+				label = "Sell Filters",
+				title = "Sell Filters",
+				sections = {
+					{ heading = "Enable One Rule At A Time", body = "Turn on BoE Armor, BoP, or BoE Weapons only after you know what that rule should catch. Test with a merchant open and a small set of items first." },
+					{ heading = "Choose Quality And iLvl", body = "Use the Rare and Epic toggles with the iLvl range to narrow the rule. If too much is selling, tighten the iLvl range or turn off a quality." },
+					{ heading = "Know The Safety Order", body = "Keep list entries win before sell filters. Quest items are protected. Affix protection can also block selling when enabled." },
+					{ heading = "Check Weapon Priority", body = "BoE Weapons wins over BoE Armor when an item could match both. Use Why? on the item if the chosen rule surprises you." },
+				}
+			},
+			{
+				label = "Lists",
+				title = "Lists",
+				sections = {
+					{ heading = "Use Delete With Care", body = "Add an item to Delete only when you are sure matching item IDs should be destroyed on bag scan. Test with one safe item before adding many entries." },
+					{ heading = "Use Sell At Merchants", body = "Add vendor trash or known sell targets to Sell. The item sells when a merchant is open, not during normal bag use." },
+					{ heading = "Use Keep As Protection", body = "Add anything important to Keep before broad rules are enabled. Keep is the protection list and should win over automatic cleanup." },
+					{ heading = "Rely On Item IDs", body = "Normal list entries use item IDs, so heroic and non-heroic items with the same name can stay separate. If two items look identical, use Why? to confirm the ID." },
+				}
+			},
+			{
+				label = "Bag Features",
+				title = "Bag Features",
+				sections = {
+					{ heading = "Drag To List Buttons", body = "Drag a real bag item onto Delete, Sell, or Keep to add that item to the matching list. Right-click those buttons to jump to the matching list tab." },
+					{ heading = "Use The Bag Quick Menu", body = "Alt+Right-click a real bag item to open the AutoDelete quick menu. Choose Keep, Sell, Delete, or Why? from there." },
+					{ heading = "Leave Normal Right-Click Alone", body = "Normal right-click belongs to WoW and your bag addon. Use it for eating, drinking, equipping, selling, or using items. AutoDelete should only open its bag menu on Alt+Right-click." },
+					{ heading = "If A Click Feels Wrong", body = "Stop and test normal right-click first. If normal item use is blocked, that is a bug, not intended behavior." },
+				}
+			},
+			{
+				label = "Process Bags",
+				title = "Process Bags",
+				sections = {
+					{ heading = "Review Before Pressing Keys", body = "Open Process Bags to see DE, Mill, Prospect, and Open targets before you act. If the list is empty, no current process action matched." },
+					{ heading = "Left-Click A Row", body = "Left-click a row when you want that item to be the next target for its matching keybind. Read the row again before pressing the key." },
+					{ heading = "Right-Click A Row", body = "Right-click a Process Bags row to open Keep, Sell, Delete, Ignore for Process, and Why?. This right-click is only inside the Process Bags list." },
+					{ heading = "Use Ignore For Process", body = "Choose Ignore for Process when an item should stop showing in Process Bags on this character. Use Keep instead if the item needs real protection from cleanup rules." },
+					{ heading = "Use Why?", body = "Choose Why? when an item is kept, sold, deleted, dotted, or skipped and you need the reason. The report shows lists, item facts, affix protection, and matched process action." },
+				}
+			},
+		}
+
+		-- Fixed tab-content math: helpBox is tabContent width/height with
+		-- y=-4/4 padding, so 12 buttons must fit in 4 rows inside 92px.
+		-- 4 * 18px + 3 * 4px + top 6px = 90px, leaving 2px bottom room.
+		local helpContentW = CONTENT_W - TAB_INNER_PAD * 2
+		local gapX = 8
+		local gapY = 4
+		local btnH = 18
+		local btnW = math.floor((helpContentW - CARD_INNER_PAD_X * 2 - gapX * 2) / 3)
+		for i, topic in ipairs(topics) do
+			local col = (i - 1) % 3
+			local row = math.floor((i - 1) / 3)
+			local btn = MakeActionButton(helpBox, topic.label, C_BLUE, function()
+				if _G.AutoDelete_ShowHelpTopicWindow then
+					_G.AutoDelete_ShowHelpTopicWindow(topic.title, topic.sections)
+				end
+			end, btnW, btnH)
+			btn:SetPoint("TOPLEFT", CARD_INNER_PAD_X + col * (btnW + gapX), -6 - row * (btnH + gapY))
+		end
+	end
 
 	-- ========================================================================
 	-- GOBLIN TAB: 3 cards (Auto-Repair, Summon Scavenger, Hide Greedy Spam)

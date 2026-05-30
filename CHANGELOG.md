@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.21] - 2026-05-29
+
+### Added
+
+- **Why reports.** Right-click a Process Bags item to see why AutoDelete is keeping, selling, deleting, or marking it.
+- **Quick item menu.** Adds Why to the Alt+Right-click menu.
+- **Settings report.** Use `/del report` to generate a copyable settings report for troubleshooting.
+
+### Fixed
+
+- **Affix dots.** Dots are now centered in item slots.
+- **Process Bags grouping.** Items with the same item ID are grouped together, even when affix names differ.
+- **Disenchant warnings.** Keep-list warnings now only open when you press the matching one-key action.
+
 ## [3.20.2] - 2026-05-26
 
 ### Fixed

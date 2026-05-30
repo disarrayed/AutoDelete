@@ -1751,12 +1751,20 @@ local function Trim(s)
 	return (string.gsub(string.gsub(tostring(s or ""), "^%s+", ""), "%s+$", ""))
 end
 
+function _G.AutoDelete_NormalizeTextKey(s)
+	local t = string.lower(Trim(s))
+	-- PE can surface affix names with escaped or typographic apostrophes.
+	-- Canonicalize before using strings as lookup keys or suffix operands.
+	t = string.gsub(t, "\226\128\153", "'")
+	t = string.gsub(t, "\226\128\152", "'")
+	while string.find(t, "\\'", 1, true) do
+		t = string.gsub(t, "\\'", "'")
+	end
+	return t
+end
+
 local function Normalize(s)
-	-- Project Ebonhold can surface apostrophes differently between its
-	-- learned-affix table and item names (for example Val'anyr vs
-	-- Val\'anyr). Canonicalize the backslash-escaped form before using
-	-- strings as lookup keys or suffix-match operands.
-	return (string.gsub(string.lower(Trim(s)), "\\'", "'"))
+	return _G.AutoDelete_NormalizeTextKey(s)
 end
 
 local function GetItemIDFromLink(link)
@@ -3602,6 +3610,7 @@ function AutoDelete_RefreshOwnedAffixes()
 					else
 						aliasName = alias
 					end
+					aliasName = Normalize(aliasName)
 					known[aliasName] = true
 					if entry.learned then
 						map[aliasName] = true
@@ -4156,9 +4165,13 @@ local AFFIX_DOT_COLORS = {
 -- 9px dot inside a 12px black backing ring. Sizes were 12+16 in v3.19;
 -- shrunk to 9+12 in v3.20 because the larger dot covered too much of
 -- the item icon. The 4:3 ratio between dot and backing keeps the
--- contrast frame visible without dominating the slot.
+-- contrast frame visible without dominating the slot. The colored dot is
+-- center-anchored inside the backing so odd/even pixel sizes do not leave
+-- a visible off-center margin.
 local AFFIX_DOT_SIZE         = 9
 local AFFIX_DOT_BACKING_SIZE = 12
+_G.AutoDelete_ElvUIBindTypeYOffset  = 0
+_G.AutoDelete_ElvUIItemLevelYOffset = 1
 -- Custom dot texture shipped with the addon. 32x32 RGBA TGA with a white
 -- anti-aliased filled circle on transparent background. Tinting via
 -- SetVertexColor produces a clean colored dot. Used instead of a Blizzard
@@ -4182,21 +4195,17 @@ function AutoDelete_SetButtonAffixDot(button, affixLevel, colorOverride)
 		local color = colorOverride
 			or AFFIX_DOT_COLORS[affixLevel]
 			or AFFIX_DOT_COLORS[1]
-		-- Backing goes on ARTWORK, not OVERLAY. WoW 3.3.5 clients do not
-		-- reliably honor texture sublevels the way modern clients do, so a
-		-- black backing created on the same draw layer can sometimes sit on
-		-- top of the colored dot. Wellspring V exposed this as a plain black
-		-- dot: classification found tier 5, but the orange texture was hidden
-		-- behind the backing. Keep the ring below the dot by using separate
-		-- draw layers and re-assert them for already-created textures.
+		-- Backing goes on ARTWORK and the colored dot goes on OVERLAY. Anchor
+		-- both to the item slot center; do not move ElvUI's BoE/iLvl text.
 		if not back then
 			back = button:CreateTexture(nil, "ARTWORK")
 			back:SetTexture(AFFIX_DOT_TEXTURE)
 			back:SetSize(AFFIX_DOT_BACKING_SIZE, AFFIX_DOT_BACKING_SIZE)
-			back:SetPoint("BOTTOMLEFT", 0, 0)
 			button._autoDeleteAffixBacking = back
 		end
 		if back.SetDrawLayer then back:SetDrawLayer("ARTWORK") end
+		back:ClearAllPoints()
+		back:SetPoint("CENTER", button, "CENTER", 0, 0)
 		back:SetVertexColor(0, 0, 0, 1)
 		back:Show()
 		-- Colored dot on top. Use OVERLAY while the backing stays ARTWORK;
@@ -4210,17 +4219,28 @@ function AutoDelete_SetButtonAffixDot(button, affixLevel, colorOverride)
 			dot = button:CreateTexture(nil, "OVERLAY")
 			dot:SetTexture(AFFIX_DOT_TEXTURE)
 			dot:SetSize(AFFIX_DOT_SIZE, AFFIX_DOT_SIZE)
-			-- Offset 2 px from BOTTOMLEFT keeps the 9 px dot centered in
-			-- the 12 px backing (1.5 px margin on each side, rounded down).
-			dot:SetPoint("BOTTOMLEFT", 2, 2)
 			button._autoDeleteAffixDot = dot
 		end
+		dot:ClearAllPoints()
+		dot:SetPoint("CENTER", back, "CENTER", 0, 0)
 		if dot.SetDrawLayer then dot:SetDrawLayer("OVERLAY") end
 		dot:SetVertexColor(color[1], color[2], color[3], 1)
 		dot:Show()
 	else
 		if dot then dot:Hide() end
 		if back then back:Hide() end
+	end
+end
+
+function _G.AutoDelete_ApplyElvUIBagTextNudge(slot)
+	if not slot or not _G.ElvUI then return end
+	if slot.bindType and slot.bindType.ClearAllPoints and slot.bindType.Point then
+		slot.bindType:ClearAllPoints()
+		slot.bindType:Point("TOP", 0, _G.AutoDelete_ElvUIBindTypeYOffset)
+	end
+	if slot.itemLevel and slot.itemLevel.ClearAllPoints and slot.itemLevel.Point then
+		slot.itemLevel:ClearAllPoints()
+		slot.itemLevel:Point("BOTTOMRIGHT", -1, _G.AutoDelete_ElvUIItemLevelYOffset)
 	end
 end
 
@@ -4370,12 +4390,10 @@ _G.AutoDelete_RefreshAffixDots = function()
 	end)
 end
 
--- ElvUI bag dot support. ElvUI replaces the Blizzard bag frames with its
--- own buttons (named "<frameName>Bag<bagID>Slot<slotID>" but kept inside
--- the B module's `B.BagFrames` table). Hooking `B:UpdateSlot` is the
--- cleanest entry point: ElvUI calls it for every slot whenever a bag
--- button needs to refresh (item moved, count changed, bag re-laid-out).
--- Has to be called AFTER ElvUI has loaded, so we invoke it from the
+-- ElvUI bag dot support. Prefer the Blizzard ContainerFrame_Update path
+-- above; this hook is only a guarded compatibility layer for ElvUI's
+-- replacement bag UI, which does not repaint through the default container
+-- frames. Has to be called AFTER ElvUI has loaded, so we invoke it from the
 -- post-login AfterDelay block alongside CreateElvUIBagButton.
 local function InstallElvUIAffixDotHook()
 	-- Bail-out chain (any failure = silently skip ElvUI integration,
@@ -4418,6 +4436,7 @@ local function InstallElvUIAffixDotHook()
 			if not bagFrame then AutoDelete_PerfEnd("ElvUI:UpdateSlot hook", _p); return end
 			local slot = bagFrame[slotID]
 			if not slot then AutoDelete_PerfEnd("ElvUI:UpdateSlot hook", _p); return end
+			_G.AutoDelete_ApplyElvUIBagTextNudge(slot)
 			-- Bank/reagent slots have bagID outside the 0..4 player-bag range;
 			-- skip those (auto-rules don't act on bank contents anyway).
 			if bagID < 0 or bagID > 4 then AutoDelete_PerfEnd("ElvUI:UpdateSlot hook", _p); return end
@@ -5885,6 +5904,8 @@ local function GetOpenStatus()
 	return "No openable items in bags", 0.55, 0.55, 0.55
 end
 
+function _G.AutoDelete_GetOpenLastTarget() return openLastTarget end
+
 -- Returns/creates the secure button. Called from PLAYER_LOGIN. Separate
 -- function so the event handler can call this and immediately do an
 -- UpdateOpenButton() pass to wire the first target.
@@ -5900,6 +5921,9 @@ local function EnsureOpenButton()
 	openButton:RegisterForClicks("AnyUp")
 	openButton:SetAttribute("type", "macro")
 	openButton:SetAttribute("macrotext", "")
+	openButton:HookScript("PreClick", function()
+		if _G.AutoDelete_OnOneKeyPreClick then _G.AutoDelete_OnOneKeyPreClick("open") end
+	end)
 	return openButton
 end
 
@@ -5955,6 +5979,7 @@ local function RefreshMillKnown()
 end
 
 local function CharacterCanMill() return cachedMillKnown end
+function _G.AutoDelete_CanMill() return cachedMillKnown end
 
 -- IgnoringKeep variant on _G to dodge Lua 5.1's 200-local cap (see
 -- AutoDelete_IsOpenable_IgnoringKeep for rationale). Same eligibility
@@ -6088,6 +6113,8 @@ local function GetMillStatus()
 	return "No millable herbs in bags", 0.55, 0.55, 0.55
 end
 
+function _G.AutoDelete_GetMillLastTarget() return millLastTarget end
+
 local function EnsureMillButton()
 	if millButton then return millButton end
 	millButton = CreateFrame("Button", "AutoDeleteMillButton", UIParent,
@@ -6096,6 +6123,9 @@ local function EnsureMillButton()
 	millButton:RegisterForClicks("AnyUp")
 	millButton:SetAttribute("type", "macro")
 	millButton:SetAttribute("macrotext", "")
+	millButton:HookScript("PreClick", function()
+		if _G.AutoDelete_OnOneKeyPreClick then _G.AutoDelete_OnOneKeyPreClick("mill") end
+	end)
 	return millButton
 end
 
@@ -6140,6 +6170,7 @@ local function RefreshProspectKnown()
 end
 
 local function CharacterCanProspect() return cachedProspectKnown end
+function _G.AutoDelete_CanProspect() return cachedProspectKnown end
 
 -- IgnoringKeep on _G for the local-cap reason.
 function _G.AutoDelete_IsProspectable_IgnoringKeep(profile, bag, slot)
@@ -6268,6 +6299,8 @@ local function GetProspectStatus()
 	return "No prospectable ore in bags", 0.55, 0.55, 0.55
 end
 
+function _G.AutoDelete_GetProspectLastTarget() return prospectLastTarget end
+
 local function EnsureProspectButton()
 	if prospectButton then return prospectButton end
 	prospectButton = CreateFrame("Button", "AutoDeleteProspectButton", UIParent,
@@ -6276,6 +6309,9 @@ local function EnsureProspectButton()
 	prospectButton:RegisterForClicks("AnyUp")
 	prospectButton:SetAttribute("type", "macro")
 	prospectButton:SetAttribute("macrotext", "")
+	prospectButton:HookScript("PreClick", function()
+		if _G.AutoDelete_OnOneKeyPreClick then _G.AutoDelete_OnOneKeyPreClick("prospect") end
+	end)
 	return prospectButton
 end
 
@@ -6797,33 +6833,40 @@ function _G.AutoDelete_ShowKeepOverridePopup(action, rec)
 	end
 end
 
--- (A7) Periodic check. Walks bags for each enabled action; if a Keep-blocked
--- candidate exists and isn't in skip memory, fires the popup. Called from
--- BAG_UPDATE_DELAYED so it runs at most once per bag burst.
--- Throttle window for the Keep-override check is 3 seconds (inlined below
--- to avoid bumping the main-chunk 200-local cap). Each bag walk does up
--- to 2 tooltip scans per slot (IsSoulbound + IsBindOnEquip for the DE
--- predicate) multiplied by 4 enabled actions -- expensive enough that
--- running on every BAG_UPDATE_DELAYED was a noticeable hiccup
--- (user-reported 2026-05-23). The popup is informational/cosmetic, not
--- real-time, so a 3 s latency is fine.
+function _G.AutoDelete_OnOneKeyPreClick(action)
+	local hasTarget = false
+	if action == "disenchant" and _G.AutoDelete_GetDisenchantLastTarget then
+		hasTarget = _G.AutoDelete_GetDisenchantLastTarget() ~= nil
+	elseif action == "mill" and _G.AutoDelete_GetMillLastTarget then
+		hasTarget = _G.AutoDelete_GetMillLastTarget() ~= nil
+	elseif action == "prospect" and _G.AutoDelete_GetProspectLastTarget then
+		hasTarget = _G.AutoDelete_GetProspectLastTarget() ~= nil
+	elseif action == "open" and _G.AutoDelete_GetOpenLastTarget then
+		hasTarget = _G.AutoDelete_GetOpenLastTarget() ~= nil
+	end
+	if hasTarget then return end
+	if _G.AutoDelete_CheckKeepOverrideForAction then
+		_G.AutoDelete_CheckKeepOverrideForAction(action)
+	end
+end
 
-function _G.AutoDelete_CheckKeepOverrides()
+-- (A7) Hotkey-triggered check. If the user presses a one-key action and no
+-- normal target is staged, check whether the next possible target is blocked
+-- only by Keep. This must not run from BAG_UPDATE / Process Bags refreshes:
+-- eligible preview items should never spam popups. The popup appears only from
+-- the action hotkey path, then the user can choose the action and press again.
+function _G.AutoDelete_CheckKeepOverrideForAction(action)
 	if InCombatLockdown and InCombatLockdown() then return end
 	-- (Fix F, 2026-05-23) Skip while our own DeleteItems / SellItems batch
 	-- is mid-flight. AutoDelete_SelfBagUpdateUntil is set by DeleteItems
 	-- when it starts a batch; running the keep-check inside that window
 	-- means we're re-walking bags after every PickupContainerItem call.
 	if GetTime() < (_G.AutoDelete_SelfBagUpdateUntil or 0) then return end
-	-- (Fix A, 2026-05-23) Hard debounce: at most one check per 3 seconds.
-	-- Reduces walk frequency by 10-20x during loot bursts (BAG_UPDATE_DELAYED
-	-- fires every ~150 ms during a 30-item burst; without throttling each
-	-- one triggered a full 4-action bag walk with ~120 tooltip scans).
 	local now = GetTime()
-	if now < (_G.AutoDelete_LastKeepCheckAt or 0) + 3.0 then
+	if now < (_G.AutoDelete_LastKeepOverrideHotkeyAt or 0) + 0.5 then
 		return
 	end
-	_G.AutoDelete_LastKeepCheckAt = now
+	_G.AutoDelete_LastKeepOverrideHotkeyAt = now
 
 	local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
 	if not profile then return end
@@ -6834,31 +6877,28 @@ function _G.AutoDelete_CheckKeepOverrides()
 	local whitelistText = profile.whitelistText
 	if not whitelistText or whitelistText == "" then return end
 
-	-- Each action runs independently; first popup to fire wins (StaticPopup
-	-- queue suppresses the rest until the user resolves it).
-	if profile.disenchantEnabled then
-		-- sortByIlvl=false: pick the topmost (lowest bag/slot) Keep-blocked
-		-- candidate so the popup matches what the player sees in their bag.
-		-- See FindDisenchantTarget for the ordering rationale (2026-05-23).
-		local _, blocked = _G.AutoDelete_WalkBagsTwoPass(profile,
+	if action == "disenchant" and profile.disenchantEnabled and CharacterCanDisenchant() then
+		local normal, blocked = _G.AutoDelete_WalkBagsTwoPass(profile,
 			_G.AutoDelete_IsDisenchantable_IgnoringKeep, false)
-		if blocked then _G.AutoDelete_ShowKeepOverridePopup("disenchant", blocked) end
-	end
-	if profile.millEnabled then
-		local _, blocked = _G.AutoDelete_WalkBagsTwoPass(profile,
+		if blocked and not normal then _G.AutoDelete_ShowKeepOverridePopup("disenchant", blocked) end
+	elseif action == "mill" and profile.millEnabled and _G.AutoDelete_CanMill and _G.AutoDelete_CanMill() then
+		local normal, blocked = _G.AutoDelete_WalkBagsTwoPass(profile,
 			_G.AutoDelete_IsMillable_IgnoringKeep, false)
-		if blocked then _G.AutoDelete_ShowKeepOverridePopup("mill", blocked) end
-	end
-	if profile.prospectEnabled then
-		local _, blocked = _G.AutoDelete_WalkBagsTwoPass(profile,
+		if blocked and not normal then _G.AutoDelete_ShowKeepOverridePopup("mill", blocked) end
+	elseif action == "prospect" and profile.prospectEnabled and _G.AutoDelete_CanProspect and _G.AutoDelete_CanProspect() then
+		local normal, blocked = _G.AutoDelete_WalkBagsTwoPass(profile,
 			_G.AutoDelete_IsProspectable_IgnoringKeep, false)
-		if blocked then _G.AutoDelete_ShowKeepOverridePopup("prospect", blocked) end
-	end
-	if profile.autoOpenEnabled then
-		local _, blocked = _G.AutoDelete_WalkBagsTwoPass(profile,
+		if blocked and not normal then _G.AutoDelete_ShowKeepOverridePopup("prospect", blocked) end
+	elseif action == "open" and profile.autoOpenEnabled then
+		local normal, blocked = _G.AutoDelete_WalkBagsTwoPass(profile,
 			_G.AutoDelete_IsOpenable_IgnoringKeep, false)
-		if blocked then _G.AutoDelete_ShowKeepOverridePopup("open", blocked) end
+		if blocked and not normal then _G.AutoDelete_ShowKeepOverridePopup("open", blocked) end
 	end
+end
+
+function _G.AutoDelete_CheckKeepOverrides()
+	-- Retained as a compatibility no-op. Keep override popups are now hotkey
+	-- triggered only; bag refresh paths must not open them.
 end
 
 -- (B) Action chat notifier. Hooks UNIT_SPELLCAST_SUCCEEDED via the existing
@@ -6987,13 +7027,16 @@ local function ClearProcessIgnored()
 end
 
 -- Walks bags once, returns a list of actionable items. Each entry:
---   { bag, slot, itemId, link, name, action }
--- action is one of the keys in PROCESS_ACTIONS. Caller renders the list
--- in returned order (bag/slot ascending = deterministic across reloads).
+--   { bag, slot, itemId, link, name, action, count, variantNames }
+-- action is one of the keys in PROCESS_ACTIONS. Returned rows are deduped by
+-- action + itemId because PE affix names can differ while the base item ID is
+-- the same. The first matching slot is used for arming; after that item is
+-- processed, a refresh can surface the next matching copy.
 local function ProcessScan(profile)
 	local results = {}
 	if not profile then return results end
 	local ignored = GetProcessIgnoredTable()
+	local seen = {}
 
 	local isDisenchantable = _G.AutoDelete_IsDisenchantable
 	local isMillable       = _G.AutoDelete_IsMillable
@@ -7019,14 +7062,26 @@ local function ProcessScan(profile)
 					end
 					if action then
 						local name = GetItemInfo(link) or "?"
-						table.insert(results, {
+						local key = action .. ":" .. tostring(id)
+						local existing = seen[key]
+						if existing then
+							existing.count = (existing.count or 1) + 1
+							if name ~= "?" and Normalize(name) ~= Normalize(existing.name) then
+								existing.variantNames = true
+							end
+						else
+							local entry = {
 							bag    = bag,
 							slot   = slot,
 							itemId = id,
 							link   = link,
 							name   = name,
 							action = action,
-						})
+							count  = 1,
+							}
+							seen[key] = entry
+							table.insert(results, entry)
+						end
 					end
 				end
 			end
@@ -7035,12 +7090,14 @@ local function ProcessScan(profile)
 	return results
 end
 
--- Returns counts: { total = N, disenchant = N, mill = N, prospect = N, open = N }
+-- Returns row counts plus copy counts. `total` is visible rows after grouping;
+-- `copies` is actual matching bag slots represented by those rows.
 -- Used by the Tools Card 1 launcher's status line.
 local function ProcessScanCounts(profile)
-	local counts = { total = 0, disenchant = 0, mill = 0, prospect = 0, open = 0 }
+	local counts = { total = 0, copies = 0, disenchant = 0, mill = 0, prospect = 0, open = 0 }
 	for _, entry in ipairs(ProcessScan(profile)) do
 		counts.total = counts.total + 1
+		counts.copies = counts.copies + (entry.count or 1)
 		counts[entry.action] = (counts[entry.action] or 0) + 1
 	end
 	return counts
@@ -7089,6 +7146,445 @@ _G.AutoDelete_IsProcessIgnored    = IsProcessIgnored
 _G.AutoDelete_SetProcessIgnored   = SetProcessIgnored
 _G.AutoDelete_ClearProcessIgnored = ClearProcessIgnored
 _G.AutoDelete_PROCESS_ACTIONS     = PROCESS_ACTIONS
+
+-- ============================================================================
+-- Decision inspector, quick item menu, and diagnostic report
+-- ============================================================================
+
+function _G.AutoDelete_FindBagSlotForItem(itemId, itemName)
+	local needle = itemName and Normalize(itemName) or nil
+	for bag = 0, NUM_BAG_SLOTS do
+		local slots = GetContainerNumSlots(bag) or 0
+		for slot = 1, slots do
+			local link = GetContainerItemLink(bag, slot)
+			if link then
+				local id = GetItemIDFromLink(link)
+				if itemId and id == itemId then return bag, slot, link end
+				if needle then
+					local name = GetItemInfo(link)
+					if name and Normalize(name) == needle then return bag, slot, link end
+				end
+			end
+		end
+	end
+	return nil, nil, nil
+end
+
+function _G.AutoDelete_ResolveItemReference(text)
+	text = Trim(text or "")
+	if text == "" and GetCursorInfo then
+		local cursorType, itemId, itemLink = GetCursorInfo()
+		if cursorType == "item" then
+			local id = (type(itemId) == "number") and itemId or GetItemIDFromLink(itemLink)
+			local name = id and GetItemInfo(id) or nil
+			return id, itemLink, name
+		end
+	end
+	local id = tonumber(text:match("Hitem:(%d+)") or text:match("item:(%d+)") or text:match("^(%d+)$"))
+	if id then
+		local name, link = GetItemInfo(id)
+		return id, link or ("item:" .. id), name or ("item:" .. id)
+	end
+	local clean = text:gsub("^%[(.+)%]$", "%1")
+	clean = Trim(clean)
+	if clean == "" then return nil, nil, nil end
+	local name, link = GetItemInfo(clean)
+	if link then
+		return GetItemIDFromLink(link), link, name
+	end
+	return nil, nil, clean
+end
+
+function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
+	local db = GetDB()
+	local profile = GetActiveProfile(db)
+	local lines = {}
+	if not itemLink and itemId then itemLink = "item:" .. itemId end
+	if (not bag or not slot) and (itemId or itemName) then
+		bag, slot, itemLink = _G.AutoDelete_FindBagSlotForItem(itemId, itemName)
+	end
+	itemName = itemName or (itemLink and GetItemInfo(itemLink)) or (itemId and ("item:" .. itemId)) or "Unknown item"
+	itemId = itemId or GetItemIDFromLink(itemLink)
+	table.insert(lines, "AutoDelete decision report")
+	table.insert(lines, "Item: " .. tostring(itemName) .. (itemId and (" (item:" .. itemId .. ")") or ""))
+	if bag and slot then
+		table.insert(lines, "Bag slot: " .. bag .. "." .. slot)
+	else
+		table.insert(lines, "Bag slot: not currently found in bags")
+	end
+	table.insert(lines, "")
+
+	local deleteNames, deleteIDs = BuildWantedSets(profile.listText, "delete-list")
+	local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
+	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	local onKeep = _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
+	local onDelete = (itemId and deleteIDs[itemId]) or (itemName and deleteNames[Normalize(itemName)])
+	local onSell = (itemId and sellIDs[itemId]) or (itemName and sellNames[Normalize(itemName)])
+
+	table.insert(lines, "List rules:")
+	table.insert(lines, "  Keep list: " .. (onKeep and "yes - protects item" or "no"))
+	table.insert(lines, "  Delete list: " .. (onDelete and "yes" or "no"))
+	table.insert(lines, "  Sell list: " .. (onSell and "yes" or "no"))
+
+	local name, quality, ilvl, itemClass, maxStack, equipSlot, vendorPrice = nil, nil, nil, nil, nil, nil, nil
+	if itemLink then
+		local info = { GetItemInfo(itemLink) }
+		name = info[1]
+		quality = info[3]
+		ilvl = info[4]
+		itemClass = info[6]
+		maxStack = info[8]
+		equipSlot = info[9]
+		vendorPrice = info[11]
+	end
+	local isQuestItem = (itemClass == "Quest")
+	local isDeleteGearItem = equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG"
+	local isSellGearItem = false
+	local isWeaponSlot = false
+	if equipSlot and GEAR_SLOTS[equipSlot] then
+		if WEAPON_SLOTS[equipSlot] then
+			isSellGearItem = true
+			isWeaponSlot = true
+		elseif itemClass == "Armor" or itemClass == "Weapon" then
+			isSellGearItem = true
+		end
+	end
+	local isCosmetic = itemLink and IsCosmeticSlot(itemLink)
+	local function InItemLevelRange(minIlvl, maxIlvl)
+		return ilvl and ilvl >= (minIlvl or 1) and ilvl <= (maxIlvl or 199)
+	end
+	local function RarityEnabled(rareFlag, epicFlag)
+		return (quality == 3 and rareFlag) or (quality == 4 and epicFlag)
+	end
+	table.insert(lines, "")
+	table.insert(lines, "Item facts:")
+	table.insert(lines, "  Quality: " .. tostring(quality))
+	table.insert(lines, "  iLvl: " .. tostring(ilvl))
+	table.insert(lines, "  Class: " .. tostring(itemClass))
+	table.insert(lines, "  Equip slot: " .. tostring(equipSlot))
+	table.insert(lines, "  Sell gear slot: " .. tostring(isSellGearItem))
+	table.insert(lines, "  Weapon slot: " .. tostring(isWeaponSlot))
+	table.insert(lines, "  Max stack: " .. tostring(maxStack))
+	table.insert(lines, "  Vendor price: " .. tostring(vendorPrice))
+
+	table.insert(lines, "")
+	table.insert(lines, "Delete decision:")
+	if onKeep then
+		table.insert(lines, "  Final: keep. Keep list wins before Delete or auto-delete.")
+	elseif bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "delete") then
+		table.insert(lines, "  Final: keep. Affix protection blocks delete.")
+	elseif onDelete then
+		table.insert(lines, "  Final: delete. Explicit Delete list entry matches.")
+	elseif isQuestItem then
+		table.insert(lines, "  Final: keep. Quest item blocks auto-delete.")
+	elseif quality == 0 and profile.qualityActionJunk == "delete" and not isCosmetic then
+		table.insert(lines, "  Final: delete. Junk auto action is Delete.")
+	elseif quality == 1 and profile.qualityActionCommon == "delete" and isDeleteGearItem and not isCosmetic then
+		table.insert(lines, "  Final: delete. Common gear auto action is Delete.")
+	elseif quality == 2 and profile.qualityActionGreens == "delete" and isDeleteGearItem and not isCosmetic then
+		table.insert(lines, "  Final: delete. Green gear auto action is Delete.")
+	else
+		table.insert(lines, "  Final: keep. No delete rule matched.")
+	end
+
+	table.insert(lines, "")
+	table.insert(lines, "Sell decision:")
+	if onKeep then
+		table.insert(lines, "  Final: keep. Keep list wins before Sell or auto-sell.")
+	elseif bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "sell") then
+		table.insert(lines, "  Final: keep. Affix protection blocks sell.")
+	elseif onSell then
+		table.insert(lines, "  Final: sell at vendor. Explicit Sell list entry matches.")
+	elseif isQuestItem then
+		table.insert(lines, "  Final: keep. Quest item blocks auto-sell.")
+	elseif quality == 0 and profile.qualityActionJunk == "sell" then
+		table.insert(lines, "  Final: sell at vendor. Junk auto action is Sell.")
+	elseif quality == 1 and profile.qualityActionCommon == "sell" and isSellGearItem then
+		table.insert(lines, "  Final: sell at vendor. Common gear auto action is Sell.")
+	elseif quality == 2 and profile.qualityActionGreens == "sell" and isSellGearItem then
+		table.insert(lines, "  Final: sell at vendor. Green gear auto action is Sell.")
+	elseif (quality == 3 or quality == 4) and isSellGearItem then
+		if not bag or not slot then
+			table.insert(lines, "  Final: keep for current scan. Rare/Epic sell categories require a bag slot to read BoE/BoP state.")
+		else
+			local isBoE = IsBindOnEquip(bag, slot)
+			if isBoE and isWeaponSlot and profile.boeWeaponsEnabled
+				and RarityEnabled(profile.boeWeaponsRare, profile.boeWeaponsEpic)
+				and InItemLevelRange(profile.boeWeaponsIlvlMin, profile.boeWeaponsIlvlMax) then
+				table.insert(lines, "  Final: sell at vendor. BoE Weapons rule matched.")
+			elseif (not isBoE) and profile.bopEnabled
+				and RarityEnabled(profile.bopRare, profile.bopEpic)
+				and InItemLevelRange(profile.bopIlvlMin, profile.bopIlvlMax) then
+				table.insert(lines, "  Final: sell at vendor. BoP rule matched.")
+			elseif isBoE and (not isWeaponSlot) and profile.boeArmorEnabled
+				and RarityEnabled(profile.boeArmorRare, profile.boeArmorEpic)
+				and InItemLevelRange(profile.boeArmorIlvlMin, profile.boeArmorIlvlMax) then
+				table.insert(lines, "  Final: sell at vendor. BoE Armor rule matched.")
+			else
+				table.insert(lines, "  Final: keep. No Rare/Epic sell category matched.")
+			end
+		end
+	else
+		table.insert(lines, "  Final: keep. No sell rule matched.")
+	end
+
+	table.insert(lines, "")
+	table.insert(lines, "Affix dot:")
+	if not bag or not slot or not itemLink then
+		table.insert(lines, "  Unknown. Item must be in a bag slot to scan tooltip markers.")
+	else
+		local tier = ClassifyAffixByLink(itemLink, bag, slot, nil)
+		if not tier then
+			table.insert(lines, "  Hidden. No @affix@ marker found.")
+		elseif cachedProfile and cachedProfile.showAffixDot == false then
+			table.insert(lines, "  Hidden. Show affix dot is off.")
+		else
+			local owned = AutoDelete_IsAffixOwnedByItemName(name or itemName)
+			local dotLevel, dotColor = _G.AutoDelete_DecideDot(itemLink, bag, slot, nil)
+			table.insert(lines, "  Tier: " .. tostring(tier))
+			table.insert(lines, "  PE ownership: " .. (owned == nil and "unknown" or (owned and "owned" or "missing")))
+			if not dotLevel then
+				table.insert(lines, "  Dot: hidden because Only Missing is on and the affix is owned.")
+			elseif dotColor == AFFIX_GOLD then
+				table.insert(lines, "  Dot: gold because the affix is missing or unlearned.")
+			else
+				table.insert(lines, "  Dot: tier color.")
+			end
+		end
+	end
+
+	table.insert(lines, "")
+	table.insert(lines, "Process Bags:")
+	if itemId and IsProcessIgnored(itemId) then
+		table.insert(lines, "  Ignored on this character.")
+	else
+		local found = false
+		if bag and slot then
+			for _, entry in ipairs(ProcessScan(profile)) do
+				if entry.bag == bag and entry.slot == slot then
+					local meta = PROCESS_ACTIONS[entry.action]
+					table.insert(lines, "  Eligible for: " .. (meta and meta.label or entry.action))
+					if (entry.count or 1) > 1 then
+						table.insert(lines, "  Grouped copies: " .. tostring(entry.count) .. " share this item ID.")
+					end
+					found = true
+					break
+				end
+			end
+		end
+		if not found and itemId then
+			for _, entry in ipairs(ProcessScan(profile)) do
+				if entry.itemId == itemId then
+					local meta = PROCESS_ACTIONS[entry.action]
+					table.insert(lines, "  Eligible for: " .. (meta and meta.label or entry.action) .. " (grouped by item ID).")
+					if (entry.count or 1) > 1 then
+						table.insert(lines, "  Grouped copies: " .. tostring(entry.count) .. " share this item ID.")
+					end
+					found = true
+					break
+				end
+			end
+		end
+		if not found then table.insert(lines, "  No current process action matched.") end
+	end
+
+	return table.concat(lines, "\n")
+end
+
+function _G.AutoDelete_ShowWhy(itemRef)
+	local id, link, name = _G.AutoDelete_ResolveItemReference(itemRef)
+	if not id and not name then
+		print("|cffff8000[AutoDelete]|r Right-click a Process Bags row, then choose Why?")
+		return
+	end
+	local text = _G.AutoDelete_BuildWhyReport(id, link, name)
+	if _G.AutoDelete_ShowReportWindow then
+		_G.AutoDelete_ShowReportWindow(text)
+	else
+		print("|cffff8000[AutoDelete]|r " .. text:gsub("\n", "\n|cffff8000[AutoDelete]|r "))
+	end
+end
+
+function _G.AutoDelete_BuildDiagnosticReport()
+	local db = GetDB()
+	local profile, profileKey, charKey = GetActiveProfile(db)
+	local c = ProcessScanCounts(profile)
+	local function CountEntries(listText)
+		local n = 0
+		for line in string.gmatch(listText or "", "[^\r\n]+") do
+			if Trim(line) ~= "" then n = n + 1 end
+		end
+		return n
+	end
+	local ignored = 0
+	for _ in pairs(GetProcessIgnoredTable()) do ignored = ignored + 1 end
+	local owned = 0
+	for _ in pairs(_G.AutoDelete_OwnedAffixes or {}) do owned = owned + 1 end
+	local version = (GetAddOnMetadata and GetAddOnMetadata("AutoDelete", "Version")) or "Unknown"
+	local lines = {
+		"AutoDelete diagnostic report",
+		"Version: " .. tostring(version),
+		"Character: " .. tostring(charKey),
+		"Profile: " .. tostring(profileKey),
+		"Enabled: " .. tostring(profile.enabled),
+		"Scan interval: " .. tostring(profile.scanInterval),
+		"",
+		"Lists:",
+		"  Delete: " .. CountEntries(profile.listText),
+		"  Sell: " .. CountEntries(profile.sellListText),
+		"  Keep: " .. CountEntries(profile.whitelistText),
+		"",
+		"Auto actions:",
+		"  Junk: " .. tostring(profile.qualityActionJunk),
+		"  Common: " .. tostring(profile.qualityActionCommon),
+		"  Greens: " .. tostring(profile.qualityActionGreens),
+		"",
+		"Affix:",
+		"  Show dot: " .. tostring(profile.showAffixDot),
+		"  Only missing: " .. tostring(profile.affixCollectionMode),
+		"  No Auto-Sell: " .. tostring(profile.protectAffixFromSell),
+		"  Min iLvl: " .. tostring(profile.affixIlvlMin),
+		"  Learned affixes mirrored: " .. owned,
+		"",
+		"Process Bags:",
+		"  Rows: " .. c.total,
+		"  Copies: " .. (c.copies or c.total),
+		"  DE: " .. c.disenchant,
+		"  Mill: " .. c.mill,
+		"  Prospect: " .. c.prospect,
+		"  Open: " .. c.open,
+		"  Ignored: " .. ignored,
+		"",
+		"Diagnostics:",
+		"  Perf enabled: " .. tostring(_G.AutoDelete_PerfEnabled),
+		"  Spike debug: " .. tostring(_G.AutoDelete_SpikeDebug),
+		"  ElvUI hook disabled: " .. tostring(_G.AutoDelete_ElvUIHookDisabled),
+	}
+	return table.concat(lines, "\n")
+end
+
+function _G.AutoDelete_ShowDiagnosticReport()
+	local text = _G.AutoDelete_BuildDiagnosticReport()
+	if _G.AutoDelete_ShowReportWindow then
+		_G.AutoDelete_ShowReportWindow(text)
+	else
+		print("|cffff8000[AutoDelete]|r Report window unavailable. Use /del help after the UI loads.")
+	end
+end
+
+function _G.AutoDelete_ShowItemQuickMenu(data, owner)
+	if not data then return end
+	local link = data.link or data.itemLink
+	local id = data.itemId or GetItemIDFromLink(link)
+	local name = data.name or (link and GetItemInfo(link)) or (id and GetItemInfo(id))
+	if not id then return end
+	local isProcessRow = data.action ~= nil
+	local frame = _G.AutoDelete_QuickMenuFrame
+	if not frame then
+		frame = CreateFrame("Frame", "AutoDeleteQuickMenu", UIParent)
+		frame:SetFrameStrata("FULLSCREEN_DIALOG")
+		frame:SetFrameLevel(200)
+		frame:EnableMouse(true)
+		frame:SetClampedToScreen(true)
+		frame:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
+		frame:SetBackdropColor(0.02, 0.02, 0.02, 1)
+		frame:SetBackdropBorderColor(0.30, 0.30, 0.30, 1)
+		frame:Hide()
+		frame._items = {}
+		frame:SetScript("OnHide", function(self) if self._closer then self._closer:Hide() end end)
+
+		local closer = CreateFrame("Button", nil, UIParent)
+		closer:SetAllPoints(UIParent)
+		closer:SetFrameStrata("FULLSCREEN_DIALOG")
+		closer:SetFrameLevel(199)
+		closer:RegisterForClicks("AnyDown")
+		closer:SetScript("OnClick", function() frame:Hide() end)
+		closer:Hide()
+		frame._closer = closer
+		_G.AutoDelete_QuickMenuFrame = frame
+	end
+
+	local actions = {
+		{ label = "Keep", func = function()
+			if AddItemToList("whitelistText", id) then
+				if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+				if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+			end
+		end },
+		{ label = "Sell", func = function()
+			if AddItemToList("sellListText", id) then
+				if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+				if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+			end
+		end },
+		{ label = "Delete", func = function()
+			if AddItemToList("listText", id) then
+				if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+				if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+			end
+		end },
+	}
+	if isProcessRow then
+		actions[#actions + 1] = { label = "Ignore for Process", func = function()
+			SetProcessIgnored(id, true)
+			if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+			print("|cffff8000[AutoDelete]|r Ignoring " .. (link or name or ("item:" .. id)) .. " in Process Bags.")
+		end }
+	end
+	actions[#actions + 1] = { label = "Why?", func = function()
+		local text = _G.AutoDelete_BuildWhyReport(id, link, name, data.bag, data.slot)
+		if _G.AutoDelete_ShowReportWindow then _G.AutoDelete_ShowReportWindow(text) else print(text) end
+	end }
+
+	for _, btn in ipairs(frame._items) do btn:Hide() end
+	frame._items = {}
+
+	local rowH = 22
+	local W = 160
+	frame:SetSize(W, rowH * #actions + 4)
+	frame:ClearAllPoints()
+	local mx, my = GetCursorPosition()
+	local scale = UIParent:GetEffectiveScale()
+	frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", (mx / scale) - 8, (my / scale) + 2)
+
+	local menuLevel = frame:GetFrameLevel()
+	for i, action in ipairs(actions) do
+		local btn = CreateFrame("Button", nil, frame)
+		btn:SetSize(W - 4, rowH)
+		btn:SetPoint("TOPLEFT", 2, -2 - (i - 1) * rowH)
+		btn:SetFrameLevel(menuLevel + 1)
+		btn:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
+		btn:SetBackdropColor(11 / 255, 11 / 255, 11 / 255, 1)
+		btn:SetBackdropBorderColor(0.25, 0.25, 0.25, 1)
+
+		local txt = btn:CreateFontString(nil, "OVERLAY")
+		txt:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
+		txt:SetTextColor(0.85, 0.85, 0.85, 1)
+		txt:SetJustifyH("LEFT")
+		txt:SetPoint("LEFT", 8, 0)
+		txt:SetPoint("RIGHT", -8, 0)
+		txt:SetText(action.label)
+
+		btn:SetScript("OnEnter", function()
+			btn:SetBackdropColor(20 / 255, 45 / 255, 70 / 255, 1)
+			btn:SetBackdropBorderColor(0.40, 0.40, 0.40, 1)
+			txt:SetTextColor(1, 1, 1, 1)
+		end)
+		btn:SetScript("OnLeave", function()
+			btn:SetBackdropColor(11 / 255, 11 / 255, 11 / 255, 1)
+			btn:SetBackdropBorderColor(0.25, 0.25, 0.25, 1)
+			txt:SetTextColor(0.85, 0.85, 0.85, 1)
+		end)
+		btn:SetScript("OnClick", function()
+			frame:Hide()
+			action.func()
+		end)
+		frame._items[#frame._items + 1] = btn
+	end
+
+	frame:Show()
+	frame._closer:Show()
+end
 
 local scanner = CreateFrame("Frame")
 -- Expose to _G so _G.AutoDelete_SetSpikeDebug (which lives in the spike
@@ -7705,6 +8201,7 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 		-- by PLAYER_LOGIN), the install is a no-op and the SPELLS_CHANGED
 		-- handler will pick up affix updates as a fallback.
 		if AutoDelete_InstallPEAffixHook then AutoDelete_InstallPEAffixHook() end
+		if _G.AutoDelete_InstallBagAltRightHook then _G.AutoDelete_InstallBagAltRightHook() end
 
 		-- One-Key Disenchant: create the SecureActionButton once. Name is
 		-- referenced by the panel's key-capture row as the CLICK target
@@ -7725,6 +8222,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 			disenchantButton:RegisterForClicks("AnyUp")
 			disenchantButton:SetAttribute("type", "macro")
 			disenchantButton:SetAttribute("macrotext", "")
+			disenchantButton:HookScript("PreClick", function()
+				if _G.AutoDelete_OnOneKeyPreClick then _G.AutoDelete_OnOneKeyPreClick("disenchant") end
+			end)
 		end
 		RefreshDisenchantKnown()
 		UpdateDisenchantButton()
@@ -7840,8 +8340,8 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 
 		AfterDelay(2, function()
 			CreateElvUIBagButton()
-			-- Hook ElvUI's per-slot update so affix dots also appear on the
-			-- ElvUI bag UI, not just default Blizzard bags.
+			-- Last-resort compatibility path for ElvUI's replacement bag UI.
+			-- Default Blizzard bags use ContainerFrame_Update above.
 			InstallElvUIAffixDotHook()
 			-- Show the welcome popup unless the user clicked
 			-- "Don't show this again" on a previous login.
@@ -8119,14 +8619,11 @@ scanner:SetScript("OnUpdate", function(self, elapsed)
 		if _G.AutoDelete_UpdateOpenButton        then _G.AutoDelete_UpdateOpenButton() end
 		if _G.AutoDelete_UpdateMillButton        then _G.AutoDelete_UpdateMillButton() end
 		if _G.AutoDelete_UpdateProspectButton    then _G.AutoDelete_UpdateProspectButton() end
-		-- v3.20: piggyback the Keep-list override check on the same
-		-- trailing-edge debounce. Walks bags once per action; fires the
-		-- popup if a Keep-blocked candidate exists and isn't already
-		-- skipped. Also runs the Open slot-change detector so the chat
-		-- notifier prints "[AutoDelete] Opened [link]" after the user
-		-- presses the Open keybind (Open uses /use, not a spell, so
-		-- UNIT_SPELLCAST_SUCCEEDED doesn't fire for it).
-		if _G.AutoDelete_CheckKeepOverrides   then _G.AutoDelete_CheckKeepOverrides()   end
+		-- Keep-list override popups are deliberately NOT checked here.
+		-- They only appear from the matching one-key hotkey path, otherwise
+		-- ordinary bag refreshes and Process Bags previews can spam warnings.
+		-- The Open slot-change detector still runs here so the chat notifier
+		-- prints "[AutoDelete] Opened [link]" after the user presses Open.
 		if _G.AutoDelete_CheckOpenSlotChange  then _G.AutoDelete_CheckOpenSlotChange()  end
 		AutoDelete_PerfEnd("deferred button refresh (all 4)", _pBR)
 	end
@@ -9219,9 +9716,9 @@ _G.AutoDelete_Profiles.PreviewImport = PreviewImport
 _G.AutoDelete_Profiles.ApplyImport = ApplyImport
 
 -- ============================================================================
--- Modifier-click handlers (shift = search fill, alt = add to Keep)
+-- Modifier-click handlers (shift = search fill, Alt+Right = item quick menu)
 -- ============================================================================
--- Shift-click and alt-click do different things:
+-- Shift-click and Alt+Right-click do different things:
 --
 --   SHIFT-CLICK is the search-box-fill shortcut. When our settings panel is
 --   visible, shift-clicking an item link (chat, bag, anywhere) fills the
@@ -9230,32 +9727,33 @@ _G.AutoDelete_Profiles.ApplyImport = ApplyImport
 --   bank/guild bank moves). Just observe the click via hooksecurefunc and
 --   update the search box. Returns nothing, eats nothing.
 --
---   ALT-CLICK is the Keep-list shortcut. Holding alt and clicking an item
---   link adds it to the Keep list. Alt-click has no default WoW behavior
---   for items in 3.3.5, so we can intercept it cleanly without competing
---   with anything. We do skip on AH/bank/guild-bank/vendor/tradeskill/craft
---   windows out of caution (other addons may bind alt-click for compare
---   tooltip, drop, etc.) and on stackable items.
+--   ALT+RIGHT-CLICK opens AutoDelete's quick item menu. Real bag items use
+--   Blizzard's modified-click function, never per-button bag slot OnClick
+--   wrappers and never UseContainerItem. The guard is deliberately narrow:
+--   pure Alt+Right only, valid bag/slot only, otherwise call Blizzard's
+--   original handler.
 --
 -- Why this split: shift-click is heavily overloaded by Blizzard. Every new
--- context we discover (stack split, AH, bank, ...) is another whack-a-mole
--- to suppress. Alt-click has no such conflicts, so the destructive feature
--- (adding to a managed list) lives there.
+-- context we discover (stack split, AH, bank, ...) is another suppress case.
+-- Alt+Right-click on item links still uses HandleModifiedItemClick /
+-- ChatEdit_InsertLink. Bag-slot OnClick handlers stay untouched.
 
--- Shared skip-frame check used by both shift and alt paths. Returns true if
+-- Shared skip-frame check used by both shift and Alt+Right paths. Returns true if
 -- we should bail (some context is open that uses modifier-click for its own
 -- purposes). Shift's search-fill is non-destructive, so technically it's
 -- safe to run anywhere - we still skip in these contexts to keep the
 -- behavior of both modifiers consistent and predictable.
-local function ShouldSkipContext()
+local function ShouldSkipContext(allowVendor)
 	local skipFrames = {
 		{ frame = AuctionFrame,    name = "Auction House" },
 		{ frame = BankFrame,       name = "Bank" },
 		{ frame = GuildBankFrame,  name = "Guild Bank" },
-		{ frame = MerchantFrame,   name = "Vendor" },
 		{ frame = TradeSkillFrame, name = "Tradeskill" },
 		{ frame = CraftFrame,      name = "Craft" },
 	}
+	if not allowVendor then
+		skipFrames[#skipFrames + 1] = { frame = MerchantFrame, name = "Vendor" }
+	end
 	for _, f in ipairs(skipFrames) do
 		if f.frame and f.frame:IsShown() then
 			if _G.AutoDelete_DebugSell then
@@ -9287,17 +9785,78 @@ local function HandleShiftClickFill(link)
 end
 
 -- ----------------------------------------------------------------------------
--- ALT-CLICK: add to Keep list.
+-- ALT+RIGHT-CLICK: quick item menu.
 -- ----------------------------------------------------------------------------
 local lastHandledItemId = nil
 local lastHandledAt = 0
 
+function _G.AutoDelete_IsAltRightClick()
+	if not IsAltKeyDown() then return false end
+	if not IsMouseButtonDown then return false end
+	return IsMouseButtonDown("RightButton")
+end
+
+function _G.AutoDelete_ResolveBagSlotFromModifiedClickButton(buttonFrame)
+	if not buttonFrame then return nil, nil end
+	local bag, slot
+
+	if buttonFrame.GetBagID then
+		local ok, value = pcall(buttonFrame.GetBagID, buttonFrame)
+		if ok then bag = value end
+	end
+	if buttonFrame.GetID then
+		local ok, value = pcall(buttonFrame.GetID, buttonFrame)
+		if ok then slot = value end
+	end
+
+	if bag == nil and buttonFrame.GetParent then
+		local parent = buttonFrame:GetParent()
+		if parent and parent.GetID then
+			local ok, value = pcall(parent.GetID, parent)
+			if ok then bag = value end
+		end
+	end
+
+	bag = bag or buttonFrame.bagID or buttonFrame.BagID or buttonFrame.bag or buttonFrame.Bag
+	slot = slot or buttonFrame.slotID or buttonFrame.SlotID or buttonFrame.slot or buttonFrame.Slot
+	if type(bag) ~= "number" or type(slot) ~= "number" then return nil, nil end
+	if bag < 0 or bag > NUM_BAG_SLOTS or slot < 1 then return nil, nil end
+	return bag, slot
+end
+
+function _G.AutoDelete_ShouldConsumeBagAltRight(buttonFrame, mouseButton)
+	if mouseButton ~= "RightButton" then return false end
+	if not IsAltKeyDown() or IsShiftKeyDown() or IsControlKeyDown() then return false end
+	if ShouldSkipContext(true) then return false end
+	if GetCurrentKeyBoardFocus and GetCurrentKeyBoardFocus() then return false end
+	if GetCursorInfo and GetCursorInfo() then return false end
+	if not _G.AutoDelete_ShowItemQuickMenu then return false end
+
+	local bag, slot = _G.AutoDelete_ResolveBagSlotFromModifiedClickButton(buttonFrame)
+	if not bag or not slot then return false end
+	local link = GetContainerItemLink(bag, slot)
+	if not link then return false end
+	local itemId = GetItemIDFromLink(link)
+	if not itemId then return false end
+	return true, bag, slot, link, itemId
+end
+
+function _G.AutoDelete_OpenBagAltRightMenu(buttonFrame, mouseButton)
+	local consume, bag, slot, link, itemId = _G.AutoDelete_ShouldConsumeBagAltRight(buttonFrame, mouseButton)
+	if not consume then return false end
+	if _G.AutoDelete_DebugSell then
+		print("|cffff8000[AutoDelete DEBUG]|r Alt+Right menu via ContainerFrameItemButton_OnModifiedClick. link=" .. tostring(link))
+	end
+	_G.AutoDelete_ShowItemQuickMenu({ itemId = itemId, link = link, bag = bag, slot = slot })
+	return true
+end
+
 -- Returns true if the click was consumed (for ChatEdit_InsertLink to know
 -- whether to suppress its default chat-insert behavior).
-local function HandleAltClickKeep(link, source)
+local function HandleAltRightClickMenu(link, source, bag, slot)
 	if not link then return false end
 	if _G.AutoDelete_DebugSell then
-		print("|cffff8000[AutoDelete DEBUG]|r alt-click via " .. source .. ". link=" .. tostring(link))
+		print("|cffff8000[AutoDelete DEBUG]|r Alt+Right menu via " .. source .. ". link=" .. tostring(link))
 	end
 
 	local itemId = GetItemIDFromLink(link)
@@ -9306,30 +9865,18 @@ local function HandleAltClickKeep(link, source)
 	end
 	if not itemId then return false end
 
-	if ShouldSkipContext() then return false end
+	if ShouldSkipContext(true) then return false end
 
-	-- Skip stackable items. Even though alt-click has no default stack-split
-	-- behavior, stackables (mats, consumables, currency) don't need Keep-list
-	-- protection - the auto-rules only target gear quality.
-	local _, _, _, _, _, _, _, maxStack = GetItemInfo(link)
-	if maxStack and maxStack > 1 then
-		if _G.AutoDelete_DebugSell then
-			print("|cffff8000[AutoDelete DEBUG]|r stackable item (maxStack=" .. tostring(maxStack) .. "), skipping")
-		end
-		return false
-	end
-
-	-- Dedupe: a single alt-click in chat fires both ChatEdit_InsertLink AND
-	-- HandleModifiedItemClick, which would double-print "added/already in
-	-- list". Suppress the second invocation within a 0.5s window.
+	-- Dedupe: a single modified click in chat can fire both ChatEdit_InsertLink
+	-- and HandleModifiedItemClick. Suppress the second menu open inside 0.5s.
 	local now = GetTime()
 	if lastHandledItemId == itemId and (now - lastHandledAt) < 0.5 then
 		if _G.AutoDelete_DebugSell then
 			print("|cffff8000[AutoDelete DEBUG]|r duplicate within window, skipping")
 		end
-		-- Still return true on the chat-link path so we don't double-insert
-		-- into the chat editbox.
-		return source == "ChatEdit_InsertLink"
+		-- Consume duplicates too. Alt+Right is AutoDelete-owned in this addon,
+		-- and a second path should never fall through to normal item use.
+		return true
 	end
 	lastHandledItemId = itemId
 	lastHandledAt = now
@@ -9341,26 +9888,44 @@ local function HandleAltClickKeep(link, source)
 	local focus = GetCurrentKeyBoardFocus and GetCurrentKeyBoardFocus()
 	if focus then return false end
 
-	AddItemToList("whitelistText", itemId)
+	if _G.AutoDelete_ShowItemQuickMenu then
+		_G.AutoDelete_ShowItemQuickMenu({ itemId = itemId, link = link, bag = bag, slot = slot })
+	end
 	return true   -- eat the chat-link insert if that's how we got here
 end
 
 -- ----------------------------------------------------------------------------
 -- Hook installation
 -- ----------------------------------------------------------------------------
+-- Real bag items: replace the global modified-click dispatcher with a tiny
+-- wrapper so pure Alt+Right can be consumed before Blizzard falls through to
+-- normal item use. All other clicks call the original dispatcher.
+function _G.AutoDelete_InstallBagAltRightHook()
+	if _G.AutoDelete_BagAltRightHookInstalled then return true end
+	if type(ContainerFrameItemButton_OnModifiedClick) ~= "function" then return false end
+	_G.AutoDelete_Original_ContainerFrameItemButton_OnModifiedClick = ContainerFrameItemButton_OnModifiedClick
+	ContainerFrameItemButton_OnModifiedClick = function(self, button)
+		if _G.AutoDelete_OpenBagAltRightMenu(self, button) then return end
+		return _G.AutoDelete_Original_ContainerFrameItemButton_OnModifiedClick(self, button)
+	end
+	_G.AutoDelete_BagAltRightHookInstalled = true
+	return true
+end
+_G.AutoDelete_InstallBagAltRightHook()
+
 -- Shift-click (search fill) is hooked via hooksecurefunc on
 -- HandleModifiedItemClick. We also hook ChatEdit_InsertLink to catch the
--- chat-link path. Both are read-only observations - they never return true,
--- so default WoW behavior continues uninterrupted.
+-- chat-link path. Both are read-only observations for Shift; Alt+Right on
+-- chat links is consumed only when AutoDelete opens the quick menu.
 hooksecurefunc("HandleModifiedItemClick", function(link)
 	if IsShiftKeyDown() then HandleShiftClickFill(link) end
-	if IsAltKeyDown() then HandleAltClickKeep(link, "HandleModifiedItemClick") end
+	if _G.AutoDelete_IsAltRightClick() then HandleAltRightClickMenu(link, "HandleModifiedItemClick") end
 end)
 
--- Alt-click on a chat hyperlink: ChatEdit_InsertLink is the function called
+-- Alt+Right-click on a chat hyperlink: ChatEdit_InsertLink is the function called
 -- when the user holds a modifier and clicks a chat link. We intercept on
--- alt to suppress the default behavior (insert link text into chat editbox)
--- when we're consuming the click for Keep-add. Shift-click on chat links
+-- Alt+Right to suppress the default behavior (insert link text into chat editbox)
+-- when we're consuming the click for the quick item menu. Shift-click on chat links
 -- still goes through to the default (insert into chat) - we DO call the
 -- search-fill path on shift but never consume the click.
 local AutoDelete_Original_ChatEdit_InsertLink = ChatEdit_InsertLink
@@ -9370,8 +9935,8 @@ ChatEdit_InsertLink = function(link)
 		HandleShiftClickFill(link)
 		return AutoDelete_Original_ChatEdit_InsertLink(link)
 	end
-	-- Alt-click: try to consume.
-	if IsAltKeyDown() and HandleAltClickKeep(link, "ChatEdit_InsertLink") then
+	-- Alt+Right-click: try to consume.
+	if _G.AutoDelete_IsAltRightClick() and HandleAltRightClickMenu(link, "ChatEdit_InsertLink") then
 		return true
 	end
 	return AutoDelete_Original_ChatEdit_InsertLink(link)
@@ -9380,7 +9945,8 @@ end
 SLASH_AUTODELETE1 = "/del"
 SLASH_AUTODELETE2 = "/autodelete"
 SlashCmdList["AUTODELETE"] = function(msg)
-	local arg = Trim(string.lower(msg or ""))
+	local rawArg = Trim(msg or "")
+	local arg = string.lower(rawArg)
 	if arg == "clean" then
 		CleanLists()
 		return
@@ -9404,6 +9970,10 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		if _G.AutoDelete_ToggleProcessPanel then
 			_G.AutoDelete_ToggleProcessPanel()
 		end
+		return
+	end
+	if arg == "report" then
+		if _G.AutoDelete_ShowDiagnosticReport then _G.AutoDelete_ShowDiagnosticReport() end
 		return
 	end
 	if arg == "debug" then
@@ -9710,6 +10280,7 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		row("/del clean",        "run a delete pass on your bags right now")
 		row("/del sell",         "run a sell pass at the open vendor right now")
 		row("/del process",      "toggle the Process Bags window (DE / Mill / Prospect / Open)")
+		row("/del report",       "open a copyable diagnostic report")
 		row("/del setup",        "re-open the first-time setup / welcome popup")
 		print(" ")
 		row("/del collection",   "toggle Affix Collection Mode (gold dot on un-learned only)")

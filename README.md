@@ -76,12 +76,21 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 **One-Key actions** (Keybinds tab)
 - Bind a key to any of: Disenchant, Mill, Prospect, or Open a container
 - Each press acts on the next eligible item in your bags
+- Keep-list override warnings only appear when the matching one-key action is pressed
 - Status line per row shows the next target, or "Requires <profession>" if the character can't perform the action
 - Per-action Filters button to tune what each one targets
 
 **Process Bags panel** (`/del process`)
 - Standalone window showing what AutoDelete would do to each bag slot
 - Inspect what's about to happen before it does
+- Items with the same item ID are grouped together to reduce repeated rows when affix names differ
+- Right-click a row for quick actions: Keep, Sell, Delete, Ignore for Process, or Why?
+- Alt+Right-click a real bag item for the same quick actions, without changing normal right-click item use
+
+**Why? and report**
+- Right-click a Process Bags row, then choose **Why?** for a copyable item decision report
+- `/del report` opens a copyable diagnostic summary
+- The Help tab has topic buttons with practical how-to guidance for each main area
 
 **Quality of life**
 - Bags stay open when the vendor closes
@@ -110,6 +119,7 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 /del sell          Force a sell pass at the current vendor
 /del setup         Reopen the welcome popup
 /del process       Open the Process Bags inspection window
+/del report        Open a copyable diagnostic report
 /del collection    Toggle Affix Collection Mode (show only unlearned affixes)
 /del debug         Toggle the auto-sell / auto-delete debug trace
 /del bench         Run a loot-burst performance benchmark (diagnostic)
