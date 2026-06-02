@@ -2612,8 +2612,7 @@ _G.AutoDelete_DeleteQueue = _G.AutoDelete_DeleteQueue or {
 	DELAY  = 0.09,  -- 90ms; slight speed nudge, still one pop per tick
 }
 
--- KEEPONE_TEST_HELPER_BEGIN
-_G.AutoDelete_KeepOnePlanSlotAction = function(totalUnits, slotCount)
+local function PlanKeepOneSlotAction(totalUnits, slotCount)
 	totalUnits = tonumber(totalUnits) or 0
 	slotCount = tonumber(slotCount) or 0
 	if totalUnits <= 1 or slotCount <= 0 then
@@ -2625,7 +2624,6 @@ _G.AutoDelete_KeepOnePlanSlotAction = function(totalUnits, slotCount)
 	end
 	return "split-delete", maxDeletable
 end
--- KEEPONE_TEST_HELPER_END
 
 _G.AutoDelete_CountBagUnitsByItemId = function(itemId)
 	if not itemId then return 0 end
@@ -2820,7 +2818,7 @@ local function DeleteItems()
 					if total == nil then
 						total = _G.AutoDelete_CountBagUnitsByItemId(itemId)
 					end
-					local action, amount = _G.AutoDelete_KeepOnePlanSlotAction(total, itemCount or 1)
+					local action, amount = PlanKeepOneSlotAction(total, itemCount or 1)
 					if action ~= "keep" and amount > 0 then
 						shouldDelete = true
 						deleteSourceRule = "KeepOne"
@@ -3098,7 +3096,7 @@ _G.AutoDelete_ValidateDrainEntry = function(profile, entry, currentLink)
 		end
 		local _, currentCount = GetContainerItemInfo(entry.bag, entry.slot)
 		local total = _G.AutoDelete_CountBagUnitsByItemId(entry.id)
-		local action, amount = _G.AutoDelete_KeepOnePlanSlotAction(total, currentCount or 1)
+		local action, amount = PlanKeepOneSlotAction(total, currentCount or 1)
 		if action == "keep" or amount <= 0 then
 			return false, "keepone-complete"
 		end
