@@ -38,7 +38,7 @@ Quest items are protected from every auto-rule, regardless of list state.
 - Drag-and-drop or shift-click to add items
 - Per-character lists with profile copy
 - Built-in search and raw view
-- **Import Raw** (Profile tab): paste item names, item links, `item:<id>`, or plain numeric IDs, then pick Delete, Sell, or Keep. AutoDelete resolves cached names, current bag items, and known list entries, while reporting ambiguous or unresolved names instead of guessing.
+- **Import Raw** (Profile tab): paste item names, item links, `item:<id>`, or plain numeric IDs, then pick Delete, Sell, Keep, or KeepOne. AutoDelete resolves cached names, current bag items, and known list entries, while reporting ambiguous or unresolved names instead of guessing.
 - **Import Lists** (Profile tab): copy lists from a known item-name catalog
 - **Export Raw** (Profile tab): dumps any list as plain text for sharing or backup. Pre-selected on open so Ctrl+C grabs it.
 - **Audit Lists** (Profile tab or `/del audit`): copyable report for duplicates, cross-list conflicts, name-only entries, same-name item ID traps, and uncached item IDs. **Fix Safe** removes same-list duplicates and normalizes safe item references only.
@@ -121,13 +121,13 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 
 ```
 /del               Open the settings panel
-/del clean         Remove duplicates across Delete and Sell lists
+/del clean         Remove duplicate or conflicting item-list entries
 /del sell          Force a sell pass at the current vendor
 /del setup         Reopen the welcome popup
 /del process       Open the Process Bags inspection window
 /del report        Open a copyable diagnostic report
 /del history       Open recent sell / delete / keep decisions
-/del audit         Open a copyable Delete / Sell / Keep list audit
+/del audit         Open a copyable item-list audit
 /del audit fix     Apply safe list cleanup only
 /del affix         Open the Learned / Unlearned affix list
 /del debug         Toggle the auto-sell / auto-delete debug trace

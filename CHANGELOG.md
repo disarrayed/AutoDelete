@@ -4,21 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.22] - 2026-06-02
+
 ### Improved
 
-- **Import Raw name matching.** Import Raw now accepts item links, `item:<id>`, plain numeric IDs, cached item names, current bag item names, and names already known from existing list entries. Ambiguous names are skipped with candidate IDs instead of guessed.
-- **Import Raw safety.** Import Raw now skips items already on another AutoDelete list and reports the conflict instead of silently creating cross-list entries.
-- **Vendor selling speed.** Auto-sell at vendors now skips the loot-burst wait between sell batches and caps vendor sell passes at a middle-ground cadence.
-- **Delete queue speed.** Auto-delete drains the queue a little faster while still deleting only one queued item per throttle tick.
+- **KeepOne list.** Add items to KeepOne to delete extras while keeping one single unit. This is for any item you add to the list, not just tabards.
 - **Lists refresh clarity.** The Lists tab Refresh button now has inline helper text explaining that it loads item names.
 - **Decision history.** `/del history` opens a copyable session log of recent sell, delete, and protected keep decisions with item, final action, reason, and source rule.
-- **List Audit.** `/del audit` opens a copyable Delete / Sell / Keep audit that reports duplicate lines, cross-list conflicts, name-only entries, same-name item ID traps, and uncached item IDs.
+- **List Audit.** `/del audit` opens a copyable item-list audit that reports duplicate lines, cross-list conflicts, name-only entries, same-name item ID traps, and uncached item IDs.
 - **Safe list cleanup.** `/del audit fix` and the Profiles tab Fix Safe button remove same-list duplicates and normalize full item links or plain numeric IDs to `item:<id>` without guessing cross-list or same-name conflicts.
 - **Process Bags 2.0.** `/del process` now filters rows by All, Sell, Delete, DE, Mill, Prospect, Open, or Kept, so the panel can inspect cleanup decisions as well as one-key action targets.
 - **Process Bags row behavior.** Left-click DE / Mill / Prospect / Open rows to arm keybind targets. Left-click Sell / Delete / Kept rows to open Why?. Ignore for Process is limited to one-key action rows.
 - **Scavenger diagnostic.** `/del scav` now opens a copyable Greedy Scavenger summon, retry, combat-gate, mount, pending-summon, and stuck-detection report. `/del pet` and `/del pos` remain aliases.
 - **Goblin diagnostic.** `/del goblin` now opens a copyable Goblin Merchant auto-summon report instead of printing debug lines to chat.
-- **Summon attempt chat.** AutoDelete now prints only the first summon attempt for Greedy Scavenger or Goblin Merchant, suppresses retry-attempt spam, and cooldown-gates repeated final failure messages.
 - **Learned Affixes tabs.** The Scan Learned Affixes window now has Learned and Unlearned tabs so you can see which Project Ebonhold affixes are still missing.
 - **Clickable affix names.** Click an affix in the Learned Affixes window to select that name in a copy-only field for Ctrl+C. The field restores the affix text if typed into; Enter or Escape clears it.
 - **Affix Tools labels.** The Affix tab now names its tools Refresh List and Update Affix List.
@@ -27,11 +25,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- **Scavenger combat gate.** When **Only in Combat** is enabled, AutoDelete now blocks every automatic Greedy Scavenger summon while out of combat, including delayed After sell and After vendor close summons.
 - **Profiles tab layout.** Audit Lists and Fix Safe now fit inside the Profiles tab instead of extending into the info strip.
-- **Goblin Merchant summon retry.** AutoDelete now confirms the Goblin Merchant is actually out before printing success, retries quietly when the first summon call does not produce the merchant, and only asks for manual summon after retry attempts fail.
-- **Scavenger summon retry.** AutoDelete now confirms Greedy Scavenger is actually out before tracking it as summoned, so a dropped summon call no longer becomes fake user-dismiss grace.
-- **Scavenger after-sell trigger.** After sell and After vendor close no longer depend on the vendor name matching Goblin Merchant; After sell also fires from vendor close when the sell loop has not reached its dry-tick finish yet. The combat gate is the only extra gate when Only in Combat is enabled.
 - **Companion summon contention.** Goblin Merchant and Greedy Scavenger now share a summon owner lock so their retry loops cannot fight over the same companion slot or spam alternating summon attempts.
 - **Companion summon priority.** Full bags now reserve the companion slot for Goblin Merchant; Greedy Scavenger waits until bags are above the configured threshold. Failed auto-Merchant attempts also enter a short backoff so AutoDelete does not spam while the player summons Merchant manually.
 - **Merchant re-arm while bags stay full.** If a Goblin Merchant summon attempt fails or is dropped while bags remain full, AutoDelete now re-arms the bag-full trigger after the short backoff instead of waiting for bags to free first.

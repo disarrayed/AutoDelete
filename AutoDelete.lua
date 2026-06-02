@@ -10171,7 +10171,7 @@ end)
 -- Slash Commands
 -- ============================================================================
 -- /del               -> toggle the options panel
--- /del clean         -> dedupe Delete and Sell lists (see ResolveEntryKey
+-- /del clean         -> dedupe and resolve item-list conflicts (see ResolveEntryKey
 --                       below for the matching rules)
 -- /del sell          -> force a sell pass at the current vendor (NOT gated
 --                       by master Enable; manual override)
@@ -10179,11 +10179,12 @@ end)
 -- /autodelete        -> alias for /del
 
 -- ----------------------------------------------------------------------------
--- /del clean - remove duplicate entries from Delete + Sell lists
+-- /del clean - remove duplicate entries and item-list conflicts
 -- ============================================================================
 -- Rules:
 --   * Within a single list: keep first occurrence, remove subsequent duplicates
---   * Across Delete + Sell lists: if an item appears on BOTH, remove from BOTH
+--   * Keep wins over Delete, Sell, and KeepOne
+--   * Across Delete + Sell + KeepOne: if an item appears on more than one, remove it
 --     (reported so the user can re-add to their preferred list)
 --
 -- Identity resolution: entries are either "item:N" or a plain name.
@@ -11493,7 +11494,7 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		row("/del",              "open / close the settings panel")
 		row("/del help",         "show this list (also: /del ? or /del commands)")
 		print(" ")
-		row("/del clean",        "remove duplicate or conflicting Delete and Sell entries")
+		row("/del clean",        "remove duplicate or conflicting item-list entries")
 		row("/del sell",         "run a sell pass at the open vendor right now")
 		row("/del process",      "toggle the Process Bags window (DE / Mill / Prospect / Open)")
 		row("/del report",       "open a copyable diagnostic report")
