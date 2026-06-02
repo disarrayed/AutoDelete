@@ -1203,6 +1203,7 @@ local DEFAULT_PROFILE = {
 	listText      = "",   -- Delete list  (auto-destroyed every scan)
 	sellListText  = "",   -- Sell list    (auto-sold at any vendor)
 	whitelistText = "",   -- Keep list    (protected from all rules)
+	keepOneText   = "",   -- KeepOne list (delete extras, leave one unit)
 
 	-- ============================================================
 	-- Periodic scan
@@ -2000,11 +2001,13 @@ end
 local function FindCrossListConflict(profile, targetKey, line)
 	local otherKeys
 	if targetKey == "listText" then
-		otherKeys = { "sellListText", "whitelistText" }
+		otherKeys = { "sellListText", "whitelistText", "keepOneText" }
 	elseif targetKey == "sellListText" then
-		otherKeys = { "listText", "whitelistText" }
+		otherKeys = { "listText", "whitelistText", "keepOneText" }
 	elseif targetKey == "whitelistText" then
-		otherKeys = { "listText", "sellListText" }
+		otherKeys = { "listText", "sellListText", "keepOneText" }
+	elseif targetKey == "keepOneText" then
+		otherKeys = { "listText", "sellListText", "whitelistText" }
 	else
 		return false, nil
 	end
@@ -2018,6 +2021,7 @@ local function ListLabelForKey(key)
 	if key == "listText" then return "Delete" end
 	if key == "sellListText" then return "Sell" end
 	if key == "whitelistText" then return "Keep" end
+	if key == "keepOneText" then return "KeepOne" end
 	return key
 end
 
@@ -2047,6 +2051,7 @@ local function AddItemToList(listKey, itemId)
 	local label
 	if listKey == "sellListText" then label = "sell"
 	elseif listKey == "whitelistText" then label = "keep"
+	elseif listKey == "keepOneText" then label = "KeepOne"
 	else label = "delete" end
 	print("|cffff8000[AutoDelete]|r: Added " .. itemName .. " to " .. label .. " list")
 	return true
@@ -2330,8 +2335,8 @@ local function ResetCurrentProfile()
 	return true
 end
 
--- Clear one list or all three lists on the current character's profile.
--- `target` is "Delete" / "Sell" / "Keep" / "All". Returns true, cleared-count
+-- Clear one list or all item lists on the current character's profile.
+-- `target` is "Delete" / "Sell" / "Keep" / "KeepOne" / "All". Returns true, cleared-count
 -- on success, or false, reason on failure.
 local function ClearListOnCurrent(target)
 	local db = GetDB()
@@ -2357,13 +2362,18 @@ local function ClearListOnCurrent(target)
 	elseif target == "Keep" then
 		clearedCount = CountEntries(profile.whitelistText)
 		profile.whitelistText = ""
+	elseif target == "KeepOne" then
+		clearedCount = CountEntries(profile.keepOneText)
+		profile.keepOneText = ""
 	elseif target == "All" then
 		clearedCount = CountEntries(profile.listText)
 			+ CountEntries(profile.sellListText)
 			+ CountEntries(profile.whitelistText)
+			+ CountEntries(profile.keepOneText)
 		profile.listText = ""
 		profile.sellListText = ""
 		profile.whitelistText = ""
+		profile.keepOneText = ""
 	else
 		return false, "invalid target"
 	end
@@ -2473,8 +2483,9 @@ local function RemoveSellableFromDeleteList()
 end
 
 -- Exposed API for Options.lua.
--- Scan all three lists (Delete + Sell + Keep) and remove any entry whose
+-- Scan Delete + Sell + Keep and remove any entry whose
 -- item's GetItemInfo 7th return (localized itemSubType) matches the target.
+-- KeepOne is intentionally excluded; it is not a filter-cleanup list.
 -- Used by the "Remove Patterns by Profession" UI to prune recipes/patterns/
 -- plans/schematics/formulas/designs/techniques/manuals from the user's lists.
 -- Plain-name entries (no item:ID) are preserved -- we can't identify them
@@ -2601,6 +2612,35 @@ _G.AutoDelete_DeleteQueue = _G.AutoDelete_DeleteQueue or {
 	DELAY  = 0.09,  -- 90ms; slight speed nudge, still one pop per tick
 }
 
+-- KEEPONE_TEST_HELPER_BEGIN
+_G.AutoDelete_KeepOnePlanSlotAction = function(totalUnits, slotCount)
+	totalUnits = tonumber(totalUnits) or 0
+	slotCount = tonumber(slotCount) or 0
+	if totalUnits <= 1 or slotCount <= 0 then
+		return "keep", 0
+	end
+	local maxDeletable = totalUnits - 1
+	if slotCount <= maxDeletable then
+		return "delete-slot", slotCount
+	end
+	return "split-delete", maxDeletable
+end
+-- KEEPONE_TEST_HELPER_END
+
+_G.AutoDelete_CountBagUnitsByItemId = function(itemId)
+	if not itemId then return 0 end
+	local total = 0
+	for bag = 0, 4 do
+		for slot = 1, GetContainerNumSlots(bag) do
+			local _, count, locked, _, _, _, link = GetContainerItemInfo(bag, slot)
+			if link and not locked and GetItemIDFromLink(link) == itemId then
+				total = total + (count or 1)
+			end
+		end
+	end
+	return total
+end
+
 -- Cosmetic slots (shirts + tabards). Items in these slots are NEVER touched
 -- by the automatic rules (Auto-Delete Junk, Auto-Delete Common, Auto-Sell
 -- Greens, the BoE/BoP/BoE Weapons sell categories). They must be explicitly
@@ -2684,6 +2724,8 @@ local function DeleteItems()
 	local _pParse = AutoDelete_PerfBegin("DeleteItems/parse")
 	local wantedNames, wantedIDs = BuildWantedSets(profile.listText, "delete-list")
 	local hasWanted = next(wantedNames) or next(wantedIDs)
+	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	local hasKeepOne = next(keepOneIDs) ~= nil
 	-- Pre-built Keep-list hash sets so the inner loop doesn't re-parse
 	-- the whitelist text per-item. See IsWhitelistedFast for the perf
 	-- rationale (the slow path was the dominant cost in DeleteItems).
@@ -2698,9 +2740,9 @@ local function DeleteItems()
 	-- consumables, bags, and quest items stay safe.
 	local doGreens = (profile.qualityActionGreens == "delete")
 
-	if not hasWanted and not doGray and not doCommon and not doGreens then
+	if not hasWanted and not hasKeepOne and not doGray and not doCommon and not doGreens then
 		if _G.AutoDelete_DebugSell and not _G._AutoDelete_DebugDelEmptyLogged then
-			print("|cffff8000[AutoDelete DEBUG]|r delete scan: no work - Delete list empty AND Junk/Common/Greens quality filters not in delete mode.")
+			print("|cffff8000[AutoDelete DEBUG]|r delete scan: no work - Delete/KeepOne lists empty AND Junk/Common/Greens quality filters not in delete mode.")
 			_G._AutoDelete_DebugDelEmptyLogged = true
 		end
 		AutoDelete_PerfEnd("DeleteItems", _p)
@@ -2710,6 +2752,7 @@ local function DeleteItems()
 
 	local enqueued = 0
 	local Q = _G.AutoDelete_DeleteQueue
+	local keepOneTotals = {}
 
 	-- v3.20 perf instrumentation: time the whole bag-walk + per-item
 	-- decision pass as "DeleteItems/loop". Per-API cost (now paid by
@@ -2742,7 +2785,7 @@ local function DeleteItems()
 				AutoDelete_PerfEnd("DeleteItems", _p)
 				return
 			end
-			local _, _, locked, _, _, _, itemLink = GetContainerItemInfo(bag, slot)
+			local _, itemCount, locked, _, _, _, itemLink = GetContainerItemInfo(bag, slot)
 			if itemLink and not locked then
 				AutoDelete_PerfCount("DeleteItems/slots-walked", 1)
 				-- v3.20 spike debug: count per-frame slots-touched by AutoDelete's
@@ -2763,19 +2806,54 @@ local function DeleteItems()
 				local itemId = GetItemIDFromLink(itemLink)
 				local shouldDelete = false
 				local onDeleteList = false
+				local onKeepOneList = false
 				local deleteSourceRule = nil
+				local keepOneUnitsToDelete = nil
 
-				-- Check delete list FIRST. If listed, user wants it gone
-				-- regardless of quest type.
+				-- Check KeepOne FIRST. It is explicit user intent to delete
+				-- extras while leaving exactly one unit. Runtime only accepts
+				-- item-ID entries; name-only KeepOne lines are ignored so
+				-- same-name/different-ID traps cannot delete the wrong item.
+				if hasKeepOne and itemId and keepOneIDs[itemId] then
+					onKeepOneList = true
+					local total = keepOneTotals[itemId]
+					if total == nil then
+						total = _G.AutoDelete_CountBagUnitsByItemId(itemId)
+					end
+					local action, amount = _G.AutoDelete_KeepOnePlanSlotAction(total, itemCount or 1)
+					if action ~= "keep" and amount > 0 then
+						shouldDelete = true
+						deleteSourceRule = "KeepOne"
+						keepOneUnitsToDelete = amount
+						keepOneTotals[itemId] = total - amount
+					else
+						keepOneTotals[itemId] = total
+						if _G.AutoDelete_RecordDecision then
+							_G.AutoDelete_RecordDecision({
+								itemName = itemName,
+								itemId = itemId,
+								action = "kept",
+								reason = "KeepOne kept final unit",
+								sourceRule = "KeepOne",
+								bag = bag,
+								slot = slot,
+							})
+						end
+					end
+				end
+
+				-- Check delete list next. If listed, user wants it gone
+				-- regardless of quest type. KeepOne is mutually exclusive
+				-- and wins here if legacy/manual data overlaps.
 				if hasWanted then
 					if itemId and wantedIDs[itemId] then onDeleteList = true end
 					if not onDeleteList and itemName and wantedNames[Normalize(itemName)] then onDeleteList = true end
 				end
 
-				if onDeleteList then
+				if not shouldDelete and onDeleteList then
 					shouldDelete = true
 					deleteSourceRule = "Delete list"
-				elseif not isQuestItem then
+				elseif not shouldDelete and not isQuestItem then
 					-- Auto rules: only run when item is NOT on Delete list AND
 					-- NOT a quest item. Quest protection still applies here.
 
@@ -2834,7 +2912,9 @@ local function DeleteItems()
 					local affixBlocked = (not keepBlocked) and IsAffixProtected(profile, bag, slot, itemLink, "delete")
 					if not keepBlocked and not affixBlocked then
 						if _G.AutoDelete_DebugSell then
-							local reason = onDeleteList and "DeleteList" or "auto"
+							local reason = (deleteSourceRule == "KeepOne" and "KeepOne")
+								or (onDeleteList and "DeleteList")
+								or "auto"
 							local questNote = (onDeleteList and isQuestItem) and " [QUEST ITEM, overridden by Delete list]" or ""
 							print(string.format(
 								"|cffff8000[AutoDelete DEBUG]|r ENQUEUE: %s (id=%s) | quality=%s | reason=%s%s",
@@ -2857,6 +2937,8 @@ local function DeleteItems()
 							name  = itemName,
 							id    = itemId,
 							sourceRule = deleteSourceRule or "Delete scanner",
+							keepOne = onKeepOneList,
+							keepOneUnits = keepOneUnitsToDelete,
 							-- Retry counter for the drain's locked-slot
 							-- deferral. Incremented when the slot is briefly
 							-- locked (server-lag race, mid-flight BAG_UPDATE)
@@ -3002,6 +3084,31 @@ _G.AutoDelete_ValidateDrainEntry = function(profile, entry, currentLink)
 	-- in O(1); a changed list rebuilds once and caches the new tables.
 	local wantedNames, wantedIDs = BuildWantedSets(profile.listText,      "delete-list")
 	local keepNames,   keepIDs   = BuildWantedSets(profile.whitelistText, "keep-list")
+	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+
+	if entry.keepOne then
+		if not entry.id or not keepOneIDs[entry.id] then
+			return false, "rule-changed"
+		end
+		if _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, entry.id, itemName) then
+			return false, "keep-blocked"
+		end
+		if IsAffixProtected(profile, entry.bag, entry.slot, currentLink, "delete") then
+			return false, "affix-blocked"
+		end
+		local _, currentCount = GetContainerItemInfo(entry.bag, entry.slot)
+		local total = _G.AutoDelete_CountBagUnitsByItemId(entry.id)
+		local action, amount = _G.AutoDelete_KeepOnePlanSlotAction(total, currentCount or 1)
+		if action == "keep" or amount <= 0 then
+			return false, "keepone-complete"
+		end
+		if action == "split-delete" and type(SplitContainerItem) ~= "function" then
+			return false, "rule-changed"
+		end
+		entry.keepOneAction = action
+		entry.keepOneUnits = amount
+		return true, nil
+	end
 
 	-- Step 1: still on the Delete list? (overrides quest protection)
 	local onDeleteList = false
@@ -3119,6 +3226,7 @@ function _G.AutoDelete_DrainDeleteQueue(now)
 					action = "kept",
 					reason = (reason == "keep-blocked" and "Keep list blocked queued delete")
 						or (reason == "affix-blocked" and "Affix Protection blocked queued delete")
+						or (reason == "keepone-complete" and "KeepOne already has one unit left")
 						or "Delete rule changed before queued delete executed",
 					sourceRule = entry.sourceRule or "Delete scanner",
 					bag = entry.bag,
@@ -3142,8 +3250,15 @@ function _G.AutoDelete_DrainDeleteQueue(now)
 		_G.AutoDelete_SelfBagUpdateUntil = now + 0.5
 		local _pApi = AutoDelete_PerfBegin("DeleteItems/api-delete")
 		ClearCursor()
-		PickupContainerItem(entry.bag, entry.slot)
-		if CursorHasItem() then DeleteCursorItem(); ClearCursor() end
+		if entry.keepOne and entry.keepOneAction == "split-delete" then
+			if type(SplitContainerItem) == "function" then
+				SplitContainerItem(entry.bag, entry.slot, entry.keepOneUnits or 1)
+				if CursorHasItem() then DeleteCursorItem(); ClearCursor() end
+			end
+		else
+			PickupContainerItem(entry.bag, entry.slot)
+			if CursorHasItem() then DeleteCursorItem(); ClearCursor() end
+		end
 		AutoDelete_PerfEnd("DeleteItems/api-delete", _pApi)
 		AutoDelete_PerfCount("DeleteItems/items-deleted", 1)
 		BumpStat("itemsDeleted", 1)
@@ -3152,7 +3267,7 @@ function _G.AutoDelete_DrainDeleteQueue(now)
 				itemName = entry.name,
 				itemId = entry.id,
 				action = "deleted",
-				reason = "Queued delete executed",
+				reason = entry.keepOne and "KeepOne extra unit(s) deleted" or "Queued delete executed",
 				sourceRule = entry.sourceRule or "Delete scanner",
 				bag = entry.bag,
 				slot = entry.slot,
@@ -3259,9 +3374,11 @@ function AutoDelete_HasPendingDeleteItems(profile)
 	-- match when the list has zero entries.
 	local wantedNames, wantedIDs = BuildWantedSets(profile.listText, "delete-list")
 	local hasWanted = next(wantedNames) or next(wantedIDs)
+	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	local hasKeepOne = next(keepOneIDs) ~= nil
 	-- Bail early if there's nothing to look for. Saves the full bag walk
 	-- in the common case of a brand-new profile with no rules enabled.
-	if not (hasWanted or doGray or doCommon) then return false end
+	if not (hasWanted or hasKeepOne or doGray or doCommon) then return false end
 
 	-- Pre-built Keep-list sets so the inner loop's up-to-3 IsWhitelisted
 	-- calls per slot become 3 hash lookups instead of 3 full whitelist
@@ -3276,6 +3393,13 @@ function AutoDelete_HasPendingDeleteItems(profile)
 				local itemName, _, itemQuality, _, _, itemClass, _, _, equipSlot = GetItemInfo(link)
 				local itemId = GetItemIDFromLink(link)
 				local isQuestItem = (itemClass == "Quest")
+
+				if hasKeepOne and itemId and keepOneIDs[itemId]
+					and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
+					and not IsAffixProtected(profile, bag, slot, link, "delete")
+					and _G.AutoDelete_CountBagUnitsByItemId(itemId) > 1 then
+					return true
+				end
 
 				-- (1) Explicit Delete list. Wins over quest protection.
 				if hasWanted then
@@ -7545,16 +7669,36 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 	local deleteNames, deleteIDs
 	local sellNames, sellIDs
 	local keepNames, keepIDs
+	local keepOneIDs
 	if ruleCtx then
 		deleteNames, deleteIDs = ruleCtx.deleteNames, ruleCtx.deleteIDs
 		sellNames, sellIDs = ruleCtx.sellNames, ruleCtx.sellIDs
 		keepNames, keepIDs = ruleCtx.keepNames, ruleCtx.keepIDs
+		keepOneIDs = ruleCtx.keepOneIDs
 	else
 		deleteNames, deleteIDs = BuildWantedSets(profile.listText, "delete-list")
 		sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
 		keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+		keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
 	end
 	local onKeep = _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, id, name)
+	local onKeepOne = id and keepOneIDs and keepOneIDs[id]
+
+	if onKeepOne then
+		local _, count = GetContainerItemInfo(bag, slot)
+		local seen = ruleCtx and ruleCtx.keepOneSeenUnits and (ruleCtx.keepOneSeenUnits[id] or 0) or 0
+		if onKeep then
+			return "kept", "Keep list blocked KeepOne", "KeepOne", name
+		elseif IsAffixProtected(profile, bag, slot, link, "delete") then
+			return "kept", "Affix Protection blocked KeepOne", "KeepOne", name
+		elseif seen >= 1 or (count or 1) > 1 then
+			if ruleCtx and ruleCtx.keepOneSeenUnits then ruleCtx.keepOneSeenUnits[id] = 1 end
+			return "delete", "KeepOne extra unit", "KeepOne", name
+		else
+			if ruleCtx and ruleCtx.keepOneSeenUnits then ruleCtx.keepOneSeenUnits[id] = seen + (count or 1) end
+			return "kept", "KeepOne kept final unit", "KeepOne", name
+		end
+	end
 
 	local deleteRule = nil
 	if id and deleteIDs[id] then
@@ -7667,6 +7811,7 @@ local function ProcessScan(profile)
 	local deleteNames, deleteIDs = BuildWantedSets(profile.listText, "delete-list")
 	local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
 	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
 	local ruleCtx = {
 		deleteNames = deleteNames,
 		deleteIDs = deleteIDs,
@@ -7674,6 +7819,8 @@ local function ProcessScan(profile)
 		sellIDs = sellIDs,
 		keepNames = keepNames,
 		keepIDs = keepIDs,
+		keepOneIDs = keepOneIDs,
+		keepOneSeenUnits = {},
 	}
 
 	for bag = 0, NUM_BAG_SLOTS do
@@ -7845,14 +7992,17 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 	local deleteNames, deleteIDs = BuildWantedSets(profile.listText, "delete-list")
 	local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
 	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
 	local onKeep = _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
 	local onDelete = (itemId and deleteIDs[itemId]) or (itemName and deleteNames[Normalize(itemName)])
 	local onSell = (itemId and sellIDs[itemId]) or (itemName and sellNames[Normalize(itemName)])
+	local onKeepOne = itemId and keepOneIDs[itemId]
 
 	table.insert(lines, "List rules:")
 	table.insert(lines, "  Keep list: " .. (onKeep and "yes - protects item" or "no"))
 	table.insert(lines, "  Delete list: " .. (onDelete and "yes" or "no"))
 	table.insert(lines, "  Sell list: " .. (onSell and "yes" or "no"))
+	table.insert(lines, "  KeepOne list: " .. (onKeepOne and "yes - keep one unit" or "no"))
 
 	local name, quality, ilvl, itemClass, maxStack, equipSlot, vendorPrice = nil, nil, nil, nil, nil, nil, nil
 	if itemLink then
@@ -7899,6 +8049,15 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 	table.insert(lines, "Delete decision:")
 	if onKeep then
 		table.insert(lines, "  Final: keep. Keep list wins before Delete or auto-delete.")
+	elseif onKeepOne then
+		local total = itemId and _G.AutoDelete_CountBagUnitsByItemId(itemId) or 0
+		if bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "delete") then
+			table.insert(lines, "  Final: keep. Affix protection blocks KeepOne.")
+		elseif total > 1 then
+			table.insert(lines, "  Final: delete extra unit(s). KeepOne leaves one unit.")
+		else
+			table.insert(lines, "  Final: keep. KeepOne already has one unit left.")
+		end
 	elseif bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "delete") then
 		table.insert(lines, "  Final: keep. Affix protection blocks delete.")
 	elseif onDelete then
@@ -8066,6 +8225,7 @@ function _G.AutoDelete_BuildDiagnosticReport()
 		"  Delete: " .. CountEntries(profile.listText),
 		"  Sell: " .. CountEntries(profile.sellListText),
 		"  Keep: " .. CountEntries(profile.whitelistText),
+		"  KeepOne: " .. CountEntries(profile.keepOneText),
 		"",
 		"Auto actions:",
 		"  Junk: " .. tostring(profile.qualityActionJunk),
@@ -8156,6 +8316,12 @@ function _G.AutoDelete_ShowItemQuickMenu(data, owner)
 		end },
 		{ label = "Delete", func = function()
 			if AddItemToList("listText", id) then
+				if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+				if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+			end
+		end },
+		{ label = "KeepOne", func = function()
+			if AddItemToList("keepOneText", id) then
 				if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
 				if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
 			end
@@ -8343,7 +8509,7 @@ local function ShowWelcomePopup()
 	intro:SetJustifyH("LEFT")
 	intro:SetWordWrap(true)
 	intro:SetTextColor(0.9, 0.9, 0.9, 1)
-	intro:SetText("All AutoDelete settings start |cffff8000OFF|r by default. Open the settings panel after this dialog to enable features and configure your Delete, Sell, and Keep lists.")
+	intro:SetText("All AutoDelete settings start |cffff8000OFF|r by default. Open the settings panel after this dialog to enable features and configure your Delete, Sell, Keep, and KeepOne lists.")
 	intro:SetHeight(50)
 
 	-- Section: Macro creation
@@ -8569,10 +8735,11 @@ local function ShowWelcomePopup()
 	hiwBody:SetWordWrap(true)
 	hiwBody:SetTextColor(0.85, 0.85, 0.85, 1)
 	hiwBody:SetText(
-		"AutoDelete uses three lists. Drop an item onto the icons next to your bag, or open the panel and use the tabs.\n" ..
+		"AutoDelete uses four item lists. Drop an item onto the icons next to your bag, or open the panel and use the tabs.\n" ..
 		"|cffff5050Delete|r: items are destroyed on next scan.\n" ..
 		"|cffffd700Sell|r: items are sold the next time you open a vendor.\n" ..
-		"|cff80c0ffKeep|r: items are protected and never auto-sold or auto-deleted.\n\n" ..
+		"|cff80c0ffKeep|r: items are protected and never auto-sold or auto-deleted.\n" ..
+		"|cffff5050KeepOne|r: extra units are deleted until one unit remains.\n\n" ..
 		"|cff66ddffSell filters|r (on the Sell tab, BoE Armor / BoP / BoE Weapons): vendor-only auto-sell rules. " ..
 		"Match by quality and item level, no per-item entry needed."
 	)
@@ -9003,10 +9170,14 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 				local delSet  = buildKeySet(p.listText)
 				local sellSet = buildKeySet(p.sellListText)
 				local keepSet = buildKeySet(p.whitelistText)
+				local keepOneSet = buildKeySet(p.keepOneText)
 				local conflicts = 0
 				for k in pairs(delSet)  do if sellSet[k] then conflicts = conflicts + 1 end end
 				for k in pairs(delSet)  do if keepSet[k] then conflicts = conflicts + 1 end end
+				for k in pairs(delSet)  do if keepOneSet[k] then conflicts = conflicts + 1 end end
 				for k in pairs(sellSet) do if keepSet[k] then conflicts = conflicts + 1 end end
+				for k in pairs(sellSet) do if keepOneSet[k] then conflicts = conflicts + 1 end end
+				for k in pairs(keepSet) do if keepOneSet[k] then conflicts = conflicts + 1 end end
 				if conflicts > 0 then
 					print("|cffff4444[AutoDelete]|r Warning: " .. conflicts ..
 						" item(s) appear on more than one list. Run |cff00ff00/del clean|r to resolve.")
@@ -10048,9 +10219,10 @@ function _G.AutoDelete_BuildListAuditReport(prefixLines)
 		{ field = "listText", label = "Delete" },
 		{ field = "sellListText", label = "Sell" },
 		{ field = "whitelistText", label = "Keep" },
+		{ field = "keepOneText", label = "KeepOne" },
 	}
 	local entries, byKey, byName = {}, {}, {}
-	local totals = { Delete = 0, Sell = 0, Keep = 0 }
+	local totals = { Delete = 0, Sell = 0, Keep = 0, KeepOne = 0 }
 	local safeLinkOrNumberFixes, duplicateFixes, nameOnlyCount, uncachedIdCount = 0, 0, 0, 0
 
 	local function AddToBucket(t, key, entry)
@@ -10179,6 +10351,7 @@ function _G.AutoDelete_BuildListAuditReport(prefixLines)
 	table.insert(lines, "  Delete: " .. tostring(totals.Delete))
 	table.insert(lines, "  Sell: " .. tostring(totals.Sell))
 	table.insert(lines, "  Keep: " .. tostring(totals.Keep))
+	table.insert(lines, "  KeepOne: " .. tostring(totals.KeepOne))
 	table.insert(lines, "")
 	table.insert(lines, "Safe fixes available:")
 	table.insert(lines, "  Duplicate lines in the same list: " .. tostring(duplicateFixes))
@@ -10253,6 +10426,7 @@ function _G.AutoDelete_FixSafeListAuditIssues()
 		{ field = "listText", label = "Delete" },
 		{ field = "sellListText", label = "Sell" },
 		{ field = "whitelistText", label = "Keep" },
+		{ field = "keepOneText", label = "KeepOne" },
 	}
 	local removedDupes, normalizedRefs = 0, 0
 
@@ -10341,6 +10515,7 @@ local function CleanLists()
 	local delEntries  = Parse(profile.listText)
 	local sellEntries = Parse(profile.sellListText)
 	local keepEntries = Parse(profile.whitelistText)
+	local keepOneEntries = Parse(profile.keepOneText)
 
 	-- 1. Dedupe within each list (first occurrence wins)
 	local function DedupeWithin(entries)
@@ -10359,14 +10534,15 @@ local function CleanLists()
 	local keptDel,  internalDelDupes  = DedupeWithin(delEntries)
 	local keptSell, internalSellDupes = DedupeWithin(sellEntries)
 	local keptKeep, internalKeepDupes = DedupeWithin(keepEntries)
+	local keptKeepOne, internalKeepOneDupes = DedupeWithin(keepOneEntries)
 
 	-- 2a. Keep overrides Delete/Sell. Items on Keep AND Delete/Sell get
 	-- removed from Delete/Sell (matches runtime semantics: Keep always wins).
 	local keepKeys = {}
 	for _, e in ipairs(keptKeep) do keepKeys[e.key] = true end
 
-	local keepBlockedFromDel, keepBlockedFromSell = {}, {}
-	local afterKeepDel, afterKeepSell = {}, {}
+	local keepBlockedFromDel, keepBlockedFromSell, keepBlockedFromKeepOne = {}, {}, {}
+	local afterKeepDel, afterKeepSell, afterKeepOne = {}, {}, {}
 	for _, e in ipairs(keptDel) do
 		if keepKeys[e.key] then
 			table.insert(keepBlockedFromDel, e.display)
@@ -10381,16 +10557,27 @@ local function CleanLists()
 			table.insert(afterKeepSell, e)
 		end
 	end
+	for _, e in ipairs(keptKeepOne) do
+		if keepKeys[e.key] then
+			table.insert(keepBlockedFromKeepOne, e.display)
+		else
+			table.insert(afterKeepOne, e)
+		end
+	end
 
-	-- 2b. Find Delete + Sell overlap. Both get removed (no winner; user
+	-- 2b. Find Delete + Sell + KeepOne overlap. All get removed (no winner; user
 	-- re-adds to their preferred list manually).
 	local sellKeys = {}
 	for _, e in ipairs(afterKeepSell) do sellKeys[e.key] = true end
+	local keepOneKeys = {}
+	for _, e in ipairs(afterKeepOne) do keepOneKeys[e.key] = true end
+	local delKeys = {}
+	for _, e in ipairs(afterKeepDel) do delKeys[e.key] = true end
 
-	local crossDupes, finalDel, finalSell = {}, {}, {}
+	local crossDupes, finalDel, finalSell, finalKeepOne = {}, {}, {}, {}
 	local crossKeys = {}
 	for _, e in ipairs(afterKeepDel) do
-		if sellKeys[e.key] then
+		if sellKeys[e.key] or keepOneKeys[e.key] then
 			crossKeys[e.key] = true
 			table.insert(crossDupes, e.display)
 		else
@@ -10398,8 +10585,23 @@ local function CleanLists()
 		end
 	end
 	for _, e in ipairs(afterKeepSell) do
-		if not crossKeys[e.key] then
+		if delKeys[e.key] or keepOneKeys[e.key] then
+			if not crossKeys[e.key] then
+				crossKeys[e.key] = true
+				table.insert(crossDupes, e.display)
+			end
+		elseif not crossKeys[e.key] then
 			table.insert(finalSell, e.raw)
+		end
+	end
+	for _, e in ipairs(afterKeepOne) do
+		if delKeys[e.key] or sellKeys[e.key] then
+			if not crossKeys[e.key] then
+				crossKeys[e.key] = true
+				table.insert(crossDupes, e.display)
+			end
+		elseif not crossKeys[e.key] then
+			table.insert(finalKeepOne, e.raw)
 		end
 	end
 
@@ -10413,6 +10615,8 @@ local function CleanLists()
 	if #finalSell > 0 then profile.sellListText = profile.sellListText .. "\n" end
 	profile.whitelistText = table.concat(finalKeep, "\n")
 	if #finalKeep > 0 then profile.whitelistText = profile.whitelistText .. "\n" end
+	profile.keepOneText = table.concat(finalKeepOne, "\n")
+	if #finalKeepOne > 0 then profile.keepOneText = profile.keepOneText .. "\n" end
 
 	RefreshCachedProfile()
 
@@ -10427,18 +10631,26 @@ local function CleanLists()
 	if #internalKeepDupes > 0 then
 		print("  |cff999999Removed " .. #internalKeepDupes .. " internal duplicate(s) in Keep list:|r " .. table.concat(internalKeepDupes, ", "))
 	end
+	if #internalKeepOneDupes > 0 then
+		print("  |cff999999Removed " .. #internalKeepOneDupes .. " internal duplicate(s) in KeepOne list:|r " .. table.concat(internalKeepOneDupes, ", "))
+	end
 	if #keepBlockedFromDel > 0 then
 		print("|cff80c0ff  Removed from Delete (already on Keep, Keep wins):|r " .. table.concat(keepBlockedFromDel, ", "))
 	end
 	if #keepBlockedFromSell > 0 then
 		print("|cff80c0ff  Removed from Sell (already on Keep, Keep wins):|r " .. table.concat(keepBlockedFromSell, ", "))
 	end
+	if #keepBlockedFromKeepOne > 0 then
+		print("|cff80c0ff  Removed from KeepOne (already on Keep, Keep wins):|r " .. table.concat(keepBlockedFromKeepOne, ", "))
+	end
 	if #crossDupes > 0 then
-		print("|cffff4444  Removed from BOTH Delete and Sell (appeared in each):|r " .. table.concat(crossDupes, ", "))
+		print("|cffff4444  Removed cross-list conflict(s) from Delete / Sell / KeepOne:|r " .. table.concat(crossDupes, ", "))
 		print("  |cffaaaaaaRe-add these manually to your preferred list.|r")
 	end
 	if #internalDelDupes == 0 and #internalSellDupes == 0 and #internalKeepDupes == 0
-		and #keepBlockedFromDel == 0 and #keepBlockedFromSell == 0 and #crossDupes == 0 then
+		and #internalKeepOneDupes == 0 and #keepBlockedFromDel == 0
+		and #keepBlockedFromSell == 0 and #keepBlockedFromKeepOne == 0
+		and #crossDupes == 0 then
 		print("  |cff999999No duplicates found.|r")
 	end
 
@@ -10450,20 +10662,22 @@ local function CleanLists()
 end
 
 -- ============================================================================
--- Profile Import - merge the 3 lists from another character's profile
+-- Profile Import - merge item lists from another character's profile
 -- ============================================================================
--- The three list keys in a profile, with their display labels. Order matters
--- for the popup radio buttons (D / S / K).
-local IMPORT_LIST_KEYS = { "listText", "sellListText", "whitelistText" }
+-- The list keys in a profile, with their display labels. Order matters for the
+-- popup list buttons.
+local IMPORT_LIST_KEYS = { "listText", "sellListText", "whitelistText", "keepOneText" }
 local IMPORT_LIST_DISPLAY = {
 	listText       = "Delete",
 	sellListText   = "Sell",
 	whitelistText  = "Keep",
+	keepOneText    = "KeepOne",
 }
 local IMPORT_DISPLAY_TO_KEY = {
 	Delete = "listText",
 	Sell   = "sellListText",
 	Keep   = "whitelistText",
+	KeepOne = "keepOneText",
 }
 
 -- Walk a list text and build a map: canonicalKey → rawLine.
@@ -10507,7 +10721,7 @@ local function AppendEntry(listText, rawEntry)
 end
 
 -- PreviewImport: detects what would change if we imported the source profile's
--- 3 lists into the current character's profile. Makes NO changes.
+-- item lists into the current character's profile. Makes NO changes.
 -- Returns:
 --   {
 --     additions = { {key, display, raw, targetList, targetListDisplay}, ... }
@@ -10587,8 +10801,8 @@ local function ApplyImport(sourceCharKey, resolutions)
 	local profile = GetActiveProfile(db)
 	resolutions = resolutions or {}
 
-	local addedByList = { Delete = 0, Sell = 0, Keep = 0 }
-	local movedByList = { Delete = 0, Sell = 0, Keep = 0 }
+	local addedByList = { Delete = 0, Sell = 0, Keep = 0, KeepOne = 0 }
+	local movedByList = { Delete = 0, Sell = 0, Keep = 0, KeepOne = 0 }
 
 	-- Apply additions (no conflict, always add to source's list).
 	for _, add in ipairs(preview.additions) do
@@ -10616,14 +10830,14 @@ local function ApplyImport(sourceCharKey, resolutions)
 	-- Summary report
 	print(string.format("|cffff8000[AutoDelete]|r Import from %s complete.", sourceCharKey))
 	local addParts = {}
-	for _, lbl in ipairs({"Delete","Sell","Keep"}) do
+	for _, lbl in ipairs({"Delete","Sell","Keep","KeepOne"}) do
 		if addedByList[lbl] > 0 then table.insert(addParts, addedByList[lbl] .. " to " .. lbl) end
 	end
 	if #addParts > 0 then
 		print("  |cff999999Added:|r " .. table.concat(addParts, ", "))
 	end
 	local moveParts = {}
-	for _, lbl in ipairs({"Delete","Sell","Keep"}) do
+	for _, lbl in ipairs({"Delete","Sell","Keep","KeepOne"}) do
 		if movedByList[lbl] > 0 then table.insert(moveParts, movedByList[lbl] .. " to " .. lbl) end
 	end
 	if #moveParts > 0 then
@@ -11286,7 +11500,7 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		row("/del process",      "toggle the Process Bags window (DE / Mill / Prospect / Open)")
 		row("/del report",       "open a copyable diagnostic report")
 		row("/del history",      "open recent sell / delete / keep decisions")
-		row("/del audit",        "open a copyable Delete / Sell / Keep list audit")
+		row("/del audit",        "open a copyable item list audit")
 		row("/del setup",        "re-open the first-time setup / welcome popup")
 		print(" ")
 		row("/del affix",        "open the Learned / Unlearned affix list")

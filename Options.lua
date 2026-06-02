@@ -802,6 +802,7 @@ local DEFAULT_PROFILE = {
 	listText = "",
 	sellListText = "",
 	whitelistText = "",
+	keepOneText = "",
 	-- 3-state quality filters: "off" | "delete" | "sell"
 	-- Migration: old boolean true → "delete" (user requested default)
 	autoGray = "delete",
@@ -2551,7 +2552,7 @@ end  -- end of Ignored Items Popup `do` block
 -- ============================================================================
 -- Three popups + the execute helper that wires them together:
 --
---   1. Import Raw popup       (paste area + Import to Delete/Sell/Keep buttons)
+--   1. Import Raw popup       (paste area + Import list buttons)
 --   2. Import Results popup   (summary: imported / duplicates / unresolved)
 --   3. Export Raw popup       (list-picker dropdown + read-only auto-selected text)
 --
@@ -2559,9 +2560,9 @@ end  -- end of Ignored Items Popup `do` block
 --   * User pastes item names (one per line) into Import Raw, clicks a
 --     destination button -> AutoDelete_ExecuteRawImport(listKey, rawText)
 --     resolves names via GetItemInfo, dedupes against the target list,
---     appends item:<id> lines to profile.<listText|sellListText|whitelistText>,
+--     appends item:<id> lines to the chosen profile list field,
 --     opens the Results popup with counts + unresolved names.
---   * User opens Export Raw, picks Delete / Sell / Keep -> the read-only
+--   * User opens Export Raw, picks a list -> the read-only
 --     EditBox fills with the target list's items as plain names (one per
 --     line). User Ctrl+A / Ctrl+C to copy.
 --
@@ -2579,11 +2580,13 @@ local RAW_LIST_FIELDS = {
 	delete = "listText",
 	sell   = "sellListText",
 	keep   = "whitelistText",
+	keepone = "keepOneText",
 }
 local RAW_LIST_LABELS = {
 	delete = "Delete",
 	sell   = "Sell",
 	keep   = "Keep",
+	keepone = "KeepOne",
 }
 
 -- Build a set of itemIds already on a list (newline-separated `item:<id>`
@@ -2780,7 +2783,7 @@ function _G.AutoDelete_ExecuteRawImport(listKey, rawText)
 	if _G.AutoDelete_RefreshCachedProfile then
 		_G.AutoDelete_RefreshCachedProfile()
 	end
-	-- Refresh the visible Lists view (Delete/Sell/Keep) if open.
+	-- Refresh the visible Lists view if open.
 	local panel = _G.AutoDeleteOptionsPanel
 	if panel and panel.Refresh then panel:Refresh() end
 	-- Show the Results popup with counts + unresolved names.
@@ -2906,7 +2909,7 @@ pasteScroll:SetScript("OnMouseWheel", function(sf, delta)
 	sf:SetVerticalScroll(v)
 end)
 
--- Three destination buttons below the paste area, equal widths.
+-- Four destination buttons below the paste area, equal widths.
 local BTN_H = 24
 local function MakeDestButton(label, listKey, color, xOff, btnW)
 	local b = MakeActionButton(popup, label, color, function()
@@ -2922,11 +2925,12 @@ local function MakeDestButton(label, listKey, color, xOff, btnW)
 	return b
 end
 local BTN_GAP = 6
-local TOTAL_BTN_W = POPUP_W - PAD_X * 2 - BTN_GAP * 2
-local BTN_W = math.floor(TOTAL_BTN_W / 3)
-MakeDestButton("Import to Delete", "delete", C_RED,   PAD_X,                                BTN_W)
-MakeDestButton("Import to Sell",   "sell",   C_BLUE,  PAD_X + BTN_W + BTN_GAP,              BTN_W)
-MakeDestButton("Import to Keep",   "keep",   C_GREEN, PAD_X + (BTN_W + BTN_GAP) * 2,        BTN_W)
+local TOTAL_BTN_W = POPUP_W - PAD_X * 2 - BTN_GAP * 3
+local BTN_W = math.floor(TOTAL_BTN_W / 4)
+MakeDestButton("Delete",  "delete",  C_RED,   PAD_X,                                 BTN_W)
+MakeDestButton("Sell",    "sell",    C_BLUE,  PAD_X + BTN_W + BTN_GAP,               BTN_W)
+MakeDestButton("Keep",    "keep",    C_GREEN, PAD_X + (BTN_W + BTN_GAP) * 2,         BTN_W)
+MakeDestButton("KeepOne", "keepone", C_RED,   PAD_X + (BTN_W + BTN_GAP) * 3,         BTN_W)
 
 popup:SetScript("OnShow", function(self)
 	if not self._everShown then
@@ -3116,17 +3120,16 @@ local function FillFor(listKey)
 	exportEdit:HighlightText()
 end
 
--- Three buttons act as the "picker": clicking one fills the text area.
--- (Simpler than a dropdown for three options and consistent with the
--- Import popup's three-destination row.)
+-- Four buttons act as the "picker": clicking one fills the text area.
+-- (Simpler than a dropdown and consistent with the Import popup row.)
 local pickRow = CreateFrame("Frame", nil, popup)
 pickRow:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8 + 22))
 pickRow:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 8 + 22))
 pickRow:SetHeight(22)
 
 local BTN_GAP = 6
-local TOTAL_PICK_W = POPUP_W - PAD_X * 2 - BTN_GAP * 2
-local PICK_BTN_W = math.floor(TOTAL_PICK_W / 3)
+local TOTAL_PICK_W = POPUP_W - PAD_X * 2 - BTN_GAP * 3
+local PICK_BTN_W = math.floor(TOTAL_PICK_W / 4)
 local function MakePickButton(label, listKey, color, xOff)
 	local b = MakeActionButton(pickRow, label, color, function()
 		FillFor(listKey)
@@ -3137,6 +3140,7 @@ end
 MakePickButton("Delete", "delete", C_RED,   0)
 MakePickButton("Sell",   "sell",   C_BLUE,  PICK_BTN_W + BTN_GAP)
 MakePickButton("Keep",   "keep",   C_GREEN, (PICK_BTN_W + BTN_GAP) * 2)
+MakePickButton("KeepOne", "keepone", C_RED, (PICK_BTN_W + BTN_GAP) * 3)
 
 popup:SetScript("OnShow", function(self)
 	if not self._everShown then
@@ -3908,7 +3912,7 @@ local function BuildUI(self)
 				title = "Filters",
 				sections = {
 					{ icon = "Interface\\Icons\\INV_Broom_01", title = "Auto Actions", body = "Sets Junk, Common, and Greens each to Del or Sell, or leaves them off. |cffbf3838Del deletes matching items on bag scans|r, Sell vendors them. Keep-list and quest items are always safe." },
-					{ icon = "Interface\\Icons\\INV_Enchant_ShardGlimmering", title = "DE Filters", body = "Controls which items One-Key Disenchant will target, by bind state (BoP, BoE), quality (Unc, Rare, Epic), and the iLvl range. It does not touch your Delete, Sell, or Keep lists." },
+					{ icon = "Interface\\Icons\\INV_Enchant_ShardGlimmering", title = "DE Filters", body = "Controls which items One-Key Disenchant will target, by bind state (BoP, BoE), quality (Unc, Rare, Epic), and the iLvl range. It does not touch your item lists." },
 					{ icon = "Interface\\Icons\\Spell_Shadow_DetectInvisibility", title = "Ignored Items", body = "Manage Ignored opens the list of items you marked Ignore on the Keep-list popup. Ignore only hides an item from Process Bags, it is not protection from cleanup." },
 				}
 			},
@@ -3942,10 +3946,10 @@ local function BuildUI(self)
 					{ icon = "Interface\\Icons\\INV_Misc_Book_09", title = "Current profile", body = "The dropdown lists every character profile, including the one you are on now, and the Current line shows the active character. Copy, Delete, and Import Lists all act on the profile picked here." },
 					{ icon = "Interface\\Icons\\INV_Misc_Note_05", title = "Copy", body = "Copies the selected profile full AutoDelete setup onto this character. |cffbf3838It overwrites your current settings and lists|r, so review Sell, Delete, and Affix rules afterward." },
 					{ icon = "Interface\\Icons\\Ability_Creature_Cursed_05", title = "Delete", destructive = true, body = "Deletes the profile selected in the dropdown. This cannot be undone. It does not touch the character you are currently playing." },
-					{ icon = "Interface\\Icons\\INV_Misc_Note_06", title = "Import Lists", body = "Merges only the Delete, Sell, and Keep lists from the selected profile into this one. Toggles, scan speed, and filters are left alone. Conflicts open a review window." },
-					{ icon = "Interface\\Icons\\Spell_Holy_Purify", title = "Clear List", destructive = true, body = "Opens a picker to wipe one list, or all three, on the current character. Clearing a list cannot be undone." },
-					{ icon = "Interface\\Icons\\INV_Scroll_03", title = "Import Raw", body = "Paste plain item names and AutoDelete looks each one up and adds it to the Delete, Sell, or Keep list you choose. Check the names first, a large paste changes many entries at once." },
-					{ icon = "Interface\\Icons\\INV_Scroll_08", title = "Export Raw", body = "Copies your Delete, Sell, or Keep list out as plain item names so you can share them or paste them elsewhere. It only reads your lists, it changes nothing." },
+					{ icon = "Interface\\Icons\\INV_Misc_Note_06", title = "Import Lists", body = "Merges only the Delete, Sell, Keep, and KeepOne lists from the selected profile into this one. Toggles, scan speed, and filters are left alone. Conflicts open a review window." },
+					{ icon = "Interface\\Icons\\Spell_Holy_Purify", title = "Clear List", destructive = true, body = "Opens a picker to wipe one list, or all four, on the current character. Clearing a list cannot be undone." },
+					{ icon = "Interface\\Icons\\INV_Scroll_03", title = "Import Raw", body = "Paste plain item names and AutoDelete looks each one up and adds it to the list you choose. Check the names first, a large paste changes many entries at once." },
+					{ icon = "Interface\\Icons\\INV_Scroll_08", title = "Export Raw", body = "Copies a list out as plain item names so you can share it or paste it elsewhere. It only reads your lists, it changes nothing." },
 				}
 			},
 			{
@@ -3964,14 +3968,14 @@ local function BuildUI(self)
 					{ icon = "Interface\\Icons\\Spell_Shadow_DeathCoil", title = "Delete", destructive = true, body = "The Delete list. Items whose ID matches are destroyed on the next bag scan, so add with care and test one safe item first. Entries match by item ID, so heroic and normal versions stay separate." },
 					{ icon = "Interface\\Icons\\INV_Misc_Coin_02", title = "Sell", body = "The Sell list. Matching items are vendored when a merchant is open, not during normal bag use. Good for known vendor trash and surplus." },
 					{ icon = "Interface\\Icons\\INV_Misc_Key_03", title = "Keep", body = "The Keep list, your protection list. Anything here wins over every automatic rule, so add important items before turning on broad delete or sell actions." },
-					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_03", title = "Search & Manage", body = "Below the tabs, Search items filters the current list, Raw shows the plain stored text, and Refresh rebuilds the view. Drag a bag item onto the Delete, Sell, or Keep tab to add it." },
+					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_03", title = "Search & Manage", body = "Below the tabs, Search items filters the current list, Raw shows the plain stored text, and Refresh rebuilds the view. Drag a bag item onto a list tab to add it." },
 				}
 			},
 			{
 				label = "Bag Features",
 				title = "Bag Features",
 				sections = {
-					{ icon = "Interface\\Icons\\INV_Misc_Bag_09", title = "Drag to Delete, Sell, or Keep", body = "Drag a real bag item onto the Delete, Sell, or Keep tab to add it to that list. An empty list also shows a Drag items here hint." },
+					{ icon = "Interface\\Icons\\INV_Misc_Bag_09", title = "Drag to List", body = "Drag a real bag item onto Delete, Sell, Keep, or KeepOne to add it to that list. An empty list also shows a Drag items here hint." },
 					{ icon = "Interface\\Icons\\INV_Misc_Gear_02", title = "Alt+Right-click menu", body = "Alt+Right-click a real bag item to open the AutoDelete quick menu, with Keep, Sell, |cffbf3838Delete|r, and Why?. Picking Delete adds the item to the Delete list." },
 					{ icon = "Interface\\Icons\\INV_Misc_Food_15", title = "Normal right-click", body = "Plain right-click still belongs to WoW and your bag addon for eating, drinking, equipping, and using items. AutoDelete only acts on Alt+Right-click. |cffbf3838If a plain right-click ever stops working, that is a bug, not intended.|r" },
 				}
@@ -5297,7 +5301,7 @@ local function BuildUI(self)
 		deleteBtn:SetPoint("TOPLEFT", PROF_COL4_X, PROF_ROW1_Y)
 
 		-- RIGHT half / row 2: Import Lists (green) and Clear List (red).
-		-- Import merges the 3 lists (Delete/Sell/Keep) from the selected
+		-- Import merges the four item lists from the selected
 		-- profile into the current character's profile. Never touches other
 		-- settings. Duplicates are skipped; cross-list conflicts open a popup.
 		local importBtn = MakeActionButton(profilesPage, "Import Lists", C_GREEN, function()
@@ -5332,8 +5336,8 @@ local function BuildUI(self)
 		end, PROF_COL_W, PROF_BTN_H)
 		importBtn:SetPoint("TOPLEFT", PROF_COL3_X, PROF_ROW2_Y)
 
-		-- Clear List opens a picker that wipes one list (Delete/Sell/Keep)
-		-- or all three on the current character. The destructive action is
+		-- Clear List opens a picker that wipes one list or all four on the
+		-- current character. The destructive action is
 		-- then confirmed via a StaticPopup inside the picker.
 		local clearBtn = MakeActionButton(profilesPage, "Clear List", C_RED, function()
 			if _G.AutoDelete_ShowClearListPicker then
@@ -5359,7 +5363,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Import Raw", 1, 1, 1)
-			GameTooltip:AddLine("Paste a list of item names and add them to your Delete, Sell, or Keep list. AutoDelete looks each name up and adds it for you.",
+			GameTooltip:AddLine("Paste a list of item names and add them to your chosen list. AutoDelete looks each name up and adds it for you.",
 				C_DIM[1], C_DIM[2], C_DIM[3], true)
 			GameTooltip:Show()
 		end)
@@ -5381,7 +5385,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Export Raw", 1, 1, 1)
-			GameTooltip:AddLine("Copy your Delete, Sell, or Keep list as plain item names so you can share or paste them somewhere else.",
+			GameTooltip:AddLine("Copy one item list as plain item names so you can share or paste it somewhere else.",
 				C_DIM[1], C_DIM[2], C_DIM[3], true)
 			GameTooltip:Show()
 		end)
@@ -5548,7 +5552,7 @@ local function BuildUI(self)
 		-- Separate popup for clearing ALL lists at once (different wording).
 		if not StaticPopupDialogs["AUTODELETE_PROFILE_CLEAR_ALL"] then
 			StaticPopupDialogs["AUTODELETE_PROFILE_CLEAR_ALL"] = {
-				text = "Clear ALL three lists (Delete, Sell, and Keep)? This cannot be undone.",
+				text = "Clear ALL four lists (Delete, Sell, Keep, and KeepOne)? This cannot be undone.",
 				button1 = "Clear All", button2 = "Cancel",
 				OnAccept = function(popup)
 					if not _G.AutoDelete_Profiles then return end
@@ -5596,7 +5600,8 @@ local function BuildUI(self)
 			}
 		end
 
-		-- Remove-patterns popup: scans all three lists (Delete + Sell + Keep)
+		-- Remove-patterns popup: scans Delete + Sell + Keep. KeepOne is
+		-- deliberately excluded because it is not a filter-cleanup list.
 		-- for items whose itemSubType matches the chosen profession token
 		-- (passed via popup.data). One popup serves all eight profession
 		-- options on the sub-window; popup.data carries the localized
@@ -5604,7 +5609,7 @@ local function BuildUI(self)
 		-- display label for the prompt text.
 		if not StaticPopupDialogs["AUTODELETE_PROFILE_REMOVE_PATTERNS"] then
 			StaticPopupDialogs["AUTODELETE_PROFILE_REMOVE_PATTERNS"] = {
-				text = "Remove all %s items from your Delete, Sell, and Keep lists? This cannot be undone.",
+				text = "Remove all %s items from your Delete, Sell, and Keep lists? KeepOne is not changed. This cannot be undone.",
 				button1 = "Remove", button2 = "Cancel",
 				OnAccept = function(popup)
 					local payload = popup.data
@@ -5830,13 +5835,13 @@ local function BuildUI(self)
 	yOff = yOff - 16 - CARD_H - SECTION_GAP
 
 	-- ========================================================================
-	-- SECTION 3: Scan Options - Delete/Sell/Keep list mode tabs
+	-- SECTION 3: Scan Options - item list mode tabs
 	-- Scan Speed lives on the General settings tab; this section is just
 	-- the three list-mode tab buttons that drive the list view below.
 	-- ========================================================================
 	local scanCardH = 34                                                   -- fits 26-tall buttons + 4px pad top/bot
 	-- Section renamed from "Scan Options" to "List Mode": the contained
-	-- buttons select Delete / Sell / Keep list view, not scan settings.
+	-- buttons select the active item list view, not scan settings.
 	-- Scan Speed lives on the General tab.
 	local scanBox = MakeSection(self, "List Mode", yOff, 1)
 	-- Hide the outer section border so it doesn't double up with the inner
@@ -5844,7 +5849,7 @@ local function BuildUI(self)
 	scanBox:SetBackdropBorderColor(0, 0, 0, 0)
 	scanBox:SetBackdropColor(0, 0, 0, 0)
 
-	-- Full-width inner card: holds Delete/Sell/Keep tab buttons.
+	-- Full-width inner card: holds item list tab buttons.
 	-- Anchored flush to section edges (1px) so the buttons read as edge-aligned
 	-- with the section's outer frame margin.
 	local scanRightCard = CreateFrame("Frame", nil, scanBox)
@@ -5873,22 +5878,26 @@ local function BuildUI(self)
 	local deleteTab, deleteTabText = MakeTab(scanRightCard, "Delete (0)")
 	local sellTab, sellTabText = MakeTab(scanRightCard, "Sell (0)")
 	local keepTab, keepTabText = MakeTab(scanRightCard, "Keep (0)")
+	self._keepOneTab, self._keepOneTabText = MakeTab(scanRightCard, "KeepOne (0)")
 
-	-- Three equal-width tabs. Outer tabs anchor to card edges; middle tab
-	-- anchors to Delete's right edge. LayoutTabs computes the equal width
+	-- Four equal-width tabs. Outer tabs anchor to card edges; middle tabs
+	-- anchor from left to right. LayoutTabs computes the equal width
 	-- once scanRightCard has a resolved width.
 	deleteTab:SetPoint("LEFT", scanRightCard, "LEFT", TAB_INNER_PAD, 0)
-	keepTab:SetPoint("RIGHT", scanRightCard, "RIGHT", -TAB_INNER_PAD, 0)
+	self._keepOneTab:SetPoint("RIGHT", scanRightCard, "RIGHT", -TAB_INNER_PAD, 0)
 	local function LayoutTabs()
 		local cardW = scanRightCard:GetWidth()
 		if not cardW or cardW < 10 then return end
-		local totalInner = cardW - (TAB_INNER_PAD * 2) - (TAB_GAP * 2)
-		local tabW = math.floor(totalInner / 3)
+		local totalInner = cardW - (TAB_INNER_PAD * 2) - (TAB_GAP * 3)
+		local tabW = math.floor(totalInner / 4)
 		deleteTab:SetWidth(tabW)
 		sellTab:SetWidth(tabW)
 		keepTab:SetWidth(tabW)
+		self._keepOneTab:SetWidth(tabW)
 		sellTab:ClearAllPoints()
+		keepTab:ClearAllPoints()
 		sellTab:SetPoint("LEFT", deleteTab, "RIGHT", TAB_GAP, 0)
+		keepTab:SetPoint("LEFT", sellTab, "RIGHT", TAB_GAP, 0)
 	end
 	scanRightCard:SetScript("OnSizeChanged", LayoutTabs)
 	-- Initial layout (deferred until the card has a resolved width)
@@ -5929,6 +5938,7 @@ local function BuildUI(self)
 	local function GetActiveListKey()
 		if self._listMode == "sell" then return "sellListText"
 		elseif self._listMode == "whitelist" then return "whitelistText"
+		elseif self._listMode == "keepone" then return "keepOneText"
 		else return "listText" end
 	end
 
@@ -5953,11 +5963,13 @@ local function BuildUI(self)
 		deleteTabText:SetText("Delete (" .. CountListItems(p.listText) .. ")")
 		sellTabText:SetText("Sell (" .. CountListItems(p.sellListText) .. ")")
 		keepTabText:SetText("Keep (" .. CountListItems(p.whitelistText) .. ")")
+		self._keepOneTabText:SetText("KeepOne (" .. CountListItems(p.keepOneText) .. ")")
 		SetTabActive(deleteTab, deleteTabText, self._listMode == "delete")
 		SetTabActive(sellTab, sellTabText, self._listMode == "sell")
 		SetTabActive(keepTab, keepTabText, self._listMode == "whitelist")
+		SetTabActive(self._keepOneTab, self._keepOneTabText, self._listMode == "keepone")
 		if emptyText then
-			local hints = { delete = "Drag items here to delete", sell = "Drag items here to sell at vendors", whitelist = "Drag items here to protect" }
+			local hints = { delete = "Drag items here to delete", sell = "Drag items here to sell at vendors", whitelist = "Drag items here to protect", keepone = "Drag items here to keep one unit" }
 			emptyText:SetText(hints[self._listMode] or "")
 		end
 	end
@@ -6265,6 +6277,7 @@ local function BuildUI(self)
 		if mode ~= "delete"    then table.insert(actions, { label = "Move to Delete", target = "listText" }) end
 		if mode ~= "sell"      then table.insert(actions, { label = "Move to Sell",   target = "sellListText" }) end
 		if mode ~= "whitelist" then table.insert(actions, { label = "Move to Keep",   target = "whitelistText" }) end
+		if mode ~= "keepone"   then table.insert(actions, { label = "Move to KeepOne", target = "keepOneText" }) end
 		table.insert(actions, { label = "Remove", target = nil })
 
 		-- Tear down old item buttons
@@ -6920,6 +6933,7 @@ local function BuildUI(self)
 		if key == "listText" then return "Delete" end
 		if key == "sellListText" then return "Sell" end
 		if key == "whitelistText" then return "Keep" end
+		if key == "keepOneText" then return "KeepOne" end
 		return key
 	end
 
@@ -6928,11 +6942,13 @@ local function BuildUI(self)
 	local function FindListConflict(profile, targetKey, line)
 		local otherKeys
 		if targetKey == "listText" then
-			otherKeys = { "sellListText", "whitelistText" }
+			otherKeys = { "sellListText", "whitelistText", "keepOneText" }
 		elseif targetKey == "sellListText" then
-			otherKeys = { "listText", "whitelistText" }
+			otherKeys = { "listText", "whitelistText", "keepOneText" }
 		elseif targetKey == "whitelistText" then
-			otherKeys = { "listText", "sellListText" }
+			otherKeys = { "listText", "sellListText", "keepOneText" }
+		elseif targetKey == "keepOneText" then
+			otherKeys = { "listText", "sellListText", "whitelistText" }
 		else
 			return false, nil
 		end
@@ -6973,7 +6989,7 @@ local function BuildUI(self)
 
 		p[key] = AddLineIfMissing(p[key] or "", line)
 		GetItemInfo("item:" .. id)
-		local labels = { delete = "delete", sell = "sell", whitelist = "keep" }
+		local labels = { delete = "delete", sell = "sell", whitelist = "keep", keepone = "KeepOne" }
 		print("|cffff8000[AutoDelete]|r Added " .. displayName .. " to " .. (labels[self._listMode] or "delete") .. " list")
 		self:Refresh()
 	end
@@ -7048,11 +7064,12 @@ local function BuildUI(self)
 	deleteTab:SetScript("OnClick", function() SwitchTab("delete") end)
 	sellTab:SetScript("OnClick", function() SwitchTab("sell") end)
 	keepTab:SetScript("OnClick", function() SwitchTab("whitelist") end)
+	self._keepOneTab:SetScript("OnClick", function() SwitchTab("keepone") end)
 
 	-- Public method for external callers (ElvUI bag buttons) to jump to
 	-- a specific list tab when opening the panel.
 	function self:SwitchListMode(mode)
-		if mode == "delete" or mode == "sell" or mode == "whitelist" then
+		if mode == "delete" or mode == "sell" or mode == "whitelist" or mode == "keepone" then
 			SwitchTab(mode)
 		end
 	end
@@ -7145,7 +7162,7 @@ local function BuildUI(self)
 				local p = GetActiveProfile(db)
 				local key = GetActiveListKey()
 				p[key] = RemoveExactLine(p[key] or "", row.entry.raw)
-				local labels = { delete = "delete", sell = "sell", whitelist = "keep" }
+				local labels = { delete = "delete", sell = "sell", whitelist = "keep", keepone = "KeepOne" }
 				print("|cffff8000[AutoDelete]|r Removed " .. GetDisplayForEntry(row.entry) .. " from " .. (labels[self._listMode] or "delete") .. " list")
 				self:Refresh()
 			end
@@ -7547,7 +7564,7 @@ end
 -- Import Conflicts Window
 -- ============================================================================
 -- Shows cross-list conflicts in a scrollable card. Each row: item name on
--- left, three segmented Delete/Sell/Keep buttons on right. Pre-selected to
+-- left, segmented list buttons on right. Pre-selected to
 -- source's list. Apply commits; Cancel aborts.
 
 local importFrame       -- outer window
@@ -7627,7 +7644,7 @@ end
 -- Layout per row (52 tall):
 --   Line 1: item display name (11pt text, LEFT)
 --   Line 2: "Source: Delete  .  Current: Sell" (9pt dim, LEFT)
---   Right side: three 56x22 buttons "Delete" | "Sell" | "Keep"
+--   Right side: four list buttons
 local function BuildImportRow(index)
 	local ROW_H = 52
 	local parent = importContent
@@ -7642,35 +7659,33 @@ local function BuildImportRow(index)
 	-- Item name
 	local nameText = MakeText(row, 11, C_TEXT, "OUTLINE", "LEFT")
 	nameText:SetPoint("TOPLEFT", 10, -8)
-	nameText:SetPoint("TOPRIGHT", -200, -8)
+	nameText:SetPoint("TOPRIGHT", -270, -8)
 	nameText:SetHeight(14)
 	row._nameText = nameText
 
 	-- Sub-line (source vs current)
 	local subText = MakeText(row, 9, C_DIM, "OUTLINE", "LEFT")
 	subText:SetPoint("TOPLEFT", 10, -26)
-	subText:SetPoint("TOPRIGHT", -200, -26)
+	subText:SetPoint("TOPRIGHT", -270, -26)
 	subText:SetHeight(12)
 	row._subText = subText
 
-	-- Segmented Delete/Sell/Keep buttons
+	-- Segmented list buttons
 	local segConfigs = {
 		{ label = "Delete", color = C_RED },
 		{ label = "Sell",   color = C_ACCENT },   -- orange
 		{ label = "Keep",   color = C_GREEN },
+		{ label = "KeepOne", color = C_RED },
 	}
 
 	row._segBtns = {}
-	local BTN_W, BTN_H = 56, 22
+	local BTN_W, BTN_H = 62, 22
 	local GAP = 4
-	-- Anchor all three from the right side; rightmost is "Keep".
+	-- Anchor all four from the right side; rightmost is "KeepOne".
 	for i, cfg in ipairs(segConfigs) do
 		local b = CreateFrame("Button", nil, row)
 		b:SetSize(BTN_W, BTN_H)
-		-- i=1 (Delete): rightmost-2 = offset by 2*(BTN_W+GAP) from right edge
-		-- i=2 (Sell):   rightmost-1 = offset by 1*(BTN_W+GAP)
-		-- i=3 (Keep):   rightmost = offset by 0
-		local xOff = -10 - (3 - i) * (BTN_W + GAP)
+		local xOff = -10 - (#segConfigs - i) * (BTN_W + GAP)
 		b:SetPoint("RIGHT", row, "RIGHT", xOff, 0)
 		ApplyBackdrop(b, C_ROW_ODD, C_BORDER)
 		local txt = MakeText(b, 10, C_DIM, "OUTLINE")
@@ -7753,7 +7768,7 @@ end
 -- ============================================================================
 -- Clear List Picker Window
 -- ============================================================================
--- Small window with four list-buttons: Delete / Sell / Keep / All. Clicking
+-- Small window with list buttons. Clicking
 -- one fires the destructive confirmation StaticPopup (Clear / Cancel).
 
 local clearFrame
@@ -7766,12 +7781,12 @@ local function BuildClearListWindow()
 	--   Card:          y=-32 to y=-(body_H - 50)
 	--   Footer:        50px (Cancel at BOTTOMRIGHT -15, 15 = 24 tall + 15 bottom pad + 11 top pad)
 	--
-	-- Card needs to fit 7 buttons (26 tall) with 4px gaps, plus 8px top pad
-	-- and some bottom pad. Required card height = 8 + 7*26 + 6*4 + bottom_pad.
-	-- With bottom_pad=10 that's 224. Working backwards:
-	--   card_H = body_H - 32 - 50  →  body_H = card_H + 82 = 306
-	--   frame_H = body_H + 24     →  330
-	local W, H = 340, 330
+	-- Card needs to fit 8 buttons (26 tall) with 4px gaps, plus 8px top pad
+	-- and some bottom pad. Required card height = 8 + 8*26 + 7*4 + bottom_pad.
+	-- With bottom_pad=10 that's 254. Working backwards:
+	--   card_H = body_H - 32 - 50  ->  body_H = card_H + 82 = 336
+	--   frame_H = body_H + 24      ->  360
+	local W, H = 340, 360
 	local f, body = BuildPopupSkeleton("AutoDeleteClearListPickerFrame",
 		"Clear List", W, H)
 	clearFrame = f
@@ -7798,7 +7813,8 @@ local function BuildClearListWindow()
 		{ value = "Delete",   label = "Delete list",                     color = C_RED  },
 		{ value = "Sell",     label = "Sell list",                       color = C_RED  },
 		{ value = "Keep",     label = "Keep list",                       color = C_RED  },
-		{ value = "All",      label = "All three lists",                 color = C_RED  },
+		{ value = "KeepOne",  label = "KeepOne list",                    color = C_RED  },
+		{ value = "All",      label = "All four lists",                  color = C_RED  },
 		-- Remove Junk: scans Delete + Sell only, removes gray-quality items.
 		{ value = "Junk",     label = "Remove junk items",               color = C_RED  },
 		-- Remove Sellable: scans Delete only, removes items with vendor value.
@@ -7858,7 +7874,8 @@ end
 -- option. Lists each profession's craft-item subtype (Pattern / Recipe / Plans
 -- / Schematic / Formula / Design / Technique / Manual). Clicking a row fires
 -- the shared AUTODELETE_PROFILE_REMOVE_PATTERNS confirm popup with the chosen
--- subtype in popup.data; the OnAccept handler walks all three lists and
+-- subtype in popup.data; the OnAccept handler walks Delete + Sell + Keep and
+-- intentionally leaves KeepOne alone.
 -- removes matching entries.
 
 local removePatternsFrame
