@@ -65,6 +65,32 @@ local function ApplyBackdrop(frame, bgColor, borderColor)
 	frame:SetBackdropBorderColor(unpack(borderColor or C_BORDER))
 end
 
+local function BringPopupToFront(frame)
+	if frame and frame.Raise then frame:Raise() end
+end
+_G.AutoDelete_BringPopupToFront = BringPopupToFront
+
+local function ApplyPopupChrome(frame)
+	ApplyBackdrop(frame, C_BG, { 0.26, 0.26, 0.26, 1 })
+	if frame.SetToplevel then frame:SetToplevel(true) end
+	if not frame._autoDeleteEdgeShadow then
+		local right = frame:CreateTexture(nil, "ARTWORK")
+		right:SetTexture(WHITE8x8)
+		right:SetVertexColor(0, 0, 0, 0.55)
+		right:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -1, -2)
+		right:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -1, 2)
+		right:SetWidth(3)
+		local bottom = frame:CreateTexture(nil, "ARTWORK")
+		bottom:SetTexture(WHITE8x8)
+		bottom:SetVertexColor(0, 0, 0, 0.55)
+		bottom:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 2, 1)
+		bottom:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 1)
+		bottom:SetHeight(3)
+		frame._autoDeleteEdgeShadow = true
+	end
+end
+_G.AutoDelete_ApplyPopupChrome = ApplyPopupChrome
+
 local function MakeText(parent, size, color, flag, justify)
 	local fs = parent:CreateFontString(nil, "OVERLAY")
 	fs:SetFont(FONT, size, flag or "OUTLINE")
@@ -699,7 +725,7 @@ end
 
 -- ============================================================================
 -- Canonical button helpers (HARD RULE: every button must go through one
--- of these two helpers; see Addon_UI_StyleGuide.md §4 "Buttons: the two
+-- of these two helpers; see style.md "Buttons: the two
 -- canonical helpers"). Defined here BEFORE BuildUI so BuildUI's tab
 -- builders can capture them as upvalues. Other top-level builders below
 -- (BuildClearListWindow, etc.) also capture from this same scope.
@@ -803,6 +829,7 @@ local DEFAULT_PROFILE = {
 	sellListText = "",
 	whitelistText = "",
 	keepOneText = "",
+	keepStackText = "",
 	-- 3-state quality filters: "off" | "delete" | "sell"
 	-- Migration: old boolean true → "delete" (user requested default)
 	autoGray = "delete",
@@ -824,6 +851,15 @@ local DEFAULT_PROFILE = {
 	boeWeaponsIlvlMax = 199,
 	boeWeaponsRare    = false,
 	boeWeaponsEpic    = false,
+	protectAffixFromSell = false, -- legacy migration source
+	affixIlvlMin         = 0,     -- legacy; no longer used
+	protectAffixTier1    = false,
+	protectAffixTier2    = false,
+	protectAffixTier3    = false,
+	protectAffixTier4    = false,
+	protectAffixTier5    = false,
+	affixCollectionMode  = false,
+	keepSingleMissingAffix = false,
 	summonScavenger   = false,
 }
 
@@ -892,6 +928,19 @@ local function EnsureProfileFields(p)
 
 		p._v302Migrated = true
 		_G._AutoDelete_NeedMigrationNotice = true
+	end
+
+	local hasAffixTierProtection = p.protectAffixTier1 ~= nil
+		or p.protectAffixTier2 ~= nil
+		or p.protectAffixTier3 ~= nil
+		or p.protectAffixTier4 ~= nil
+		or p.protectAffixTier5 ~= nil
+	if not hasAffixTierProtection and p.protectAffixFromSell == true then
+		p.protectAffixTier1 = true
+		p.protectAffixTier2 = true
+		p.protectAffixTier3 = true
+		p.protectAffixTier4 = true
+		p.protectAffixTier5 = true
 	end
 
 	for k, v in pairs(DEFAULT_PROFILE) do
@@ -1679,7 +1728,7 @@ popup:SetMovable(true)
 popup:EnableMouse(true)
 popup:SetClampedToScreen(true)
 popup:Hide()
-ApplyBackdrop(popup, C_BG, C_BORDER)
+ApplyPopupChrome(popup)
 
 -- Title bar: drag handle + window title. Same canonical look as
 -- Process Bags and the main settings panel.
@@ -1690,7 +1739,10 @@ titleBar:SetHeight(24)
 ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
 titleBar:EnableMouse(true)
 titleBar:RegisterForDrag("LeftButton")
-titleBar:SetScript("OnDragStart", function() popup:StartMoving() end)
+titleBar:SetScript("OnDragStart", function()
+	BringPopupToFront(popup)
+	popup:StartMoving()
+end)
 titleBar:SetScript("OnDragStop", function() popup:StopMovingOrSizing() end)
 
 local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
@@ -1864,6 +1916,7 @@ local function RefreshPopup()
 end
 
 popup:SetScript("OnShow", function(self)
+	BringPopupToFront(self)
 	-- Anchor centered on first show; user can drag it after.
 	if not self._everShown then
 		self:ClearAllPoints()
@@ -1899,12 +1952,13 @@ end  -- end of Disenchant Filters Popup `do` block
 do
 
 local POPUP_W = 320
-local POPUP_H = 390
+local POPUP_H = 428
 local TITLE_H = 24
 local TAB_H = 30
 local BODY_PAD_X = 10
 local BODY_PAD_TOP = 4
-local BODY_PAD_BOT = 8
+local FOOTER_H = 42
+local BODY_PAD_BOT = FOOTER_H
 -- Scrollbar built into UIPanelScrollFrameTemplate reserves ~22px on the
 -- right edge of the scroll frame; pad accordingly so text doesn't slide
 -- under the bar.
@@ -1918,7 +1972,7 @@ popup:SetMovable(true)
 popup:EnableMouse(true)
 popup:SetClampedToScreen(true)
 popup:Hide()
-ApplyBackdrop(popup, C_BG, C_BORDER)
+ApplyPopupChrome(popup)
 
 -- Title bar: drag handle + window title + close X. Mirrors the canonical
 -- look used by the Disenchant Filters popup and Process Bags panel.
@@ -1929,39 +1983,15 @@ titleBar:SetHeight(TITLE_H)
 ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
 titleBar:EnableMouse(true)
 titleBar:RegisterForDrag("LeftButton")
-titleBar:SetScript("OnDragStart", function() popup:StartMoving() end)
+titleBar:SetScript("OnDragStart", function()
+	BringPopupToFront(popup)
+	popup:StartMoving()
+end)
 titleBar:SetScript("OnDragStop", function() popup:StopMovingOrSizing() end)
 
 local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
 titleText:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
 titleText:SetText("Learned Affixes")
-
-local refreshBtn = CreateFrame("Button", nil, titleBar)
-refreshBtn:SetSize(62, 18)
-refreshBtn:SetPoint("RIGHT", titleBar, "RIGHT", -28, 0)
-ApplyBackdrop(refreshBtn, C_ROW_ODD, C_BORDER)
-local refreshText = MakeText(refreshBtn, 10, C_TEXT, "OUTLINE")
-refreshText:SetPoint("CENTER")
-refreshText:SetText("Refresh")
-refreshBtn:SetScript("OnClick", function()
-	if _G.AutoDelete_ScanLearnedAffixes then
-		_G.AutoDelete_ScanLearnedAffixes()
-	end
-end)
-refreshBtn:SetScript("OnEnter", function(btn)
-	ApplyBackdrop(btn, C_ROW_HOVER, C_BORDER)
-	refreshText:SetTextColor(1, 1, 1, 1)
-	GameTooltip:SetOwner(btn, "ANCHOR_TOP")
-	GameTooltip:SetText("Refresh", 1, 1, 1)
-	GameTooltip:AddLine("Scans Project Ebonhold's current affix data again.",
-		C_DIM[1], C_DIM[2], C_DIM[3], true)
-	GameTooltip:Show()
-end)
-refreshBtn:SetScript("OnLeave", function(btn)
-	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
-	refreshText:SetTextColor(unpack(C_TEXT))
-	GameTooltip:Hide()
-end)
 
 local closeX = CreateFrame("Button", nil, titleBar)
 closeX:SetSize(24, 24)
@@ -2077,8 +2107,8 @@ bodyFS:SetWordWrap(true)
 bodyFS:SetNonSpaceWrap(false)
 
 local copyFrame = CreateFrame("Frame", nil, popup)
-copyFrame:SetPoint("BOTTOMLEFT", popup, "BOTTOMLEFT", BODY_PAD_X, 8)
-copyFrame:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -BODY_PAD_X, 8)
+copyFrame:SetPoint("BOTTOMLEFT", popup, "BOTTOMLEFT", BODY_PAD_X, FOOTER_H + 4)
+copyFrame:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -BODY_PAD_X, FOOTER_H + 4)
 copyFrame:SetHeight(28)
 copyFrame:SetFrameLevel(popup:GetFrameLevel() + 4)
 copyFrame:Hide()
@@ -2129,6 +2159,31 @@ copyEdit:SetScript("OnKeyDown", function(s, key)
 	else
 		s:HighlightText()
 	end
+end)
+
+-- Footer action: same bottom action-row pattern as Import Raw.
+local FOOTER_BTN_W = 85
+local FOOTER_BTN_H = 24
+local refreshBtn = MakeActionButton(popup, "Refresh", C_BLUE, function()
+	if _G.AutoDelete_ScanLearnedAffixes then
+		_G.AutoDelete_ScanLearnedAffixes()
+	end
+end, FOOTER_BTN_W, FOOTER_BTN_H)
+refreshBtn:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -BODY_PAD_X, 12)
+refreshBtn:SetScript("OnEnter", function(btn)
+	btn:SetBackdropColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.3)
+	btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
+	btn._text:SetTextColor(1, 1, 1)
+	GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+	GameTooltip:SetText("Refresh", 1, 1, 1)
+	GameTooltip:AddLine("Scans Project Ebonhold's current affix data again.",
+		C_DIM[1], C_DIM[2], C_DIM[3], true)
+	GameTooltip:Show()
+end)
+refreshBtn:SetScript("OnLeave", function(btn)
+	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+	btn._text:SetTextColor(unpack(C_TEXT))
+	GameTooltip:Hide()
 end)
 
 local function ShowAffixCopyBox(text)
@@ -2288,6 +2343,7 @@ local function ShowLearnedAffixesWindow(bodyTextOrData)
 		popup:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
 		popup._everShown = true
 	end
+	BringPopupToFront(popup)
 	popup:Show()
 end
 
@@ -2333,7 +2389,7 @@ popup:SetMovable(true)
 popup:EnableMouse(true)
 popup:SetClampedToScreen(true)
 popup:Hide()
-ApplyBackdrop(popup, C_BG, C_BORDER)
+ApplyPopupChrome(popup)
 
 local titleBar = CreateFrame("Frame", nil, popup)
 titleBar:SetPoint("TOPLEFT", popup, "TOPLEFT", 0, 0)
@@ -2342,7 +2398,10 @@ titleBar:SetHeight(TITLE_H)
 ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
 titleBar:EnableMouse(true)
 titleBar:RegisterForDrag("LeftButton")
-titleBar:SetScript("OnDragStart", function() popup:StartMoving() end)
+titleBar:SetScript("OnDragStart", function()
+	BringPopupToFront(popup)
+	popup:StartMoving()
+end)
 titleBar:SetScript("OnDragStop", function() popup:StopMovingOrSizing() end)
 
 local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
@@ -2521,6 +2580,7 @@ local function RefreshIgnoredItems()
 end
 
 popup:SetScript("OnShow", function(self)
+	BringPopupToFront(self)
 	if not self._everShown then
 		self:ClearAllPoints()
 		self:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
@@ -2557,14 +2617,15 @@ end  -- end of Ignored Items Popup `do` block
 --   3. Export Raw popup       (list-picker dropdown + read-only auto-selected text)
 --
 -- Flow:
---   * User pastes item names (one per line) into Import Raw, clicks a
+--   * User pastes item:id lines, item links, IDs, or names into Import Raw,
+--     clicks a
 --     destination button -> AutoDelete_ExecuteRawImport(listKey, rawText)
 --     resolves names via GetItemInfo, dedupes against the target list,
 --     appends item:<id> lines to the chosen profile list field,
 --     opens the Results popup with counts + unresolved names.
---   * User opens Export Raw, picks a list -> the read-only
---     EditBox fills with the target list's items as plain names (one per
---     line). User Ctrl+A / Ctrl+C to copy.
+--   * User opens Export Raw, picks a list, optionally checks Raw -> the
+--     read-only EditBox fills with names or stable item:id lines plus name
+--     comments. User Ctrl+A / Ctrl+C to copy.
 --
 -- All popups follow the canonical chrome (dark body, dark gray border,
 -- dark title bar + orange title, dim close X that turns red on hover) and
@@ -2581,12 +2642,14 @@ local RAW_LIST_FIELDS = {
 	sell   = "sellListText",
 	keep   = "whitelistText",
 	keepone = "keepOneText",
+	keepstack = "keepStackText",
 }
 local RAW_LIST_LABELS = {
 	delete = "Delete",
 	sell   = "Sell",
 	keep   = "Keep",
 	keepone = "KeepOne",
+	keepstack = "KeepStack",
 }
 
 -- Build a set of itemIds already on a list (newline-separated `item:<id>`
@@ -2795,24 +2858,35 @@ function _G.AutoDelete_ExecuteRawImport(listKey, rawText)
 	end
 end
 
--- Render a list as raw names for export. Walks profile[<listKey>Text],
--- resolves each item:<id> entry via GetItemInfo, returns a newline-joined
--- string of names. Uncached items fall back to their item:<id> form.
-function _G.AutoDelete_BuildRawExport(listKey)
+-- Render a list for export. Default output is human-readable names. Raw output
+-- is stable item:id lines; names are included as comments when cached, but
+-- import strips comments and keeps the id. Raw makes account-to-account imports
+-- work even when the target account has not cached every item name yet.
+function _G.AutoDelete_BuildRawExport(listKey, rawMode)
 	if not RAW_LIST_FIELDS[listKey] then return "" end
 	local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
 	if not profile then return "" end
 	local text = profile[RAW_LIST_FIELDS[listKey]] or ""
-	local names = {}
+	local lines = {}
 	for line in string.gmatch(text, "[^\r\n]+") do
 		local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
 		local id = tonumber(trimmed:match("item:(%d+)"))
 		if id then
 			local name = GetItemInfo(id)
-			table.insert(names, name or ("item:" .. id))
+			if rawMode and name then
+				table.insert(lines, "item:" .. id .. "    # " .. name)
+			elseif rawMode then
+				table.insert(lines, "item:" .. id)
+			elseif name then
+				table.insert(lines, name)
+			else
+				table.insert(lines, "item:" .. id)
+			end
+		elseif trimmed ~= "" then
+			table.insert(lines, trimmed)
 		end
 	end
-	return table.concat(names, "\n")
+	return table.concat(lines, "\n")
 end
 
 -- ---------------------------------------------------------------------------
@@ -2829,7 +2903,11 @@ local function MakeRawPopup(globalName, titleText, w, h)
 	p:EnableMouse(true)
 	p:SetClampedToScreen(true)
 	p:Hide()
-	ApplyBackdrop(p, C_BG, C_BORDER)
+	ApplyPopupChrome(p)
+	if p.HookScript then
+		p:HookScript("OnShow", BringPopupToFront)
+		p:HookScript("OnMouseDown", BringPopupToFront)
+	end
 	local tb = CreateFrame("Frame", nil, p)
 	tb:SetPoint("TOPLEFT", p, "TOPLEFT", 0, 0)
 	tb:SetPoint("TOPRIGHT", p, "TOPRIGHT", 0, 0)
@@ -2837,7 +2915,11 @@ local function MakeRawPopup(globalName, titleText, w, h)
 	ApplyBackdrop(tb, C_TITLEBAR, C_BORDER)
 	tb:EnableMouse(true)
 	tb:RegisterForDrag("LeftButton")
-	tb:SetScript("OnDragStart", function() p:StartMoving() end)
+	tb:SetScript("OnMouseDown", function() BringPopupToFront(p) end)
+	tb:SetScript("OnDragStart", function()
+		BringPopupToFront(p)
+		p:StartMoving()
+	end)
 	tb:SetScript("OnDragStop", function() p:StopMovingOrSizing() end)
 	local title = MakeText(tb, 12, C_TITLE, "OUTLINE")
 	title:SetPoint("LEFT", tb, "LEFT", 10, 0)
@@ -2862,7 +2944,7 @@ end
 
 do
 
-local POPUP_W = 380
+local POPUP_W = 440
 local POPUP_H = 360
 local TITLE_H = 24
 local PAD_X = 10
@@ -2876,7 +2958,7 @@ hint:SetWidth(POPUP_W - PAD_X * 2)
 hint:SetJustifyH("LEFT")
 hint:SetWordWrap(true)
 hint:SetNonSpaceWrap(false)
-hint:SetText("Paste item names below, one per line. Item links also work. Then pick a list:")
+hint:SetText("Paste item:id lines, item links, numeric IDs, or item names below. Then pick a list:")
 
 -- Paste area: multi-line EditBox inside a ScrollFrame, dark bg.
 local pasteHolder = CreateFrame("Frame", nil, popup)
@@ -2909,7 +2991,7 @@ pasteScroll:SetScript("OnMouseWheel", function(sf, delta)
 	sf:SetVerticalScroll(v)
 end)
 
--- Four destination buttons below the paste area, equal widths.
+-- Five destination buttons below the paste area, equal widths.
 local BTN_H = 24
 local function MakeDestButton(label, listKey, color, xOff, btnW)
 	local b = MakeActionButton(popup, label, color, function()
@@ -2925,12 +3007,13 @@ local function MakeDestButton(label, listKey, color, xOff, btnW)
 	return b
 end
 local BTN_GAP = 6
-local TOTAL_BTN_W = POPUP_W - PAD_X * 2 - BTN_GAP * 3
-local BTN_W = math.floor(TOTAL_BTN_W / 4)
+local TOTAL_BTN_W = POPUP_W - PAD_X * 2 - BTN_GAP * 4
+local BTN_W = math.floor(TOTAL_BTN_W / 5)
 MakeDestButton("Delete",  "delete",  C_RED,   PAD_X,                                 BTN_W)
 MakeDestButton("Sell",    "sell",    C_BLUE,  PAD_X + BTN_W + BTN_GAP,               BTN_W)
 MakeDestButton("Keep",    "keep",    C_GREEN, PAD_X + (BTN_W + BTN_GAP) * 2,         BTN_W)
 MakeDestButton("KeepOne", "keepone", C_RED,   PAD_X + (BTN_W + BTN_GAP) * 3,         BTN_W)
+MakeDestButton("KeepStack", "keepstack", C_RED, PAD_X + (BTN_W + BTN_GAP) * 4,       BTN_W)
 
 popup:SetScript("OnShow", function(self)
 	if not self._everShown then
@@ -2954,7 +3037,7 @@ end  -- end of Import Raw Popup `do` block
 
 do
 
-local POPUP_W = 380
+local POPUP_W = 440
 local POPUP_H = 320
 local TITLE_H = 24
 local PAD_X = 10
@@ -3032,7 +3115,7 @@ function _G.AutoDelete_ShowImportResultsWindow(listKey, importedCount, duplicate
 			table.insert(lines, "  " .. name)
 		end
 		table.insert(lines, "")
-		table.insert(lines, "|cff8a8a8aTip: AutoDelete can resolve item links, item:id, plain numeric IDs, cached names, current bag items, and known list entries. Mouse over missing items or paste item:id when a name is not cached.|r")
+		table.insert(lines, "|cff8a8a8aTip: AutoDelete can resolve item links, item:id, plain numeric IDs, cached names, current bag items, and known list entries. For account-to-account moves, check Raw in Export Raw so the paste uses item:id lines.|r")
 	end
 	body:SetText(table.concat(lines, "\n"))
 	local h = body:GetStringHeight() + 8
@@ -3069,7 +3152,19 @@ hint:SetWidth(POPUP_W - PAD_X * 2)
 hint:SetJustifyH("LEFT")
 hint:SetWordWrap(true)
 hint:SetNonSpaceWrap(false)
-hint:SetText("Pick a list. The names below are pre-selected -- press Ctrl+C to copy.")
+hint:SetWidth(POPUP_W - PAD_X * 2 - 74)
+hint:SetText("Pick a list. Text below is pre-selected -- press Ctrl+C to copy.")
+
+local rawToggle = MakeSubToggle(popup, "Raw", C_BLUE)
+rawToggle:SetSize(64, 16)
+rawToggle:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 10))
+rawToggle:SetScript("OnEnter", function(self)
+	GameTooltip:SetOwner(self, "ANCHOR_TOP")
+	GameTooltip:SetText("Raw", 1, 1, 1)
+	GameTooltip:AddLine("Unchecked exports item names. Checked exports item:id lines with name comments for account-to-account import.", C_DIM[1], C_DIM[2], C_DIM[3], true)
+	GameTooltip:Show()
+end)
+rawToggle:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
 -- Read-only text area (multi-line EditBox inside a ScrollFrame).
 local exportHolder = CreateFrame("Frame", nil, popup)
@@ -3109,8 +3204,12 @@ exportScroll:SetScript("OnMouseWheel", function(sf, delta)
 	sf:SetVerticalScroll(v)
 end)
 
+local currentListKey = "delete"
+
 local function FillFor(listKey)
-	local txt = (_G.AutoDelete_BuildRawExport and _G.AutoDelete_BuildRawExport(listKey)) or ""
+	currentListKey = listKey or currentListKey
+	local rawMode = rawToggle and rawToggle:GetChecked()
+	local txt = (_G.AutoDelete_BuildRawExport and _G.AutoDelete_BuildRawExport(currentListKey, rawMode)) or ""
 	exportEdit._suppress = true
 	exportEdit._stash = txt
 	exportEdit:SetText(txt)
@@ -3120,7 +3219,12 @@ local function FillFor(listKey)
 	exportEdit:HighlightText()
 end
 
--- Four buttons act as the "picker": clicking one fills the text area.
+rawToggle:SetScript("OnClick", function(btn)
+	btn:SetChecked(not btn:GetChecked())
+	FillFor(currentListKey)
+end)
+
+-- Five buttons act as the "picker": clicking one fills the text area.
 -- (Simpler than a dropdown and consistent with the Import popup row.)
 local pickRow = CreateFrame("Frame", nil, popup)
 pickRow:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8 + 22))
@@ -3128,8 +3232,8 @@ pickRow:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 8 + 22))
 pickRow:SetHeight(22)
 
 local BTN_GAP = 6
-local TOTAL_PICK_W = POPUP_W - PAD_X * 2 - BTN_GAP * 3
-local PICK_BTN_W = math.floor(TOTAL_PICK_W / 4)
+local TOTAL_PICK_W = POPUP_W - PAD_X * 2 - BTN_GAP * 4
+local PICK_BTN_W = math.floor(TOTAL_PICK_W / 5)
 local function MakePickButton(label, listKey, color, xOff)
 	local b = MakeActionButton(pickRow, label, color, function()
 		FillFor(listKey)
@@ -3141,6 +3245,7 @@ MakePickButton("Delete", "delete", C_RED,   0)
 MakePickButton("Sell",   "sell",   C_BLUE,  PICK_BTN_W + BTN_GAP)
 MakePickButton("Keep",   "keep",   C_GREEN, (PICK_BTN_W + BTN_GAP) * 2)
 MakePickButton("KeepOne", "keepone", C_RED, (PICK_BTN_W + BTN_GAP) * 3)
+MakePickButton("KeepStack", "keepstack", C_RED, (PICK_BTN_W + BTN_GAP) * 4)
 
 popup:SetScript("OnShow", function(self)
 	if not self._everShown then
@@ -3149,6 +3254,7 @@ popup:SetScript("OnShow", function(self)
 		self._everShown = true
 	end
 	-- Default to Delete list on open.
+	rawToggle:SetChecked(false)
 	FillFor("delete")
 end)
 
@@ -3271,6 +3377,32 @@ hint:SetWordWrap(true)
 hint:SetNonSpaceWrap(false)
 hint:SetText("Report text is pre-selected. Press Ctrl+C to copy.")
 
+local searchHolder = CreateFrame("Frame", nil, popup)
+searchHolder:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8 + 20))
+searchHolder:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 8 + 20))
+searchHolder:SetHeight(22)
+ApplyBackdrop(searchHolder, C_DROP_BG, C_DROP_BORDER)
+searchHolder:Hide()
+
+local searchEdit = CreateFrame("EditBox", nil, searchHolder)
+searchEdit:SetAutoFocus(false)
+searchEdit:EnableMouse(true)
+searchEdit:EnableKeyboard(true)
+searchEdit:SetFont(FONT, 10, "OUTLINE")
+searchEdit:SetTextColor(unpack(C_TEXT))
+searchEdit:SetPoint("TOPLEFT", 6, -2)
+searchEdit:SetPoint("BOTTOMRIGHT", -46, 2)
+searchEdit:SetScript("OnEscapePressed", function(eb) eb:ClearFocus() end)
+
+local searchPlaceholder = MakeText(searchHolder, 10, C_DIM, "OUTLINE")
+searchPlaceholder:SetPoint("LEFT", searchHolder, "LEFT", 7, 0)
+searchPlaceholder:SetText("Search report...")
+
+local clearSearch = MakeActionButton(searchHolder, "Clear", C_RED, function()
+	searchEdit:SetText("")
+end, 40, 18)
+clearSearch:SetPoint("RIGHT", searchHolder, "RIGHT", -2, 0)
+
 local txtHolder = CreateFrame("Frame", nil, popup)
 txtHolder:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8 + 18))
 txtHolder:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 8 + 18))
@@ -3307,16 +3439,37 @@ txtScroll:SetScript("OnMouseWheel", function(sf, delta)
 	sf:SetVerticalScroll(v)
 end)
 
-local function FillWith(text)
+local searchBuilder = nil
+local baseText = ""
+
+local function LayoutBody(showSearch)
+	local extra = showSearch and 28 or 0
+	txtHolder:ClearAllPoints()
+	txtHolder:SetPoint("TOPLEFT", popup, "TOPLEFT", PAD_X, -(TITLE_H + 8 + 18 + extra))
+	txtHolder:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 8 + 18 + extra))
+	txtHolder:SetHeight(POPUP_H - TITLE_H - 8 - 18 - extra - 12)
+end
+
+local function FillWith(text, selectAll)
 	txtEdit._suppress = true
 	txtEdit._stash = text or ""
 	txtEdit:SetText(text or "")
 	txtEdit._suppress = false
-	txtEdit:SetFocus()
-	txtEdit:HighlightText()
+	if selectAll ~= false then
+		txtEdit:SetFocus()
+		txtEdit:HighlightText()
+	end
+	txtScroll:SetVerticalScroll(0)
+end
+
+local function ApplySearch()
+	if searchBuilder then
+		FillWith(searchBuilder(searchEdit:GetText() or ""), false)
+	end
 end
 
 popup:SetScript("OnShow", function(self)
+	BringPopupToFront(self)
 	if not self._everShown then
 		self:ClearAllPoints()
 		self:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
@@ -3324,11 +3477,37 @@ popup:SetScript("OnShow", function(self)
 	end
 end)
 
-function _G.AutoDelete_ShowReportWindow(text, title)
+searchEdit:SetScript("OnTextChanged", function(eb)
+	if eb._suppress then return end
+	local query = eb:GetText() or ""
+	if query == "" then searchPlaceholder:Show() else searchPlaceholder:Hide() end
+	ApplySearch()
+end)
+
+searchHolder:EnableMouse(true)
+searchHolder:SetScript("OnMouseDown", function() searchEdit:SetFocus() end)
+
+function _G.AutoDelete_ShowReportWindow(text, title, opts)
+	opts = opts or {}
 	if popup._titleText then
 		popup._titleText:SetText(title or "AutoDelete Report")
 	end
-	FillWith(text)
+	baseText = text or ""
+	searchBuilder = opts.searchBuilder
+	if searchBuilder then
+		searchPlaceholder:SetText(opts.searchPlaceholder or "Search report...")
+		searchPlaceholder:Show()
+		searchHolder:Show()
+		LayoutBody(true)
+		searchEdit._suppress = true
+		searchEdit:SetText("")
+		searchEdit._suppress = false
+		FillWith(searchBuilder(""), true)
+	else
+		searchHolder:Hide()
+		LayoutBody(false)
+		FillWith(baseText, true)
+	end
 	popup:Show()
 end
 
@@ -3338,17 +3517,14 @@ end  -- end of General Report Popup `do` block
 -- Help Topic popup
 -- ============================================================================
 -- Dedicated readable help surface that mirrors the addon's card style: every
--- section renders as an icon (left) + bold title + muted description, using the
--- same role colors as the tabs (accent title, bright option title, dim copy,
--- warning red for destructive options). Section data carries its own icon path
--- and an optional `destructive` flag; for safe options that still hide a
--- destructive action, the clause is marked inline with |cffbf3838...|r. No
--- per-kind rainbow, no auto-detected tags.
+-- section renders as an icon (left) + option title + body copy + separator.
+-- Keep the structure stable: row titles are mage blue, body text is white, and
+-- destructive body clauses are marked inline with |cffbf3838...|r.
 
 function _G.AutoDelete_ShowHelpTopicWindow(titleText, sections)
 	if not _G.AutoDeleteHelpTopicPopup then
-		local POPUP_W = 470
-		local POPUP_H = 390
+		local POPUP_W = 560
+		local POPUP_H = 540
 		local TITLE_H = 24
 		local PAD_X   = 12
 		local popup = MakeRawPopup("AutoDeleteHelpTopicPopup", "AutoDelete Help", POPUP_W, POPUP_H)
@@ -3372,16 +3548,11 @@ function _G.AutoDelete_ShowHelpTopicWindow(titleText, sections)
 		holder:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -PAD_X, 12)
 		ApplyBackdrop(holder, C_DROP_BG, C_DROP_BORDER)
 
-		local scroll = CreateFrame("ScrollFrame", "AutoDeleteHelpTopicScroll", holder, "UIPanelScrollFrameTemplate")
-		scroll:SetPoint("TOPLEFT", holder, "TOPLEFT", 8, -8)
-		scroll:SetPoint("BOTTOMRIGHT", holder, "BOTTOMRIGHT", -26, 8)
+		local content = CreateFrame("Frame", nil, holder)
+		content:SetPoint("TOPLEFT", holder, "TOPLEFT", 8, -8)
+		content:SetPoint("BOTTOMRIGHT", holder, "BOTTOMRIGHT", -8, 8)
+		content:SetSize(POPUP_W - PAD_X * 2 - 16, POPUP_H - TITLE_H - 42 - 12 - 16)
 
-		local content = CreateFrame("Frame", nil, scroll)
-		content:SetWidth(POPUP_W - PAD_X * 2 - 42)
-		content:SetHeight(1)
-		scroll:SetScrollChild(content)
-
-		popup._helpScroll = scroll
 		popup._helpContent = content
 		popup._helpRows = {}
 		_G.AutoDeleteHelpTopicPopup = popup
@@ -3405,6 +3576,14 @@ function _G.AutoDelete_ShowHelpTopicWindow(titleText, sections)
 	local TEXT_X = 2 + ICON + 8     -- icon (left) + gap; title/body start here
 	local y = -2
 
+	local function HelpBodyText(section)
+		local body = section and section.body or ""
+		if section and section.destructive then
+			return "|cffbf3838" .. body .. "|r"
+		end
+		return body
+	end
+
 	for i, section in ipairs(sections or {}) do
 		local row = rows[i]
 		if not row then
@@ -3415,7 +3594,7 @@ function _G.AutoDelete_ShowHelpTopicWindow(titleText, sections)
 			row.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
 			row.title = MakeText(content, 11, C_TEXT, "OUTLINE")
 			row.title:SetJustifyH("LEFT")
-			row.body = MakeText(content, 10, C_DIM)
+			row.body = MakeText(content, 10, C_TEXT)
 			row.body:SetJustifyH("LEFT")
 			row.body:SetWordWrap(true)
 			row.body:SetNonSpaceWrap(false)
@@ -3436,21 +3615,19 @@ function _G.AutoDelete_ShowHelpTopicWindow(titleText, sections)
 		row.title:ClearAllPoints()
 		row.title:SetPoint("TOPLEFT", content, "TOPLEFT", TEXT_X, y)
 		row.title:SetWidth(width - TEXT_X - 2)
-		if section.destructive then
-			row.title:SetTextColor(C_RED[1], C_RED[2], C_RED[3], 1)
-		else
-			row.title:SetTextColor(C_TEXT[1], C_TEXT[2], C_TEXT[3], 1)
-		end
+		row.title:SetTextColor(C_HOVER[1], C_HOVER[2], C_HOVER[3], 1)
 		row.title:SetText(section.title or "")
 		row.title:Show()
 		local titleH = row.title:GetStringHeight() or 12
 
-		-- Muted description below the title. Inline |cffbf3838...|r marks any
-		-- destructive clause inside an otherwise-safe option.
+		-- Body copy below the title. Inline |cffbf3838...|r marks any
+		-- destructive clause inside an otherwise-safe option; destructive
+		-- sections render the full body in red.
 		row.body:ClearAllPoints()
 		row.body:SetPoint("TOPLEFT", content, "TOPLEFT", TEXT_X, y - titleH - 4)
 		row.body:SetWidth(width - TEXT_X - 2)
-		row.body:SetText(section.body or "")
+		row.body:SetTextColor(C_TEXT[1], C_TEXT[2], C_TEXT[3], 1)
+		row.body:SetText(HelpBodyText(section))
 		row.body:Show()
 		local bodyH = row.body:GetStringHeight() or 14
 
@@ -3468,7 +3645,6 @@ function _G.AutoDelete_ShowHelpTopicWindow(titleText, sections)
 	end
 
 	content:SetHeight(math.max(1, -y + 6))
-	popup._helpScroll:SetVerticalScroll(0)
 	if not popup._everShown then
 		popup:ClearAllPoints()
 		popup:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
@@ -3893,9 +4069,10 @@ local function BuildUI(self)
 				label = "Affix",
 				title = "Affix",
 				sections = {
-					{ icon = "Interface\\Icons\\Spell_Holy_DivineProtection", title = "Affix Protection", body = "No Auto-Sell stops Auto-Sell from selling items that carry a Project Ebonhold affix. Min iLvl sets the floor: affix items at that item level or higher are protected, lower ones can still be sold." },
-					{ icon = "Interface\\Icons\\Spell_Nature_WispSplode", title = "Affix Display", body = "Show affix dot marks affix items in your bags, colored by tier, with gold meaning an affix you have not learned. Only missing affixes narrows the dot to unlearned affixes and protects them." },
-					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_02", title = "Affix Tools", body = "Audit Lists checks your Delete and Sell lists for affix items and prints what it finds without changing anything. Scan Learned Affixes refreshes and lists every affix you own by tier." },
+					{ icon = "Interface\\Icons\\Spell_Holy_DivineProtection", title = "Affix Protection", body = "No Auto-Sell protects the checked tiers I-V before Delete or Sell rules. Keep still wins first. Only missing affixes narrows this protection to affixes your account has not learned." },
+					{ icon = "Interface\\Icons\\Spell_Nature_WispSplode", title = "Affix Display", body = "Show affix dot marks affixed bag items by tier. Gold means the account has not learned that affix. Only missing affixes hides learned affixes and shows only gold missing-affix dots." },
+					{ icon = "Interface\\Icons\\INV_Misc_Gem_Amethyst_03", title = "Keep One Affix", body = "Keeps one armor or accessory item for each missing affix and clears extras through the normal cleanup rules. It is a toggle, not a list, and it ignores learned affixes." },
+					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_02", title = "Affix Tools", body = "Audit Lists checks your Delete and Sell lists for affixed items and prints what it finds without changing anything. Update Affix List opens Learned and Unlearned tabs from PE's account-bound affix data." },
 				}
 			},
 			{
@@ -3946,10 +4123,10 @@ local function BuildUI(self)
 					{ icon = "Interface\\Icons\\INV_Misc_Book_09", title = "Current profile", body = "The dropdown lists every character profile, including the one you are on now, and the Current line shows the active character. Copy, Delete, and Import Lists all act on the profile picked here." },
 					{ icon = "Interface\\Icons\\INV_Misc_Note_05", title = "Copy", body = "Copies the selected profile full AutoDelete setup onto this character. |cffbf3838It overwrites your current settings and lists|r, so review Sell, Delete, and Affix rules afterward." },
 					{ icon = "Interface\\Icons\\Ability_Creature_Cursed_05", title = "Delete", destructive = true, body = "Deletes the profile selected in the dropdown. This cannot be undone. It does not touch the character you are currently playing." },
-					{ icon = "Interface\\Icons\\INV_Misc_Note_06", title = "Import Lists", body = "Merges only the Delete, Sell, Keep, and KeepOne lists from the selected profile into this one. Toggles, scan speed, and filters are left alone. Conflicts open a review window." },
-					{ icon = "Interface\\Icons\\Spell_Holy_Purify", title = "Clear List", destructive = true, body = "Opens a picker to wipe one list, or all four, on the current character. Clearing a list cannot be undone." },
+					{ icon = "Interface\\Icons\\INV_Misc_Note_06", title = "Import Lists", body = "Merges only the Delete, Sell, Keep, KeepOne, and KeepStack lists from the selected profile into this one. Toggles, scan speed, and filters are left alone. Conflicts open a review window." },
+					{ icon = "Interface\\Icons\\Spell_Holy_Purify", title = "Clear List", destructive = true, body = "Opens a picker to wipe one list, or all five, on the current character. Clearing a list cannot be undone." },
 					{ icon = "Interface\\Icons\\INV_Scroll_03", title = "Import Raw", body = "Paste plain item names and AutoDelete looks each one up and adds it to the list you choose. Check the names first, a large paste changes many entries at once." },
-					{ icon = "Interface\\Icons\\INV_Scroll_08", title = "Export Raw", body = "Copies a list out as plain item names so you can share it or paste it elsewhere. It only reads your lists, it changes nothing." },
+					{ icon = "Interface\\Icons\\INV_Scroll_08", title = "Export Raw", body = "Copies a list out as plain item names, or as item:id lines when Raw is checked. It only reads your lists, it changes nothing." },
 				}
 			},
 			{
@@ -3968,6 +4145,8 @@ local function BuildUI(self)
 					{ icon = "Interface\\Icons\\Spell_Shadow_DeathCoil", title = "Delete", destructive = true, body = "The Delete list. Items whose ID matches are destroyed on the next bag scan, so add with care and test one safe item first. Entries match by item ID, so heroic and normal versions stay separate." },
 					{ icon = "Interface\\Icons\\INV_Misc_Coin_02", title = "Sell", body = "The Sell list. Matching items are vendored when a merchant is open, not during normal bag use. Good for known vendor trash and surplus." },
 					{ icon = "Interface\\Icons\\INV_Misc_Key_03", title = "Keep", body = "The Keep list, your protection list. Anything here wins over every automatic rule, so add important items before turning on broad delete or sell actions." },
+					{ icon = "Interface\\Icons\\INV_Misc_Bag_10", title = "KeepOne", body = "The KeepOne list is for cleanup, not safety. It keeps one unit of the item and |cffbf3838deletes extra units|r on bag scans. Use Keep if you want the item fully protected." },
+					{ icon = "Interface\\Icons\\INV_Misc_Food_15", title = "KeepStack", body = "The KeepStack list is for cleanup, not safety. It keeps one bag stack, usually the biggest stack, and |cffbf3838deletes extra stacks|r on bag scans. Use Keep if you want all stacks safe." },
 					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_03", title = "Search & Manage", body = "Below the tabs, Search items filters the current list, Raw shows the plain stored text, and Refresh rebuilds the view. Drag a bag item onto a list tab to add it." },
 				}
 			},
@@ -3975,8 +4154,8 @@ local function BuildUI(self)
 				label = "Bag Features",
 				title = "Bag Features",
 				sections = {
-					{ icon = "Interface\\Icons\\INV_Misc_Bag_09", title = "Drag to List", body = "Drag a real bag item onto Delete, Sell, Keep, or KeepOne to add it to that list. An empty list also shows a Drag items here hint." },
-					{ icon = "Interface\\Icons\\INV_Misc_Gear_02", title = "Alt+Right-click menu", body = "Alt+Right-click a real bag item to open the AutoDelete quick menu, with Keep, Sell, |cffbf3838Delete|r, and Why?. Picking Delete adds the item to the Delete list." },
+					{ icon = "Interface\\Icons\\INV_Misc_Bag_09", title = "Drag to List", body = "Drag a real bag item onto Delete, Sell, Keep, KeepOne, or KeepStack to add it to that list. An empty list also shows a Drag items here hint." },
+					{ icon = "Interface\\Icons\\INV_Misc_Gear_02", title = "Alt+Right-click menu", body = "Alt+Right-click a real bag item to open the AutoDelete quick menu, with Keep, Sell, KeepOne, KeepStack, |cffbf3838Delete|r, and Why?. Picking Delete adds the item to the Delete list." },
 					{ icon = "Interface\\Icons\\INV_Misc_Food_15", title = "Normal right-click", body = "Plain right-click still belongs to WoW and your bag addon for eating, drinking, equipping, and using items. AutoDelete only acts on Alt+Right-click. |cffbf3838If a plain right-click ever stops working, that is a bug, not intended.|r" },
 				}
 			},
@@ -4337,7 +4516,7 @@ local function BuildUI(self)
 
 	-- ========================================================================
 	-- AFFIX TAB (internal key "affix", v3.20):
-	--   Card 1: Affix Protection    (No Auto-Sell + Min iLvl)
+	--   Card 1: Affix Protection    (No Auto-Sell tier checkboxes)
 	--   Card 2: Affix Display       (Show affix dot + Only missing affixes)
 	--   Card 3: Affix Tools         (Audit Lists + Scan Learned Affixes)
 	-- User feedback 2026-05-23: Cards 1 and 2 were too crowded with both
@@ -4482,116 +4661,92 @@ local function BuildUI(self)
 
 	-- Affix Tab Card 1: Affix Protection (moved from Filters tab in v3.20).
 	-- Layout:
-	--   y=-6   title
-	--   y=-24  No Auto-Sell toggle (only one toggle now -- the No Auto-Delete
-	--          one was dropped because Auto-Delete Junk/Common never fire on
-	--          Rare/Epic gear, which is the only quality range affixes
-	--          appear on; the toggle protected nothing in practice)
-	--   y=-46  Min iLvl row (label + input)
-	--   y=-70  Audit Lists button (scans Delete + Sell lists for affixed
-	--          items and prints a chat report)
+	--   Row 1: title
+	--   Row 2: No Auto-Sell label
+	--   Row 3: short explanation
+	--   Row 4: Tier I-V checkboxes in one row
 	local card2Title = MakeText(aCard1, 11, C_ACCENT, "OUTLINE")
 	card2Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
 	card2Title:SetText("Affix Protection")
 
-	local tglProtectAffixFromSell = MakeToggle(aCard1, "No Auto-Sell", C_ACCENT,
-		"Stops Auto-Sell from selling items with a Project Ebonhold affix. Low-iLvl affix items below the number on the next row can still be sold.")
-	tglProtectAffixFromSell:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
-	tglProtectAffixFromSell:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglProtectAffixFromSell = tglProtectAffixFromSell
+	local affixNoSellLabel = MakeText(aCard1, 10, C_TEXT, "OUTLINE")
+	affixNoSellLabel:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
+	affixNoSellLabel:SetText("No Auto-Sell")
 
-	-- Min iLvl row: label LEFT, small input RIGHT, same row.
-	local affixFloorRow = CreateFrame("Frame", nil, aCard1)
-	affixFloorRow:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	affixFloorRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
-
-	local affixFloorLabel = affixFloorRow:CreateFontString(nil, "OVERLAY")
-	affixFloorLabel:SetFont(FONT, 10, "OUTLINE")
-	affixFloorLabel:SetTextColor(unpack(C_DIM))
-	affixFloorLabel:SetPoint("LEFT", affixFloorRow, "LEFT", 0, 0)
-	affixFloorLabel:SetText("Min iLvl:")
-
-	-- Tooltip hook on the row so hovering either the label or empty area
-	-- explains what the value does. Same text mirrored on the input box
-	-- below so hovering the editbox surface also shows the tip.
-	local AFFIX_FLOOR_TOOLTIP_TITLE = "Min iLvl"
-	local AFFIX_FLOOR_TOOLTIP_BODY  = "Affix items at this iLvl or higher are protected. Lower iLvl affix items can still be sold or deleted normally. Set to 0 to protect every affix item."
-	affixFloorRow:EnableMouse(true)
-	affixFloorRow:SetScript("OnEnter", function(self)
-		GameTooltip:SetOwner(self, "ANCHOR_TOP")
-		GameTooltip:SetText(AFFIX_FLOOR_TOOLTIP_TITLE, 1, 1, 1)
-		GameTooltip:AddLine(AFFIX_FLOOR_TOOLTIP_BODY, C_DIM[1], C_DIM[2], C_DIM[3], true)
-		GameTooltip:Show()
-	end)
-	affixFloorRow:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-	local affixFloorBox = CreateFrame("Frame", nil, affixFloorRow)
-	affixFloorBox:SetSize(44, 20)
-	affixFloorBox:SetPoint("RIGHT", affixFloorRow, "RIGHT", 0, 0)
-	ApplyBackdrop(affixFloorBox, C_DROP_BG, C_DROP_BORDER)
-	affixFloorBox:EnableMouse(true)
-	affixFloorBox:SetScript("OnEnter", function(self)
-		GameTooltip:SetOwner(self, "ANCHOR_TOP")
-		GameTooltip:SetText(AFFIX_FLOOR_TOOLTIP_TITLE, 1, 1, 1)
-		GameTooltip:AddLine(AFFIX_FLOOR_TOOLTIP_BODY, C_DIM[1], C_DIM[2], C_DIM[3], true)
-		GameTooltip:Show()
-	end)
-	affixFloorBox:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-	local affixFloorEdit = CreateFrame("EditBox", nil, affixFloorBox)
-	affixFloorEdit:SetFont(FONT, 10, "OUTLINE")
-	affixFloorEdit:SetTextColor(unpack(C_TEXT))
-	affixFloorEdit:SetAutoFocus(false)
-	affixFloorEdit:SetNumeric(true)
-	affixFloorEdit:SetMaxLetters(4)
-	affixFloorEdit:SetPoint("TOPLEFT", 4, -1)
-	affixFloorEdit:SetPoint("BOTTOMRIGHT", -4, 1)
-	affixFloorEdit:SetJustifyH("CENTER")
-	affixFloorEdit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
-	affixFloorEdit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
-	affixFloorEdit:SetScript("OnEditFocusLost", function(s)
-		local val = tonumber(s:GetText()) or 0
-		if val < 0 then val = 0 end
-		s:SetText(tostring(val))
-		local p = GetActiveProfile(db)
-		p.affixIlvlMin = val
-		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
-	end)
-	self._affixIlvlEdit = affixFloorEdit
-
-	-- Plain-language description spanning the bottom of the card (where the
-	-- Audit Lists button used to live). Tells the player what Affix
-	-- Protection IS so they aren't guessing from the toggle/input alone.
-	--
-	-- Sizing math (UI Visual Audit, conventions §10.5):
-	--   Card height            = 92
-	--   Min iLvl row bottom    = -46 (top) - 20 (row height) = -66
-	--   Card bottom            = -92
-	--   Available vertical     = 92 - 66 = 22 px (y=-70 anchor to y=-92)
-	--   8pt OUTLINE line height ~= 10 px so safe budget = 2 lines.
-	--   At width = 155 px, ~30 chars per line -> text must be ~<= 60 chars
-	--   to stay within 2 lines.
-	-- Prior text overflowed (118 chars, ~5 lines, ~55 px) -- regression
-	-- caught by user 2026-05-23.
 	local affixProtHint = MakeText(aCard1, 8, C_DIM)
-	affixProtHint:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -70)
+	affixProtHint:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -42)
 	affixProtHint:SetWidth(cardW - CARD_INNER_PAD_X * 2)
 	affixProtHint:SetJustifyH("LEFT")
 	affixProtHint:SetWordWrap(true)
 	affixProtHint:SetNonSpaceWrap(false)
-	affixProtHint:SetText("Keeps Project Ebonhold items safe from auto-sell.")
+	affixProtHint:SetText("Checked tiers are protected before Delete or Sell.")
 
-	-- (Audit Lists button moved to Card 3 in v3.20 -- user feedback said
-	-- Card 1 was too crowded with the No Auto-Sell toggle, the Min iLvl
-	-- row, AND the audit button all stacked. Card 3 hosts both diagnostic
-	-- buttons now.)
+	local function MakeAffixTierToggle(label, field, xOff)
+		local row = CreateFrame("Button", nil, aCard1)
+		row:SetSize(30, 20)
+		row:SetPoint("TOPLEFT", CARD_INNER_PAD_X + xOff, -68)
+
+		local box = CreateFrame("Frame", nil, row)
+		box:SetSize(14, 14)
+		box:SetPoint("LEFT", 0, 0)
+		ApplyBackdrop(box, C_ROW_ODD, C_BORDER)
+
+		local mark = box:CreateTexture(nil, "OVERLAY")
+		mark:SetTexture("Interface\\AddOns\\AutoDelete\\textures\\checkmark.tga")
+		mark:SetPoint("CENTER", box, "CENTER", 0, 0)
+		mark:SetSize(14, 14)
+		mark:Hide()
+
+		local text = MakeText(row, 9, C_TEXT, "OUTLINE")
+		text:SetPoint("LEFT", box, "RIGHT", 3, 0)
+		text:SetText(label)
+
+		local function UpdateVisual()
+			if row._checked then
+				ApplyBackdrop(box, C_ACCENT, { 1, 0.60, 0.10, 1 })
+				mark:Show()
+			else
+				ApplyBackdrop(box, { 0.04, 0.04, 0.04, 1 }, { 0.33, 0.33, 0.33, 1 })
+				mark:Hide()
+			end
+		end
+		function row:SetChecked(val)
+			row._checked = val and true or false
+			UpdateVisual()
+		end
+		function row:GetChecked() return row._checked end
+		row:SetScript("OnClick", function(btn)
+			btn:SetChecked(not btn._checked)
+			GetActiveProfile(db)[field] = btn._checked
+			if _G.AutoDelete_RefreshCachedProfile then
+				_G.AutoDelete_RefreshCachedProfile()
+			end
+		end)
+		row:SetScript("OnEnter", function(btn)
+			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+			GameTooltip:SetText("Tier " .. label, 1, 1, 1)
+			GameTooltip:AddLine("Protects this affix tier before Delete or Sell rules. Only Missing narrows it to unlearned affixes.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+		return row
+	end
+
+	self._tglAffixTiers = {
+		MakeAffixTierToggle("I",   "protectAffixTier1", 0),
+		MakeAffixTierToggle("II",  "protectAffixTier2", 31),
+		MakeAffixTierToggle("III", "protectAffixTier3", 62),
+		MakeAffixTierToggle("IV",  "protectAffixTier4", 93),
+		MakeAffixTierToggle("V",   "protectAffixTier5", 124),
+	}
 
 	-- Affix Tab Card 2: Affix Display (moved from Filters tab in v3.20
 	-- alongside Affix Protection so all affix tooling lives together).
-	-- Two tightly-coupled toggles + a diagnostic button:
+	-- Three tightly-coupled toggles + a diagnostic button:
 	--   Row 1: Show affix dot              (master gate for any dot display)
 	--   Row 2: Only missing affixes        (collection mode, gated by Row 1)
-	--   Row 3: Scan Learned Affixes        (refresh PE mirror + print roster)
+	--   Row 3: Keep One Affix            (delete extras for same missing affix)
 	--
 	-- The Scan button shares the bottom-of-card slot with the Audit Lists
 	-- button on Card 1 (y=-68) so the two diagnostic actions line up
@@ -4619,6 +4774,12 @@ local function BuildUI(self)
 		tglAffixCollection:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 		self._tglAffixCollection = tglAffixCollection
 
+		local tglSingleAffix = MakeToggle(aCard2, "Keep One Affix", C_ACCENT,
+			"For each missing armor affix, keep one matching item and clear extras. Keep list wins. Sell-list extras sell at vendors; other extras delete.")
+		tglSingleAffix:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -68)
+		tglSingleAffix:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+		self._tglSingleAffix = tglSingleAffix
+
 		-- (Scan Learned Affixes button moved to Card 3 in v3.20 -- see the
 		-- Affix Tools card construction below.)
 	end
@@ -4627,7 +4788,7 @@ local function BuildUI(self)
 	-- Affix Tab Card 3: Affix Tools (v3.20).
 	-- Hosts the two diagnostic buttons that used to live one-per-card on
 	-- Cards 1 and 2 (Audit Lists, Scan Learned Affixes). Stacking them on
-	-- their own card lets Cards 1 and 2 breathe (the toggles + Min iLvl
+	-- their own card lets Cards 1 and 2 breathe (the toggles + tier row
 	-- row were sharing a card with a button, which felt cramped).
 	-- C_BLUE for both (transform/report class -- they surface info, don't
 	-- add or remove anything).
@@ -5240,7 +5401,7 @@ local function BuildUI(self)
 		--     Four rows must fit inside the fixed tab content frame. Keep the
 		--     row math tight enough that the last row clears the bottom border.
 		--
-		-- Semantic colors per Addon_UI_StyleGuide.md:
+		-- Semantic colors per style.md:
 		--   Copy / Import Lists  -> C_GREEN (additive, copies data in)
 		--   Delete / Clear List  -> C_RED   (destructive)
 		-- Both sides are independently top-aligned. Each side is read
@@ -5301,7 +5462,7 @@ local function BuildUI(self)
 		deleteBtn:SetPoint("TOPLEFT", PROF_COL4_X, PROF_ROW1_Y)
 
 		-- RIGHT half / row 2: Import Lists (green) and Clear List (red).
-		-- Import merges the four item lists from the selected
+		-- Import merges the five item lists from the selected
 		-- profile into the current character's profile. Never touches other
 		-- settings. Duplicates are skipped; cross-list conflicts open a popup.
 		local importBtn = MakeActionButton(profilesPage, "Import Lists", C_GREEN, function()
@@ -5336,7 +5497,7 @@ local function BuildUI(self)
 		end, PROF_COL_W, PROF_BTN_H)
 		importBtn:SetPoint("TOPLEFT", PROF_COL3_X, PROF_ROW2_Y)
 
-		-- Clear List opens a picker that wipes one list or all four on the
+		-- Clear List opens a picker that wipes one list or all five on the
 		-- current character. The destructive action is
 		-- then confirmed via a StaticPopup inside the picker.
 		local clearBtn = MakeActionButton(profilesPage, "Clear List", C_RED, function()
@@ -5363,7 +5524,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Import Raw", 1, 1, 1)
-			GameTooltip:AddLine("Paste a list of item names and add them to your chosen list. AutoDelete looks each name up and adds it for you.",
+			GameTooltip:AddLine("Paste item:id lines, item links, numeric IDs, or item names and add them to your chosen list.",
 				C_DIM[1], C_DIM[2], C_DIM[3], true)
 			GameTooltip:Show()
 		end)
@@ -5385,7 +5546,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Export Raw", 1, 1, 1)
-			GameTooltip:AddLine("Copy one item list as plain item names so you can share or paste it somewhere else.",
+			GameTooltip:AddLine("Copy one item list as names, or check Raw in the popup for item:id lines that import cleanly on another account.",
 				C_DIM[1], C_DIM[2], C_DIM[3], true)
 			GameTooltip:Show()
 		end)
@@ -5552,7 +5713,7 @@ local function BuildUI(self)
 		-- Separate popup for clearing ALL lists at once (different wording).
 		if not StaticPopupDialogs["AUTODELETE_PROFILE_CLEAR_ALL"] then
 			StaticPopupDialogs["AUTODELETE_PROFILE_CLEAR_ALL"] = {
-				text = "Clear ALL four lists (Delete, Sell, Keep, and KeepOne)? This cannot be undone.",
+				text = "Clear ALL five lists (Delete, Sell, Keep, KeepOne, and KeepStack)? This cannot be undone.",
 				button1 = "Clear All", button2 = "Cancel",
 				OnAccept = function(popup)
 					if not _G.AutoDelete_Profiles then return end
@@ -5600,8 +5761,8 @@ local function BuildUI(self)
 			}
 		end
 
-		-- Remove-patterns popup: scans Delete + Sell + Keep. KeepOne is
-		-- deliberately excluded because it is not a filter-cleanup list.
+		-- Remove-patterns popup: scans Delete + Sell + Keep. KeepOne and
+		-- KeepStack are deliberately excluded because they are not filter-cleanup lists.
 		-- for items whose itemSubType matches the chosen profession token
 		-- (passed via popup.data). One popup serves all eight profession
 		-- options on the sub-window; popup.data carries the localized
@@ -5609,7 +5770,7 @@ local function BuildUI(self)
 		-- display label for the prompt text.
 		if not StaticPopupDialogs["AUTODELETE_PROFILE_REMOVE_PATTERNS"] then
 			StaticPopupDialogs["AUTODELETE_PROFILE_REMOVE_PATTERNS"] = {
-				text = "Remove all %s items from your Delete, Sell, and Keep lists? KeepOne is not changed. This cannot be undone.",
+				text = "Remove all %s items from your Delete, Sell, and Keep lists? KeepOne and KeepStack are not changed. This cannot be undone.",
 				button1 = "Remove", button2 = "Cancel",
 				OnAccept = function(popup)
 					local payload = popup.data
@@ -5879,25 +6040,57 @@ local function BuildUI(self)
 	local sellTab, sellTabText = MakeTab(scanRightCard, "Sell (0)")
 	local keepTab, keepTabText = MakeTab(scanRightCard, "Keep (0)")
 	self._keepOneTab, self._keepOneTabText = MakeTab(scanRightCard, "KeepOne (0)")
+	self._keepStackTab, self._keepStackTabText = MakeTab(scanRightCard, "KeepStack (0)")
 
-	-- Four equal-width tabs. Outer tabs anchor to card edges; middle tabs
+	local function AddListTabTooltip(tab, title, body, warning)
+		tab:SetScript("OnEnter", function(self)
+			GameTooltip:SetOwner(self, "ANCHOR_TOP")
+			GameTooltip:SetText(title, 1, 1, 1)
+			GameTooltip:AddLine(body, C_TEXT[1], C_TEXT[2], C_TEXT[3], true)
+			if warning and warning ~= "" then
+				GameTooltip:AddLine(" ")
+				GameTooltip:AddLine(warning, C_RED[1], C_RED[2], C_RED[3], true)
+			end
+			GameTooltip:Show()
+		end)
+		tab:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	end
+
+	AddListTabTooltip(deleteTab, "Delete List",
+		"Items on this list are destroyed during bag scans. Use it only for items you are sure you do not want.",
+		"Delete means gone. Put important items on Keep instead.")
+	AddListTabTooltip(sellTab, "Sell List",
+		"Items on this list are sold when you open a vendor. They stay in your bags until a merchant window is open.")
+	AddListTabTooltip(keepTab, "Keep List",
+		"This is your safety list. Items on Keep are protected from Delete, Sell, KeepOne, KeepStack, and auto rules.")
+	AddListTabTooltip(self._keepOneTab, "KeepOne List",
+		"This is a cleanup list, not a safety list. AutoDelete keeps one unit of the item and deletes extra units during bag scans.",
+		"Use Keep if you want the item fully protected.")
+	AddListTabTooltip(self._keepStackTab, "KeepStack List",
+		"This is a cleanup list, not a safety list. AutoDelete keeps one bag stack of the item, usually the biggest stack, and deletes extra stacks during bag scans.",
+		"Use Keep if you want all stacks protected.")
+
+	-- Five equal-width tabs. Outer tabs anchor to card edges; middle tabs
 	-- anchor from left to right. LayoutTabs computes the equal width
 	-- once scanRightCard has a resolved width.
 	deleteTab:SetPoint("LEFT", scanRightCard, "LEFT", TAB_INNER_PAD, 0)
-	self._keepOneTab:SetPoint("RIGHT", scanRightCard, "RIGHT", -TAB_INNER_PAD, 0)
+	self._keepStackTab:SetPoint("RIGHT", scanRightCard, "RIGHT", -TAB_INNER_PAD, 0)
 	local function LayoutTabs()
 		local cardW = scanRightCard:GetWidth()
 		if not cardW or cardW < 10 then return end
-		local totalInner = cardW - (TAB_INNER_PAD * 2) - (TAB_GAP * 3)
-		local tabW = math.floor(totalInner / 4)
+		local totalInner = cardW - (TAB_INNER_PAD * 2) - (TAB_GAP * 4)
+		local tabW = math.floor(totalInner / 5)
 		deleteTab:SetWidth(tabW)
 		sellTab:SetWidth(tabW)
 		keepTab:SetWidth(tabW)
 		self._keepOneTab:SetWidth(tabW)
+		self._keepStackTab:SetWidth(tabW)
 		sellTab:ClearAllPoints()
 		keepTab:ClearAllPoints()
+		self._keepOneTab:ClearAllPoints()
 		sellTab:SetPoint("LEFT", deleteTab, "RIGHT", TAB_GAP, 0)
 		keepTab:SetPoint("LEFT", sellTab, "RIGHT", TAB_GAP, 0)
+		self._keepOneTab:SetPoint("LEFT", keepTab, "RIGHT", TAB_GAP, 0)
 	end
 	scanRightCard:SetScript("OnSizeChanged", LayoutTabs)
 	-- Initial layout (deferred until the card has a resolved width)
@@ -5939,6 +6132,7 @@ local function BuildUI(self)
 		if self._listMode == "sell" then return "sellListText"
 		elseif self._listMode == "whitelist" then return "whitelistText"
 		elseif self._listMode == "keepone" then return "keepOneText"
+		elseif self._listMode == "keepstack" then return "keepStackText"
 		else return "listText" end
 	end
 
@@ -5964,12 +6158,20 @@ local function BuildUI(self)
 		sellTabText:SetText("Sell (" .. CountListItems(p.sellListText) .. ")")
 		keepTabText:SetText("Keep (" .. CountListItems(p.whitelistText) .. ")")
 		self._keepOneTabText:SetText("KeepOne (" .. CountListItems(p.keepOneText) .. ")")
+		self._keepStackTabText:SetText("KeepStack (" .. CountListItems(p.keepStackText) .. ")")
 		SetTabActive(deleteTab, deleteTabText, self._listMode == "delete")
 		SetTabActive(sellTab, sellTabText, self._listMode == "sell")
 		SetTabActive(keepTab, keepTabText, self._listMode == "whitelist")
 		SetTabActive(self._keepOneTab, self._keepOneTabText, self._listMode == "keepone")
+		SetTabActive(self._keepStackTab, self._keepStackTabText, self._listMode == "keepstack")
 		if emptyText then
-			local hints = { delete = "Drag items here to delete", sell = "Drag items here to sell at vendors", whitelist = "Drag items here to protect", keepone = "Drag items here to keep one unit" }
+			local hints = {
+				delete = "Drag items here to destroy on bag scans",
+				sell = "Drag items here to sell at vendors",
+				whitelist = "Drag items here to protect",
+				keepone = "Drag items here to keep one unit and delete extras",
+				keepstack = "Drag items here to keep one stack and delete extra stacks",
+			}
 			emptyText:SetText(hints[self._listMode] or "")
 		end
 	end
@@ -6277,7 +6479,8 @@ local function BuildUI(self)
 		if mode ~= "delete"    then table.insert(actions, { label = "Move to Delete", target = "listText" }) end
 		if mode ~= "sell"      then table.insert(actions, { label = "Move to Sell",   target = "sellListText" }) end
 		if mode ~= "whitelist" then table.insert(actions, { label = "Move to Keep",   target = "whitelistText" }) end
-		if mode ~= "keepone"   then table.insert(actions, { label = "Move to KeepOne", target = "keepOneText" }) end
+				if mode ~= "keepone"   then table.insert(actions, { label = "Move to KeepOne", target = "keepOneText" }) end
+				if mode ~= "keepstack" then table.insert(actions, { label = "Move to KeepStack", target = "keepStackText" }) end
 		table.insert(actions, { label = "Remove", target = nil })
 
 		-- Tear down old item buttons
@@ -6848,20 +7051,6 @@ local function BuildUI(self)
 			"_prospectBindingCmd"))
 	end
 
-	-- Filters tab: Affix Protection toggles. Same RefreshCachedProfile call
-	-- so the sell loop sees the new setting on the next tick without
-	-- waiting for a profile reload. Only the No Auto-Sell toggle remains;
-	-- the No Auto-Delete one was dropped (auto-delete never fires on
-	-- Rare/Epic gear where affixes appear).
-	tglProtectAffixFromSell:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).protectAffixFromSell = btn._checked
-		if _G.AutoDelete_RefreshCachedProfile then
-			_G.AutoDelete_RefreshCachedProfile()
-		end
-	end)
-
 	-- Filters tab -> Affix Display: Show affix dot toggle. Forces an
 	-- immediate dot refresh so the visual state matches the toggle
 	-- without waiting for a natural bag event. Accessed through `self`
@@ -6901,20 +7090,29 @@ local function BuildUI(self)
 		if _G.AutoDelete_RefreshAffixDots then
 			_G.AutoDelete_RefreshAffixDots()
 		end
-		-- Chat confirmation matching the slash-command output so the user
-		-- gets the same "37 owned affixes mirrored from PE" signal whether
-		-- they toggle via UI or slash.
+		-- Chat confirmation matching the slash-command output. Use the raw
+		-- learned count from PE, not the alias-expanded lookup-key count.
 		if btn._checked then
-			local count = 0
-			for _ in pairs(_G.AutoDelete_OwnedAffixes or {}) do
-				count = count + 1
-			end
+			local count = _G.AutoDelete_OwnedAffixCount or 0
 			print("|cffff8000[AutoDelete]|r affix collection mode |cff00ff00ON|r. "
 				.. count .. " owned affixes mirrored from PE. Dots will now "
 				.. "show ONLY for missing affixes (in gold).")
 		else
 			print("|cffff8000[AutoDelete]|r affix collection mode |cffff5555OFF|r. "
 				.. "Dots show on all affixed items, colored by tier.")
+		end
+	end)
+
+	self._tglSingleAffix:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		local p = GetActiveProfile(db)
+		p.keepSingleMissingAffix = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+		if _G.AutoDelete_RefreshOwnedAffixes then
+			_G.AutoDelete_RefreshOwnedAffixes()
 		end
 	end)
 
@@ -6934,6 +7132,7 @@ local function BuildUI(self)
 		if key == "sellListText" then return "Sell" end
 		if key == "whitelistText" then return "Keep" end
 		if key == "keepOneText" then return "KeepOne" end
+		if key == "keepStackText" then return "KeepStack" end
 		return key
 	end
 
@@ -6942,13 +7141,15 @@ local function BuildUI(self)
 	local function FindListConflict(profile, targetKey, line)
 		local otherKeys
 		if targetKey == "listText" then
-			otherKeys = { "sellListText", "whitelistText", "keepOneText" }
+			otherKeys = { "sellListText", "whitelistText", "keepOneText", "keepStackText" }
 		elseif targetKey == "sellListText" then
-			otherKeys = { "listText", "whitelistText", "keepOneText" }
+			otherKeys = { "listText", "whitelistText", "keepOneText", "keepStackText" }
 		elseif targetKey == "whitelistText" then
-			otherKeys = { "listText", "sellListText", "keepOneText" }
+			otherKeys = { "listText", "sellListText", "keepOneText", "keepStackText" }
 		elseif targetKey == "keepOneText" then
-			otherKeys = { "listText", "sellListText", "whitelistText" }
+			otherKeys = { "listText", "sellListText", "whitelistText", "keepStackText" }
+		elseif targetKey == "keepStackText" then
+			otherKeys = { "listText", "sellListText", "whitelistText", "keepOneText" }
 		else
 			return false, nil
 		end
@@ -6989,7 +7190,7 @@ local function BuildUI(self)
 
 		p[key] = AddLineIfMissing(p[key] or "", line)
 		GetItemInfo("item:" .. id)
-		local labels = { delete = "delete", sell = "sell", whitelist = "keep", keepone = "KeepOne" }
+		local labels = { delete = "delete", sell = "sell", whitelist = "keep", keepone = "KeepOne", keepstack = "KeepStack" }
 		print("|cffff8000[AutoDelete]|r Added " .. displayName .. " to " .. (labels[self._listMode] or "delete") .. " list")
 		self:Refresh()
 	end
@@ -7065,11 +7266,12 @@ local function BuildUI(self)
 	sellTab:SetScript("OnClick", function() SwitchTab("sell") end)
 	keepTab:SetScript("OnClick", function() SwitchTab("whitelist") end)
 	self._keepOneTab:SetScript("OnClick", function() SwitchTab("keepone") end)
+	self._keepStackTab:SetScript("OnClick", function() SwitchTab("keepstack") end)
 
 	-- Public method for external callers (ElvUI bag buttons) to jump to
 	-- a specific list tab when opening the panel.
 	function self:SwitchListMode(mode)
-		if mode == "delete" or mode == "sell" or mode == "whitelist" or mode == "keepone" then
+		if mode == "delete" or mode == "sell" or mode == "whitelist" or mode == "keepone" or mode == "keepstack" then
 			SwitchTab(mode)
 		end
 	end
@@ -7162,7 +7364,7 @@ local function BuildUI(self)
 				local p = GetActiveProfile(db)
 				local key = GetActiveListKey()
 				p[key] = RemoveExactLine(p[key] or "", row.entry.raw)
-				local labels = { delete = "delete", sell = "sell", whitelist = "keep", keepone = "KeepOne" }
+				local labels = { delete = "delete", sell = "sell", whitelist = "keep", keepone = "KeepOne", keepstack = "KeepStack" }
 				print("|cffff8000[AutoDelete]|r Removed " .. GetDisplayForEntry(row.entry) .. " from " .. (labels[self._listMode] or "delete") .. " list")
 				self:Refresh()
 			end
@@ -7241,10 +7443,16 @@ local function BuildUI(self)
 		end
 		if self._refreshProspectStatus then self:_refreshProspectStatus() end
 
-		-- Affix tab: Affix Protection (Card 1). Only the No Auto-Sell
-		-- toggle remains; No Auto-Delete was dropped.
-		tglProtectAffixFromSell:SetChecked(p.protectAffixFromSell)
-		affixFloorEdit:SetText(tostring(p.affixIlvlMin or 0))
+		-- Affix tab: Affix Protection (Card 1). Tier checkboxes replace
+		-- the old No Auto-Sell + Min iLvl controls.
+		if self._tglAffixTiers then
+			self._tglAffixTiers[1]:SetChecked(p.protectAffixTier1 == true)
+			self._tglAffixTiers[2]:SetChecked(p.protectAffixTier2 == true)
+			self._tglAffixTiers[3]:SetChecked(p.protectAffixTier3 == true)
+			self._tglAffixTiers[4]:SetChecked(p.protectAffixTier4 == true)
+			self._tglAffixTiers[5]:SetChecked(p.protectAffixTier5 == true)
+		end
+		if self._tglSingleAffix then self._tglSingleAffix:SetChecked(p.keepSingleMissingAffix == true) end
 
 		-- Filters tab: DE Filters (Card 2, v3.20 -- ported from the old
 		-- Disenchant Filters popup that opened from a gear button on the
@@ -7516,8 +7724,9 @@ local function BuildPopupSkeleton(globalName, title, W, H)
 	f:EnableMouse(true)
 	f:SetMovable(true)
 	f:SetClampedToScreen(true)
-	ApplyBackdrop(f, C_BG, C_BORDER)
+	ApplyPopupChrome(f)
 	f:Hide()
+	if f.HookScript then f:HookScript("OnShow", BringPopupToFront) end
 	tinsert(UISpecialFrames, globalName)
 
 	-- Title bar (same style as main window). Explicit frame level so it
@@ -7528,7 +7737,10 @@ local function BuildPopupSkeleton(globalName, title, W, H)
 	titleBar:SetFrameLevel(f:GetFrameLevel() + 2)
 	ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
 	titleBar:EnableMouse(true)
-	titleBar:SetScript("OnMouseDown", function() f:StartMoving() end)
+	titleBar:SetScript("OnMouseDown", function()
+		BringPopupToFront(f)
+		f:StartMoving()
+	end)
 	titleBar:SetScript("OnMouseUp", function() f:StopMovingOrSizing() end)
 
 	local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
@@ -7577,7 +7789,7 @@ local importSourceName  -- current import source character
 local function BuildImportConflictsWindow()
 	if importFrame then return end
 
-	local W, H = 540, 500
+	local W, H = 640, 500
 	local f, body = BuildPopupSkeleton("AutoDeleteImportConflictsFrame",
 		"Import Conflicts", W, H)
 	importFrame = f
@@ -7644,7 +7856,7 @@ end
 -- Layout per row (52 tall):
 --   Line 1: item display name (11pt text, LEFT)
 --   Line 2: "Source: Delete  .  Current: Sell" (9pt dim, LEFT)
---   Right side: four list buttons
+	--   Right side: five list buttons
 local function BuildImportRow(index)
 	local ROW_H = 52
 	local parent = importContent
@@ -7659,14 +7871,14 @@ local function BuildImportRow(index)
 	-- Item name
 	local nameText = MakeText(row, 11, C_TEXT, "OUTLINE", "LEFT")
 	nameText:SetPoint("TOPLEFT", 10, -8)
-	nameText:SetPoint("TOPRIGHT", -270, -8)
+	nameText:SetPoint("TOPRIGHT", -350, -8)
 	nameText:SetHeight(14)
 	row._nameText = nameText
 
 	-- Sub-line (source vs current)
 	local subText = MakeText(row, 9, C_DIM, "OUTLINE", "LEFT")
 	subText:SetPoint("TOPLEFT", 10, -26)
-	subText:SetPoint("TOPRIGHT", -270, -26)
+	subText:SetPoint("TOPRIGHT", -350, -26)
 	subText:SetHeight(12)
 	row._subText = subText
 
@@ -7676,12 +7888,13 @@ local function BuildImportRow(index)
 		{ label = "Sell",   color = C_ACCENT },   -- orange
 		{ label = "Keep",   color = C_GREEN },
 		{ label = "KeepOne", color = C_RED },
+		{ label = "KeepStack", color = C_RED },
 	}
 
 	row._segBtns = {}
-	local BTN_W, BTN_H = 62, 22
+	local BTN_W, BTN_H = 64, 22
 	local GAP = 4
-	-- Anchor all four from the right side; rightmost is "KeepOne".
+	-- Anchor all five from the right side; rightmost is "KeepStack".
 	for i, cfg in ipairs(segConfigs) do
 		local b = CreateFrame("Button", nil, row)
 		b:SetSize(BTN_W, BTN_H)
@@ -7781,12 +7994,12 @@ local function BuildClearListWindow()
 	--   Card:          y=-32 to y=-(body_H - 50)
 	--   Footer:        50px (Cancel at BOTTOMRIGHT -15, 15 = 24 tall + 15 bottom pad + 11 top pad)
 	--
-	-- Card needs to fit 8 buttons (26 tall) with 4px gaps, plus 8px top pad
-	-- and some bottom pad. Required card height = 8 + 8*26 + 7*4 + bottom_pad.
-	-- With bottom_pad=10 that's 254. Working backwards:
-	--   card_H = body_H - 32 - 50  ->  body_H = card_H + 82 = 336
-	--   frame_H = body_H + 24      ->  360
-	local W, H = 340, 360
+	-- Card needs to fit 9 buttons (26 tall) with 4px gaps, plus 8px top pad
+	-- and some bottom pad. Required card height = 8 + 9*26 + 8*4 + bottom_pad.
+	-- With bottom_pad=10 that's 284. Working backwards:
+	--   card_H = body_H - 32 - 50  ->  body_H = card_H + 82 = 366
+	--   frame_H = body_H + 24      ->  390
+	local W, H = 340, 390
 	local f, body = BuildPopupSkeleton("AutoDeleteClearListPickerFrame",
 		"Clear List", W, H)
 	clearFrame = f
@@ -7798,7 +8011,7 @@ local function BuildClearListWindow()
 	sub:SetHeight(16)
 	sub:SetText("Select which list to clear on the current character:")
 
-	-- Six option buttons, vertically stacked inside a card
+	-- Option buttons, vertically stacked inside a card
 	local card = CreateFrame("Frame", nil, body)
 	card:SetPoint("TOPLEFT", 15, -32)
 	card:SetPoint("BOTTOMRIGHT", -15, 50)
@@ -7806,15 +8019,16 @@ local function BuildClearListWindow()
 
 	local BTN_W, BTN_H = 290, 26
 	local BTN_GAP = 4
-	-- 3-color semantic palette per Addon_UI_StyleGuide.md:
-	--   Six options destructive (clear / remove user data) -> C_RED
+	-- 3-color semantic palette per style.md:
+	--   Destructive options (clear / remove user data) -> C_RED
 	--   "Remove recipes & patterns..." opens a sub-picker  -> C_BLUE
 	local options = {
 		{ value = "Delete",   label = "Delete list",                     color = C_RED  },
 		{ value = "Sell",     label = "Sell list",                       color = C_RED  },
 		{ value = "Keep",     label = "Keep list",                       color = C_RED  },
 		{ value = "KeepOne",  label = "KeepOne list",                    color = C_RED  },
-		{ value = "All",      label = "All four lists",                  color = C_RED  },
+		{ value = "KeepStack", label = "KeepStack list",                 color = C_RED  },
+		{ value = "All",      label = "All five lists",                  color = C_RED  },
 		-- Remove Junk: scans Delete + Sell only, removes gray-quality items.
 		{ value = "Junk",     label = "Remove junk items",               color = C_RED  },
 		-- Remove Sellable: scans Delete only, removes items with vendor value.
@@ -7875,7 +8089,7 @@ end
 -- / Schematic / Formula / Design / Technique / Manual). Clicking a row fires
 -- the shared AUTODELETE_PROFILE_REMOVE_PATTERNS confirm popup with the chosen
 -- subtype in popup.data; the OnAccept handler walks Delete + Sell + Keep and
--- intentionally leaves KeepOne alone.
+-- intentionally leaves KeepOne and KeepStack alone.
 -- removes matching entries.
 
 local removePatternsFrame

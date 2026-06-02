@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Keep One Affix.** New Affix tab toggle keeps one armor/accessory item for each missing affix and clears extras. Keep list wins, and Sell-list extras are left for the vendor path.
+- **KeepStack list.** New per-character list for consumables and other stackable items. Add an item to KeepStack to keep one stack and clear extra stacks.
+
+### Improved
+
+- **Affix Protection tiers.** Replaced the iLvl floor with Tier I-V protection checkboxes. Checked tiers are protected before Delete or Sell rules, and Only Missing Affixes narrows protection to unlearned affixes.
+- **Decision History search.** The Decision History window now has a search box for item names, item IDs, affix names, actions, reasons, rules, and bag slots.
+- **Popup separation.** Custom popup windows now use a stronger shared edge and raise themselves when opened or dragged so overlapping windows are easier to tell apart.
+- **Popup footer buttons.** Moved the Learned Affixes Refresh action out of the title bar and into the footer button area, matching the Import Raw popup pattern.
+- **List tab help.** Delete, Sell, Keep, KeepOne, and KeepStack tabs now explain what each list does, with clear warnings that KeepOne and KeepStack delete extras instead of protecting the item.
+
+### Fixed
+
+- **Missing affix hard stop.** When Only Missing Affixes or Keep One Affix is on, an unlearned affix item is protected before Delete or Sell rules, even when no tier checkbox is enabled.
+- **Raw export imports across accounts.** Export Raw now has a Raw checkbox: unchecked copies plain names, checked copies stable `item:<id>` lines with name comments so Import Raw does not depend on the target account's item-name cache.
+
 ## [3.22] - 2026-06-02
 
 ### Improved
