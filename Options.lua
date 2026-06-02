@@ -1132,12 +1132,13 @@ _G.AutoDeleteOptionsPanel = frame
 do
 
 local PROCESS_PANEL_W = 360
-local PROCESS_PANEL_H = 440
+local PROCESS_PANEL_H = 480
 local PROCESS_ROW_H   = 22
+local PROCESS_FILTER_H = 50
 local PROCESS_HEADER_H = 22
 local PROCESS_FOOTER_H = 28
 -- Scroll area height = total - title - header - footer - vertical pads.
-local PROCESS_SCROLL_H = PROCESS_PANEL_H - 24 - PROCESS_HEADER_H - PROCESS_FOOTER_H - 8
+local PROCESS_SCROLL_H = PROCESS_PANEL_H - 24 - PROCESS_FILTER_H - PROCESS_HEADER_H - PROCESS_FOOTER_H - 10
 local PROCESS_VISIBLE_ROWS = math.floor(PROCESS_SCROLL_H / PROCESS_ROW_H)
 
 -- The panel itself. Strata MEDIUM so it floats above bag frames but
@@ -1201,10 +1202,81 @@ closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.3, 0.3) end)
 closeX:SetScript("OnLeave", function() closeXText:SetTextColor(unpack(C_DIM)) end)
 closeX:SetScript("OnClick", function() panel:Hide() end)
 
+local currentFilter = "all"
+local filterButtons = {}
+local filterDefs = {
+	{ key = "all", label = "All" },
+	{ key = "sell", label = "Sell" },
+	{ key = "delete", label = "Delete" },
+	{ key = "disenchant", label = "DE" },
+	{ key = "mill", label = "Mill" },
+	{ key = "prospect", label = "Prospect" },
+	{ key = "open", label = "Open" },
+	{ key = "kept", label = "Kept" },
+}
+
+local filterRow = CreateFrame("Frame", nil, panel)
+filterRow:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, -2)
+filterRow:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT", 0, -2)
+filterRow:SetHeight(PROCESS_FILTER_H)
+filterRow:SetBackdrop({ bgFile = WHITE8x8 })
+filterRow:SetBackdropColor(0.055, 0.055, 0.055, 1)
+
+local function RefreshFilterButtons()
+	for _, def in ipairs(filterDefs) do
+		local btn = filterButtons[def.key]
+		if btn then
+			if currentFilter == def.key then
+				ApplyBackdrop(btn, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.9 }, C_ACCENT)
+				btn._text:SetTextColor(0.05, 0.05, 0.05, 1)
+			else
+				ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+				btn._text:SetTextColor(unpack(C_TEXT))
+			end
+		end
+	end
+end
+
+local FILTER_PAD = 6
+local FILTER_GAP = 4
+local FILTER_BTN_H = 20
+local FILTER_BTN_W = math.floor((PROCESS_PANEL_W - FILTER_PAD * 2 - FILTER_GAP * 3) / 4)
+for i, def in ipairs(filterDefs) do
+	local btn = CreateFrame("Button", nil, filterRow)
+	btn:SetSize(FILTER_BTN_W, FILTER_BTN_H)
+	local col = (i - 1) % 4
+	local row = math.floor((i - 1) / 4)
+	btn:SetPoint("TOPLEFT", filterRow, "TOPLEFT",
+		FILTER_PAD + col * (FILTER_BTN_W + FILTER_GAP),
+		-4 - row * (FILTER_BTN_H + 4))
+	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+	local txt = MakeText(btn, 10, C_TEXT, "OUTLINE")
+	txt:SetPoint("CENTER")
+	txt:SetWidth(FILTER_BTN_W - 8)
+	txt:SetJustifyH("CENTER")
+	txt:SetWordWrap(false)
+	txt:SetText(def.label)
+	btn._text = txt
+	btn:SetScript("OnClick", function()
+		currentFilter = def.key
+		RefreshFilterButtons()
+		if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+	end)
+	btn:SetScript("OnEnter", function(self)
+		if currentFilter ~= def.key then
+			ApplyBackdrop(self, C_ROW_HOVER, C_BORDER)
+			self._text:SetTextColor(1, 1, 1, 1)
+		end
+	end)
+	btn:SetScript("OnLeave", RefreshFilterButtons)
+	filterButtons[def.key] = btn
+end
+RefreshFilterButtons()
+
 -- Column header row directly under the title bar.
 local headerRow = CreateFrame("Frame", nil, panel)
-headerRow:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, -2)
-headerRow:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT", 0, -2)
+headerRow:SetPoint("TOPLEFT", filterRow, "BOTTOMLEFT", 0, -2)
+headerRow:SetPoint("TOPRIGHT", filterRow, "BOTTOMRIGHT", 0, -2)
 headerRow:SetHeight(PROCESS_HEADER_H)
 -- v3.21 §6.3: kept as raw SetBackdrop intentionally. ApplyBackdrop always sets
 -- a 1px edge file; this Process Bags header band is fill-only (no border) and
@@ -1239,7 +1311,9 @@ scrollFrame:SetAllPoints(scrollContainer)
 scrollFrame:SetScript("OnVerticalScroll", function(self, offset)
 	FauxScrollFrame_OnVerticalScroll(self, offset, PROCESS_ROW_H,
 		function()
-			if _G.AutoDelete_RefreshProcessPanel then
+			if _G.AutoDelete_RenderProcessPanelRows then
+				_G.AutoDelete_RenderProcessPanelRows()
+			elseif _G.AutoDelete_RefreshProcessPanel then
 				_G.AutoDelete_RefreshProcessPanel()
 			end
 		end)
@@ -1272,6 +1346,8 @@ local clearBtn = MakeActionButton(footer, "Clear Ignored", C_RED, function()
 	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
 end, 110, 22)
 clearBtn:SetPoint("RIGHT", footer, "RIGHT", -8, 0)
+footerCount:SetPoint("RIGHT", clearBtn, "LEFT", -8, 0)
+footerCount:SetJustifyH("LEFT")
 -- Tooltip on hover (the MakeActionButton hover styling stays; we just
 -- layer the tooltip on top so the user sees the explanation).
 clearBtn:SetScript("OnEnter", function(btn)
@@ -1323,7 +1399,7 @@ _G.AutoDelete_ToggleProcessPanel = ToggleProcessPanel
 -- ------------------------------------------------------------------
 -- Row pool + RefreshProcessPanel
 -- ------------------------------------------------------------------
--- Skillet-Classic-style row pool: rows are created on demand and never
+-- Row pool: rows are created on demand and never
 -- destroyed. Anchor chain is "row N below row N-1"; row 1 anchors to
 -- the scroll container's TOPLEFT. The pool persists between Refresh
 -- calls -- only the visible window's row.data fields are rewritten.
@@ -1334,6 +1410,7 @@ _G.AutoDelete_ToggleProcessPanel = ToggleProcessPanel
 local rowPool = {}          -- [i] = row frame
 local armed = {}            -- ["disenchant"] = {bag, slot, itemId} or nil
 local lastResults = {}      -- cached ProcessScan result, used by row OnClick
+local lastAllTotal = 0      -- total rows before filter, for footer text
 
 -- Lazy row factory. The first call creates the row; subsequent calls
 -- return the cached frame.
@@ -1351,7 +1428,7 @@ local function GetOrCreateRow(i)
 
 	-- Backdrop is the armed-row highlight. Hidden by default; toggled
 	-- via row.armedTexture:SetShown() on Refresh. Yellow tint is the
-	-- Skillet/Postal convention for "this is the selected/staged target".
+	-- Yellow tint marks the selected/staged target.
 	local armedTexture = row:CreateTexture(nil, "BACKGROUND")
 	armedTexture:SetAllPoints(row)
 	armedTexture:SetTexture(WHITE8x8)
@@ -1385,7 +1462,7 @@ local function GetOrCreateRow(i)
 	nameText:SetWordWrap(false)
 	row.nameText = nameText
 
-	-- Action tag (DE / Mill / Prospect / Open). Right-aligned, color
+	-- Action tag (Delete / Sell / DE / Mill / Prospect / Open / Kept). Right-aligned, color
 	-- pulled from PROCESS_ACTIONS in AutoDelete.lua.
 	local actionTag = row:CreateFontString(nil, "OVERLAY")
 	actionTag:SetFont(FONT, 10, "OUTLINE")
@@ -1409,9 +1486,14 @@ local function GetOrCreateRow(i)
 						C_DIM[1], C_DIM[2], C_DIM[3], true)
 				end
 			end
-			GameTooltip:AddLine("|cff00ff00Left-click|r to arm this item for the action's keybind.",
-				C_DIM[1], C_DIM[2], C_DIM[3], true)
-			GameTooltip:AddLine("|cffff8000Right-click|r for Keep, Sell, Delete, Ignore for Process, or Why.",
+			if self._entry.processAction then
+				GameTooltip:AddLine("|cff00ff00Left-click|r to arm this item for the action's keybind.",
+					C_DIM[1], C_DIM[2], C_DIM[3], true)
+			else
+				GameTooltip:AddLine("|cff00ff00Left-click|r to open a Why report.",
+					C_DIM[1], C_DIM[2], C_DIM[3], true)
+			end
+			GameTooltip:AddLine("|cffff8000Right-click|r for Keep, Sell, Delete, or Why.",
 				C_DIM[1], C_DIM[2], C_DIM[3], true)
 			GameTooltip:Show()
 		end
@@ -1421,15 +1503,23 @@ local function GetOrCreateRow(i)
 		GameTooltip:Hide()
 	end)
 
-	-- Click dispatch. Left arms, right opens the item quick action menu. The button-arg form
-	-- (RegisterForClicks("LeftButtonUp", "RightButtonUp") + OnClick
-	-- receives the button name) is the Postal/Bagnon idiom.
+	-- Click dispatch. Left arms, right opens the item quick action menu. The
+	-- button-arg form receives "LeftButton" / "RightButton" from WoW.
 	row:SetScript("OnClick", function(self, mouseButton)
 		local entry = self._entry
 		if not entry then return end
 		if mouseButton == "RightButton" then
 			if _G.AutoDelete_ShowItemQuickMenu then
 				_G.AutoDelete_ShowItemQuickMenu(entry, self)
+			end
+			return
+		end
+		if not entry.processAction then
+			if _G.AutoDelete_BuildWhyReport and _G.AutoDelete_ShowReportWindow then
+				_G.AutoDelete_ShowReportWindow(
+					_G.AutoDelete_BuildWhyReport(entry.itemId, entry.link, entry.name, entry.bag, entry.slot),
+					"Why?"
+				)
 			end
 			return
 		end
@@ -1465,21 +1555,15 @@ local function IsArmed(entry)
 end
 
 -- The actual list refresh. Called from OnShow, from BAG_UPDATE hook in
--- B.4, after a Clear Ignored / Arm / Ignore action, and from the scroll
--- handler. Cheap when the panel is hidden (early-returns).
-local function RefreshProcessPanel()
-	if not panel:IsShown() then return end
-	local profile = nil
-	if _G.AutoDelete_GetCachedProfile then
-		profile = _G.AutoDelete_GetCachedProfile()
-	end
-	local scan = _G.AutoDelete_ProcessScan
-	local results = (scan and profile) and scan(profile) or {}
-	lastResults = results
-
+-- B.4, and after Clear Ignored / Arm / Ignore actions. Scroll events now
+-- redraw from cached results instead of forcing a full bag re-scan.
+-- Cheap when the panel is hidden (early-returns).
+local function RenderProcessPanelRows()
+	local results = lastResults or {}
 	local actionsTable = _G.AutoDelete_PROCESS_ACTIONS or {}
 	local visible = PROCESS_VISIBLE_ROWS
 	local total = #results
+	local allTotal = lastAllTotal or total
 
 	FauxScrollFrame_Update(scrollFrame, total, visible, PROCESS_ROW_H)
 	local offset = FauxScrollFrame_GetOffset(scrollFrame)
@@ -1488,7 +1572,6 @@ local function RefreshProcessPanel()
 		local row = GetOrCreateRow(i)
 		local entry = results[i + offset]
 		if entry then
-			-- Item icon. GetItemInfo's 10th return is the texture path.
 			local _, _, _, _, _, _, _, _, _, texture = GetItemInfo(entry.link)
 			row.icon:SetTexture(texture or "Interface\\Icons\\INV_Misc_QuestionMark")
 			if (entry.count or 1) > 1 then
@@ -1517,33 +1600,50 @@ local function RefreshProcessPanel()
 		end
 	end
 
-	-- Footer count: items shown + ignored. Reads ignored count via the
-	-- exposed table from AutoDelete.lua's GetProcessIgnoredTable.
 	local ignoredCount = 0
 	if _G.AutoDeleteStatsDB and _G.AutoDeleteStatsDB.processIgnored then
 		for _ in pairs(_G.AutoDeleteStatsDB.processIgnored) do
 			ignoredCount = ignoredCount + 1
 		end
 	end
+
+	local copies = 0
+	for _, entry in ipairs(results) do copies = copies + (entry.count or 1) end
 	if ignoredCount > 0 then
-		local copies = 0
-		for _, entry in ipairs(results) do copies = copies + (entry.count or 1) end
 		if copies > total then
-			footerCount:SetText(total .. " rows (" .. copies .. " copies), " .. ignoredCount .. " ignored")
+			footerCount:SetText(total .. "/" .. allTotal .. " rows (" .. copies .. " copies), " .. ignoredCount .. " ignored")
 		else
-			footerCount:SetText(total .. " items, " .. ignoredCount .. " ignored")
+			footerCount:SetText(total .. "/" .. allTotal .. " rows, " .. ignoredCount .. " ignored")
 		end
 	else
-		local copies = 0
-		for _, entry in ipairs(results) do copies = copies + (entry.count or 1) end
 		if copies > total then
-			footerCount:SetText(total .. " rows (" .. copies .. " copies)")
+			footerCount:SetText(total .. "/" .. allTotal .. " rows (" .. copies .. " copies)")
 		else
-			footerCount:SetText(total .. " items")
+			footerCount:SetText(total .. "/" .. allTotal .. " rows")
 		end
 	end
 end
 
+local function RefreshProcessPanel()
+	if not panel:IsShown() then return end
+	local profile = nil
+	if _G.AutoDelete_GetCachedProfile then
+		profile = _G.AutoDelete_GetCachedProfile()
+	end
+	local scan = _G.AutoDelete_ProcessScan
+	local allResults = (scan and profile) and scan(profile) or {}
+	local results = {}
+	for _, entry in ipairs(allResults) do
+		if currentFilter == "all" or entry.action == currentFilter then
+			table.insert(results, entry)
+		end
+	end
+	lastResults = results
+	lastAllTotal = #allResults
+	RenderProcessPanelRows()
+end
+
+_G.AutoDelete_RenderProcessPanelRows = RenderProcessPanelRows
 _G.AutoDelete_RefreshProcessPanel = RefreshProcessPanel
 
 end  -- end of Process Bags Panel `do` block
@@ -1785,23 +1885,22 @@ end  -- end of Disenchant Filters Popup `do` block
 -- ============================================================================
 -- Learned Affixes Popup
 -- ============================================================================
--- Scrollable read-only window that displays the player's learned affixes,
+-- Scrollable read-only window that displays the player's learned and unlearned affixes,
 -- populated by the Scan Learned Affixes button on the Affix Display card.
 -- Same draggable-frame pattern as the Disenchant Filters popup and the
 -- Process Bags panel: dark body, dark gray border, dark title bar with
 -- orange text, dim close X that turns red on hover.
 --
--- Body is a ScrollFrame holding a single FontString -- one widget, no row
--- pooling needed at the expected scale (~50-100 affixes max). The caller
--- in AutoDelete.lua formats the multi-line string (tier headers in orange
--- via embedded |cff...| escape codes, affix entries in default text) and
--- hands it off via _G.AutoDelete_ShowLearnedAffixesWindow(text).
+-- Body is a ScrollFrame with pooled rows so affix names can be clicked.
+-- Clicking an affix opens a selected copy field because WoW addons cannot
+-- silently write to the OS clipboard.
 
 do
 
 local POPUP_W = 320
-local POPUP_H = 360
+local POPUP_H = 390
 local TITLE_H = 24
+local TAB_H = 30
 local BODY_PAD_X = 10
 local BODY_PAD_TOP = 4
 local BODY_PAD_BOT = 8
@@ -1836,6 +1935,33 @@ local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
 titleText:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
 titleText:SetText("Learned Affixes")
 
+local refreshBtn = CreateFrame("Button", nil, titleBar)
+refreshBtn:SetSize(62, 18)
+refreshBtn:SetPoint("RIGHT", titleBar, "RIGHT", -28, 0)
+ApplyBackdrop(refreshBtn, C_ROW_ODD, C_BORDER)
+local refreshText = MakeText(refreshBtn, 10, C_TEXT, "OUTLINE")
+refreshText:SetPoint("CENTER")
+refreshText:SetText("Refresh")
+refreshBtn:SetScript("OnClick", function()
+	if _G.AutoDelete_ScanLearnedAffixes then
+		_G.AutoDelete_ScanLearnedAffixes()
+	end
+end)
+refreshBtn:SetScript("OnEnter", function(btn)
+	ApplyBackdrop(btn, C_ROW_HOVER, C_BORDER)
+	refreshText:SetTextColor(1, 1, 1, 1)
+	GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+	GameTooltip:SetText("Refresh", 1, 1, 1)
+	GameTooltip:AddLine("Scans Project Ebonhold's current affix data again.",
+		C_DIM[1], C_DIM[2], C_DIM[3], true)
+	GameTooltip:Show()
+end)
+refreshBtn:SetScript("OnLeave", function(btn)
+	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+	refreshText:SetTextColor(unpack(C_TEXT))
+	GameTooltip:Hide()
+end)
+
 local closeX = CreateFrame("Button", nil, titleBar)
 closeX:SetSize(24, 24)
 closeX:SetPoint("TOPRIGHT", titleBar, "TOPRIGHT", 0, 0)
@@ -1846,12 +1972,85 @@ closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.3, 0.3) end)
 closeX:SetScript("OnLeave", function() closeXText:SetTextColor(unpack(C_DIM)) end)
 closeX:SetScript("OnClick", function() popup:Hide() end)
 
+local currentTab = "learned"
+local tabData = {
+	learned = "",
+	unlearned = "",
+}
+local tabRows = {}
+local tabCounts = {}
+local tabButtons = {}
+local RefreshLearnedAffixesTabs
+
+local function FormatAffixTabLabel(label, count)
+	if count ~= nil then
+		return string.format("%s (%d)", label, count)
+	end
+	return label
+end
+
+local tabRow = CreateFrame("Frame", nil, popup)
+tabRow:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, -2)
+tabRow:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT", 0, -2)
+tabRow:SetHeight(TAB_H)
+
+local function RefreshAffixTabButtons()
+	for key, btn in pairs(tabButtons) do
+		if key == currentTab then
+			ApplyBackdrop(btn, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.9 }, C_ACCENT)
+			btn._text:SetFont(FONT, 12, "")
+			btn._text:SetTextColor(0.05, 0.05, 0.05, 1)
+		else
+			ApplyBackdrop(btn, { 0.07, 0.07, 0.07, 1 }, { 0.20, 0.20, 0.20, 1 })
+			btn._text:SetFont(FONT, 11, "OUTLINE")
+			btn._text:SetTextColor(1, 1, 1, 1)
+		end
+	end
+end
+
+local TAB_PAD_X = 8
+local TAB_GAP = 6
+local TAB_BTN_W = math.floor((POPUP_W - TAB_PAD_X * 2 - TAB_GAP) / 2)
+local TAB_BTN_H = 22
+
+local function CreateAffixTabButton(key, label, x)
+	local btn = CreateFrame("Button", nil, tabRow)
+	btn:SetSize(TAB_BTN_W, TAB_BTN_H)
+	btn:SetPoint("TOPLEFT", tabRow, "TOPLEFT", x, -4)
+	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+	local txt = MakeText(btn, 11, C_TEXT, "OUTLINE")
+	txt:SetPoint("CENTER")
+	txt:SetWidth(TAB_BTN_W - 8)
+	txt:SetJustifyH("CENTER")
+	txt:SetWordWrap(false)
+	txt:SetNonSpaceWrap(false)
+	txt:SetText(label)
+	btn._text = txt
+	btn._baseLabel = label
+	btn:SetScript("OnClick", function()
+		currentTab = key
+		if RefreshLearnedAffixesTabs then RefreshLearnedAffixesTabs(true) end
+	end)
+	btn:SetScript("OnEnter", function(self)
+		if currentTab ~= key then
+			ApplyBackdrop(self, C_ROW_HOVER, C_BORDER)
+			self._text:SetTextColor(1, 1, 1, 1)
+		end
+	end)
+	btn:SetScript("OnLeave", RefreshAffixTabButtons)
+	tabButtons[key] = btn
+end
+
+CreateAffixTabButton("learned", "Learned", TAB_PAD_X)
+CreateAffixTabButton("unlearned", "Unlearned", TAB_PAD_X + TAB_BTN_W + TAB_GAP)
+RefreshAffixTabButtons()
+
 -- Scroll frame fills the body below the title bar. Use Blizzard's stock
 -- UIPanelScrollFrameTemplate so we get a usable scrollbar with up/down
 -- arrows that match the rest of the WoW UI on 3.3.5a.
 local scroll = CreateFrame("ScrollFrame", "AutoDeleteLearnedAffixesScroll", popup,
 	"UIPanelScrollFrameTemplate")
-scroll:SetPoint("TOPLEFT", popup, "TOPLEFT", BODY_PAD_X, -(TITLE_H + BODY_PAD_TOP))
+scroll:SetPoint("TOPLEFT", popup, "TOPLEFT", BODY_PAD_X, -(TITLE_H + TAB_H + BODY_PAD_TOP))
 scroll:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -SCROLLBAR_W, BODY_PAD_BOT)
 
 -- Scroll child: a Frame holding the body FontString. UIPanelScrollFrameTemplate
@@ -1876,25 +2075,218 @@ bodyFS:SetWidth(CONTENT_FS_W)
 bodyFS:SetWordWrap(true)
 bodyFS:SetNonSpaceWrap(false)
 
--- Show the popup with the given body text. Resizes the scroll child so the
--- scrollbar reflects the actual content height. Text may include WoW color
--- escapes (|cffRRGGBB...|r) which FontString renders natively.
-local function ShowLearnedAffixesWindow(bodyText)
-	bodyFS:SetText(bodyText or "")
+local copyFrame = CreateFrame("Frame", nil, popup)
+copyFrame:SetPoint("BOTTOMLEFT", popup, "BOTTOMLEFT", BODY_PAD_X, 8)
+copyFrame:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -BODY_PAD_X, 8)
+copyFrame:SetHeight(28)
+copyFrame:SetFrameLevel(popup:GetFrameLevel() + 4)
+copyFrame:Hide()
+ApplyBackdrop(copyFrame, C_DROP_BG, C_DROP_BORDER)
+
+local copyHint = MakeText(copyFrame, 9, C_DIM, "OUTLINE")
+copyHint:SetPoint("LEFT", copyFrame, "LEFT", 6, 0)
+copyHint:SetText("Ctrl+C")
+
+local copyEdit = CreateFrame("EditBox", nil, copyFrame)
+copyEdit:SetFont(FONT, 11, "OUTLINE")
+copyEdit:SetTextColor(unpack(C_TEXT))
+copyEdit:SetAutoFocus(false)
+copyEdit:EnableKeyboard(true)
+copyEdit:SetPoint("LEFT", copyHint, "RIGHT", 8, 0)
+copyEdit:SetPoint("RIGHT", copyFrame, "RIGHT", -6, 0)
+copyEdit:SetHeight(20)
+copyEdit._copyText = ""
+copyEdit._settingText = false
+copyEdit:SetScript("OnEscapePressed", function(s)
+	s:ClearFocus()
+	copyFrame:Hide()
+end)
+copyEdit:SetScript("OnEnterPressed", function(s)
+	s:ClearFocus()
+	copyFrame:Hide()
+end)
+copyEdit:SetScript("OnTextChanged", function(s)
+	if s._settingText then return end
+	if s:GetText() ~= (s._copyText or "") then
+		s._settingText = true
+		s:SetText(s._copyText or "")
+		s._settingText = false
+		s:HighlightText()
+	end
+end)
+
+local copyDefocusFrame = CreateFrame("Frame")
+copyDefocusFrame:Hide()
+copyDefocusFrame:SetScript("OnUpdate", function(self)
+	self:Hide()
+	copyEdit:ClearFocus()
+	copyFrame:Hide()
+end)
+copyEdit:SetScript("OnKeyDown", function(s, key)
+	if (key == "C" or key == "c") and IsControlKeyDown and IsControlKeyDown() then
+		copyDefocusFrame:Show()
+	else
+		s:HighlightText()
+	end
+end)
+
+local function ShowAffixCopyBox(text)
+	copyEdit._copyText = text or ""
+	copyEdit._settingText = true
+	copyEdit:SetText(copyEdit._copyText)
+	copyEdit._settingText = false
+	copyFrame:Show()
+	copyEdit:SetFocus()
+	copyEdit:HighlightText()
+end
+
+local ROW_H = 17
+local BLANK_ROW_H = 8
+local rowPool = {}
+
+local function HideAffixRows()
+	for _, row in ipairs(rowPool) do
+		row:Hide()
+	end
+end
+
+local function GetAffixRow(index)
+	local row = rowPool[index]
+	if row then return row end
+	row = CreateFrame("Button", nil, content)
+	row:SetHeight(ROW_H)
+	row:SetWidth(CONTENT_FS_W)
+	row:EnableMouse(true)
+
+	local hover = row:CreateTexture(nil, "BACKGROUND")
+	hover:SetAllPoints(row)
+	hover:SetTexture(WHITE8x8)
+	hover:SetVertexColor(C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.16)
+	hover:Hide()
+	row._hover = hover
+
+	local text = MakeText(row, 11, C_TEXT, "OUTLINE")
+	text:SetPoint("LEFT", row, "LEFT", 0, 0)
+	text:SetWidth(CONTENT_FS_W)
+	text:SetJustifyH("LEFT")
+	text:SetWordWrap(false)
+	text:SetNonSpaceWrap(false)
+	row._text = text
+
+	row:SetScript("OnClick", function(self)
+		if self._copyText then
+			ShowAffixCopyBox(self._copyText)
+		end
+	end)
+	row:SetScript("OnEnter", function(self)
+		if self._copyText then
+			self._hover:Show()
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			GameTooltip:SetText("Copy Affix Name", 1, 1, 1)
+			GameTooltip:AddLine("Click to select this affix name for Ctrl+C.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end
+	end)
+	row:SetScript("OnLeave", function(self)
+		self._hover:Hide()
+		GameTooltip:Hide()
+	end)
+
+	rowPool[index] = row
+	return row
+end
+
+local function ResizeLearnedAffixesContent()
 	-- Measure rendered height and size the scroll child to match so the
 	-- scrollbar's range is correct. Add a small bottom pad so the last line
 	-- isn't flush against the frame edge.
 	local h = bodyFS:GetStringHeight() + 8
 	if h < 1 then h = 1 end
 	content:SetHeight(h)
+end
+
+local function RenderAffixRows(rows)
+	bodyFS:Hide()
+	HideAffixRows()
+	local y = 0
+	for i, data in ipairs(rows or {}) do
+		local row = GetAffixRow(i)
+		local isBlank = data.kind == "blank"
+		local h = isBlank and BLANK_ROW_H or ROW_H
+		row:SetHeight(h)
+		row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
+		row:SetPoint("RIGHT", content, "RIGHT", 0, 0)
+		row._copyText = data.copyText
+		row._hover:Hide()
+		row._text:SetText(data.text or "")
+		if isBlank then row._text:Hide() else row._text:Show() end
+		if data.kind == "header" then
+			row._text:SetFont(FONT, 11, "OUTLINE")
+			row._text:SetTextColor(unpack(C_TITLE))
+		elseif data.kind == "affix" then
+			row._text:SetFont(FONT, 11, "OUTLINE")
+			row._text:SetTextColor(unpack(C_TEXT))
+		else
+			row._text:SetFont(FONT, 11, "OUTLINE")
+			row._text:SetTextColor(unpack(C_DIM))
+		end
+		row:EnableMouse(data.copyText ~= nil)
+		row:Show()
+		y = y + h
+	end
+	content:SetHeight(math.max(1, y + 8))
+end
+
+RefreshLearnedAffixesTabs = function(resetScroll)
+	for key, btn in pairs(tabButtons) do
+		btn._text:SetText(FormatAffixTabLabel(btn._baseLabel, tabCounts[key]))
+	end
+	RefreshAffixTabButtons()
+	copyFrame:Hide()
+	if tabRows[currentTab] then
+		RenderAffixRows(tabRows[currentTab])
+	else
+		HideAffixRows()
+		bodyFS:Show()
+		bodyFS:SetText(tabData[currentTab] or "")
+		ResizeLearnedAffixesContent()
+	end
+	if resetScroll then
+		scroll:SetVerticalScroll(0)
+	end
+end
+
+-- Show the popup with the given body text. Resizes the scroll child so the
+-- scrollbar reflects the actual content height. Text may include WoW color
+-- escapes (|cffRRGGBB...|r) which FontString renders natively.
+local function ShowLearnedAffixesWindow(bodyTextOrData)
+	if type(bodyTextOrData) == "table" then
+		tabData.learned = bodyTextOrData.learned or ""
+		tabData.unlearned = bodyTextOrData.unlearned or ""
+		tabRows.learned = bodyTextOrData.learnedRows
+		tabRows.unlearned = bodyTextOrData.unlearnedRows
+		tabCounts.learned = bodyTextOrData.learnedCount
+		tabCounts.unlearned = bodyTextOrData.unlearnedCount
+		if bodyTextOrData.defaultTab == "learned" or bodyTextOrData.defaultTab == "unlearned" then
+			currentTab = bodyTextOrData.defaultTab
+		end
+	else
+		tabData.learned = bodyTextOrData or ""
+		tabData.unlearned = "|cffff8000No unlearned-affix list available.|r"
+		tabRows.learned = nil
+		tabRows.unlearned = nil
+		tabCounts.learned = nil
+		tabCounts.unlearned = nil
+		currentTab = "learned"
+	end
+	RefreshLearnedAffixesTabs(true)
 	-- Anchor centered on first show; user can drag it after.
 	if not popup._everShown then
 		popup:ClearAllPoints()
 		popup:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
 		popup._everShown = true
 	end
-	-- Reset scroll to top so a freshly-shown window starts at the summary.
-	scroll:SetVerticalScroll(0)
 	popup:Show()
 end
 
@@ -2182,44 +2574,6 @@ end  -- end of Ignored Items Popup `do` block
 -- Parser + import-execute helpers (file-local; called by the popups below).
 -- ---------------------------------------------------------------------------
 
--- Build a set of itemIds already on a list (newline-separated `item:<id>`
--- format). Cheap; used for dedupe during import.
-local function ParseListItemIds(listText)
-	local ids = {}
-	for line in string.gmatch(listText or "", "[^\r\n]+") do
-		local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
-		local id = tonumber(trimmed:match("item:(%d+)"))
-		if id then ids[id] = true end
-	end
-	return ids
-end
-
--- Try to resolve one pasted line into (itemId, displayName) by accepting
--- three forms: full item link, "item:<id>", or plain item name. Returns
--- nil, nil if nothing matched (uncached items will land here on 3.3.5a).
-local function ResolveRawLine(line)
-	if not line or line == "" then return nil, nil end
-	-- Form A: full link or item:<id> reference.
-	local id = tonumber(line:match("Hitem:(%d+)") or line:match("item:(%d+)"))
-	if id then
-		local name = GetItemInfo(id)
-		if name then return id, name end
-		-- We have an id we can format, but the player's cache has not
-		-- seen it. Still usable for the import (we have the id) but the
-		-- summary popup won't have a pretty name; show the id.
-		return id, "item:" .. id
-	end
-	-- Form B: plain name (optionally wrapped in [brackets] from copy-paste).
-	local cleanName = line:gsub("^%[(.+)%]$", "%1"):gsub("^%s+", ""):gsub("%s+$", "")
-	if cleanName == "" then return nil, nil end
-	local resolved, link = GetItemInfo(cleanName)
-	if resolved and link then
-		local linkId = tonumber(link:match("item:(%d+)"))
-		if linkId then return linkId, resolved end
-	end
-	return nil, nil
-end
-
 -- The list-key -> profile-field map used by both Import and Export.
 local RAW_LIST_FIELDS = {
 	delete = "listText",
@@ -2231,6 +2585,143 @@ local RAW_LIST_LABELS = {
 	sell   = "Sell",
 	keep   = "Keep",
 }
+
+-- Build a set of itemIds already on a list (newline-separated `item:<id>`
+-- format). Cheap; used for dedupe and conflict checks during import.
+local function ParseListItemIds(listText)
+	local ids = {}
+	for line in string.gmatch(listText or "", "[^\r\n]+") do
+		local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+		local id = tonumber(trimmed:match("item:(%d+)"))
+		if id then ids[id] = true end
+	end
+	return ids
+end
+
+local function CleanRawImportLine(line)
+	local cleaned = tostring(line or "")
+	cleaned = cleaned:gsub("%s*#.*$", "")
+	cleaned = cleaned:gsub("^%s+", ""):gsub("%s+$", "")
+	cleaned = cleaned:gsub("^%s*[%-%*]+%s*", "")
+	cleaned = cleaned:gsub("^%s*%d+[%.)]%s*", "")
+	cleaned = cleaned:gsub("^%[(.+)%]$", "%1")
+	cleaned = cleaned:gsub("^\"(.+)\"$", "%1")
+	return cleaned:gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function AddKnownItemName(lookup, name, id, source)
+	if not lookup or not name or not id then return end
+	local key = Normalize(name)
+	if key == "" then return end
+	local bucket = lookup[key]
+	if not bucket then
+		bucket = { order = {}, ids = {} }
+		lookup[key] = bucket
+	end
+	if not bucket.ids[id] then
+		bucket.ids[id] = { name = name, source = source }
+		table.insert(bucket.order, id)
+	end
+end
+
+local function AddKnownItemId(lookup, id, source)
+	if not id then return end
+	local name = GetItemInfo(id)
+	if name then
+		AddKnownItemName(lookup, name, id, source)
+	else
+		GetItemInfo("item:" .. id)
+	end
+end
+
+local function BuildRawImportNameLookup(profile)
+	local lookup = {}
+	if profile then
+		for _, field in pairs(RAW_LIST_FIELDS) do
+			for id in pairs(ParseListItemIds(profile[field])) do
+				AddKnownItemId(lookup, id, "list")
+			end
+		end
+	end
+	for bag = 0, 4 do
+		local slots = GetContainerNumSlots and GetContainerNumSlots(bag) or 0
+		for slot = 1, slots do
+			local link = GetContainerItemLink and GetContainerItemLink(bag, slot) or nil
+			local id = link and GetItemIDFromLink(link)
+			if id then
+				local name = GetItemInfo(link)
+				if name then
+					AddKnownItemName(lookup, name, id, "bags")
+				else
+					AddKnownItemId(lookup, id, "bags")
+				end
+			end
+		end
+	end
+	return lookup
+end
+
+local function FormatCandidateIds(candidate)
+	if not candidate or not candidate.order then return "" end
+	local out = {}
+	for _, id in ipairs(candidate.order) do
+		table.insert(out, "item:" .. id)
+	end
+	return table.concat(out, ", ")
+end
+
+-- Try to resolve one pasted line into exactly one item id by accepting full item
+-- links, item:<id>, plain numeric ids, and cached/current-bag plain names.
+-- Returns:
+--   "ok", id, displayName
+--   "ambiguous", nil, displayName, "item:1, item:2"
+--   "unresolved", nil, displayName
+local function ResolveRawLine(line, nameLookup)
+	if not line or line == "" then return nil, nil end
+	local cleanName = CleanRawImportLine(line)
+	if cleanName == "" then return nil, nil end
+	-- Form A: full link or item:<id> reference.
+	local id = tonumber(cleanName:match("Hitem:(%d+)") or cleanName:match("item:(%d+)") or cleanName:match("^(%d+)$"))
+	if id then
+		local name = GetItemInfo(id)
+		if name then return "ok", id, name end
+		-- We have an id we can format, but the player's cache has not
+		-- seen it. Still usable for the import (we have the id) but the
+		-- summary popup won't have a pretty name; show the id.
+		GetItemInfo("item:" .. id)
+		return "ok", id, "item:" .. id
+	end
+	-- Form B: plain name. First ask the client cache, then use names we can
+	-- prove from current bags and existing list entries. There is no 3.3.5 API
+	-- for a full item-database name search, so unresolved names stay unresolved.
+	local resolved, link = GetItemInfo(cleanName)
+	if resolved and link then
+		local linkId = tonumber(link:match("item:(%d+)"))
+		if linkId then return "ok", linkId, resolved end
+	end
+	local candidate = nameLookup and nameLookup[Normalize(cleanName)] or nil
+	if candidate and #candidate.order == 1 then
+		local foundId = candidate.order[1]
+		local info = candidate.ids[foundId] or {}
+		return "ok", foundId, info.name or cleanName
+	elseif candidate and #candidate.order > 1 then
+		return "ambiguous", nil, cleanName, FormatCandidateIds(candidate)
+	end
+	return "unresolved", nil, cleanName
+end
+
+local function BuildRawImportConflictIds(profile, targetField)
+	local conflicts = {}
+	if not profile then return conflicts end
+	for listKey, field in pairs(RAW_LIST_FIELDS) do
+		if field ~= targetField then
+			for id in pairs(ParseListItemIds(profile[field])) do
+				conflicts[id] = RAW_LIST_LABELS[listKey] or field
+			end
+		end
+	end
+	return conflicts
+end
 
 -- Append a batch of item ids to profile[listKey field]. Caller has already
 -- deduped. Adds a trailing newline if the existing list doesn't already
@@ -2257,17 +2748,27 @@ function _G.AutoDelete_ExecuteRawImport(listKey, rawText)
 	if not RAW_LIST_FIELDS[listKey] then return end
 	local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
 	if not profile then return end
-	local existing = ParseListItemIds(profile[RAW_LIST_FIELDS[listKey]])
-	local imported, duplicates, unresolved = {}, {}, {}
+	local field = RAW_LIST_FIELDS[listKey]
+	local existing = ParseListItemIds(profile[field])
+	local conflictsById = BuildRawImportConflictIds(profile, field)
+	local nameLookup = BuildRawImportNameLookup(profile)
+	local imported, duplicates, unresolved, ambiguous, conflicts = {}, {}, {}, {}, {}
 	local toAppend = {}
 	for line in string.gmatch(rawText or "", "[^\r\n]+") do
-		local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+		local trimmed = CleanRawImportLine(line)
 		if trimmed ~= "" then
-			local id, name = ResolveRawLine(trimmed)
-			if not id then
-				table.insert(unresolved, trimmed)
+			local status, id, name, note = ResolveRawLine(trimmed, nameLookup)
+			if status == "unresolved" then
+				table.insert(unresolved, name or trimmed)
+			elseif status == "ambiguous" then
+				table.insert(ambiguous, { name = name or trimmed, candidates = note or "" })
 			elseif existing[id] then
 				table.insert(duplicates, name or ("item:" .. id))
+			elseif conflictsById[id] then
+				table.insert(conflicts, {
+					name = name or ("item:" .. id),
+					list = conflictsById[id],
+				})
 			else
 				table.insert(imported, name or ("item:" .. id))
 				table.insert(toAppend, id)
@@ -2284,7 +2785,10 @@ function _G.AutoDelete_ExecuteRawImport(listKey, rawText)
 	if panel and panel.Refresh then panel:Refresh() end
 	-- Show the Results popup with counts + unresolved names.
 	if _G.AutoDelete_ShowImportResultsWindow then
-		_G.AutoDelete_ShowImportResultsWindow(listKey, #imported, #duplicates, unresolved)
+		_G.AutoDelete_ShowImportResultsWindow(listKey, #imported, #duplicates, unresolved, {
+			ambiguous = ambiguous,
+			conflicts = conflicts,
+		})
 	end
 end
 
@@ -2479,8 +2983,9 @@ local okBtn = MakeActionButton(popup, "OK", C_BLUE, function() popup:Hide() end,
 	POPUP_W - PAD_X * 2, 24)
 okBtn:SetPoint("BOTTOMLEFT", popup, "BOTTOMLEFT", PAD_X, 8)
 
-function _G.AutoDelete_ShowImportResultsWindow(listKey, importedCount, duplicateCount, unresolved)
+function _G.AutoDelete_ShowImportResultsWindow(listKey, importedCount, duplicateCount, unresolved, details)
 	local listLabel = RAW_LIST_LABELS[listKey] or listKey or "?"
+	details = details or {}
 	local lines = {}
 	table.insert(lines, string.format(
 		"|cffff8000Imported %d item(s) to the %s list.|r", importedCount, listLabel))
@@ -2490,6 +2995,31 @@ function _G.AutoDelete_ShowImportResultsWindow(listKey, importedCount, duplicate
 			"|cff8a8a8aSkipped %d duplicate(s) already on the %s list.|r",
 			duplicateCount, listLabel))
 	end
+	if details.conflicts and #details.conflicts > 0 then
+		table.insert(lines, "")
+		table.insert(lines, string.format(
+			"|cffffaa00Skipped %d item(s) already on another list:|r",
+			#details.conflicts))
+		for _, entry in ipairs(details.conflicts) do
+			table.insert(lines, string.format("  %s  (%s list)",
+				entry.name or "Unknown item", entry.list or "other"))
+		end
+		table.insert(lines, "")
+		table.insert(lines, "|cff8a8a8aRemove the item from the other list first if you want to move it.|r")
+	end
+	if details.ambiguous and #details.ambiguous > 0 then
+		table.insert(lines, "")
+		table.insert(lines, string.format(
+			"|cffffaa00Skipped %d ambiguous name(s):|r", #details.ambiguous))
+		for _, entry in ipairs(details.ambiguous) do
+			table.insert(lines, "  " .. (entry.name or "Unknown item"))
+			if entry.candidates and entry.candidates ~= "" then
+				table.insert(lines, "    candidates: " .. entry.candidates)
+			end
+		end
+		table.insert(lines, "")
+		table.insert(lines, "|cff8a8a8aPaste the exact item:id for ambiguous names so AutoDelete does not guess wrong.|r")
+	end
 	if unresolved and #unresolved > 0 then
 		table.insert(lines, "")
 		table.insert(lines, string.format(
@@ -2498,7 +3028,7 @@ function _G.AutoDelete_ShowImportResultsWindow(listKey, importedCount, duplicate
 			table.insert(lines, "  " .. name)
 		end
 		table.insert(lines, "")
-		table.insert(lines, "|cff8a8a8aTip: mouse over an item in your bags or in any item link once to cache it, then try importing again.|r")
+		table.insert(lines, "|cff8a8a8aTip: AutoDelete can resolve item links, item:id, plain numeric IDs, cached names, current bag items, and known list entries. Mouse over missing items or paste item:id when a name is not cached.|r")
 	end
 	body:SetText(table.concat(lines, "\n"))
 	local h = body:GetStringHeight() + 8
@@ -2803,63 +3333,13 @@ end  -- end of General Report Popup `do` block
 -- ============================================================================
 -- Help Topic popup
 -- ============================================================================
--- Dedicated readable help surface. Unlike report popups, this is formatted:
--- topic title, colored section headers, body copy, and separators.
-
-local HELP_ACTION = { 0.18, 0.62, 0.95, 1 } -- blue: what to click or change
-local HELP_CHECK  = { 0.26, 0.86, 0.36, 1 } -- green: what to verify
-local HELP_SAFE   = { 0.95, 0.30, 0.30, 1 } -- red: risk or caution
-local HELP_INFO   = { 0.75, 0.75, 0.75, 1 } -- neutral: reference facts
-
-local HELP_CODES = {
-	action = "|cff2e9ef2",
-	check = "|cff42db5c",
-	safety = "|cfff24d4d",
-	info = "|cffbfbfbf",
-}
-
-local function HelpColor(kind)
-	if kind == "action" then return HELP_ACTION end
-	if kind == "check" then return HELP_CHECK end
-	if kind == "safety" then return HELP_SAFE end
-	return HELP_INFO
-end
-
-local function HelpTag(kind)
-	if kind == "action" then return HELP_CODES.action .. "Use:|r " end
-	if kind == "check" then return HELP_CODES.check .. "Check:|r " end
-	if kind == "safety" then return HELP_CODES.safety .. "Careful:|r " end
-	return HELP_CODES.info .. "Note:|r "
-end
-
-local function HelpKind(section)
-	if section and section.kind then return section.kind end
-	local heading = string.lower((section and section.heading) or "")
-	local body = string.lower((section and section.body) or "")
-	if heading:find("care", 1, true) or heading:find("safe", 1, true) or heading:find("wrong", 1, true)
-		or heading:find("normal right", 1, true) or body:find("that is a bug", 1, true)
-		or body:find("risky", 1, true) or body:find("with care", 1, true) then
-		return "safety"
-	end
-	if heading:find("check", 1, true) or heading:find("watch", 1, true) or heading:find("verify", 1, true)
-		or heading:find("read", 1, true) or heading:find("review", 1, true)
-		or heading:find("audit", 1, true) or heading:find("requirements", 1, true)
-		or heading:find("dot", 1, true) or heading:find("totals", 1, true)
-		or heading:find("next target", 1, true) then
-		return "check"
-	end
-	if heading:find("use", 1, true) or heading:find("set", 1, true) or heading:find("open", 1, true)
-		or heading:find("protect", 1, true) or heading:find("summon", 1, true)
-		or heading:find("choose", 1, true) or heading:find("enable", 1, true)
-		or heading:find("bind", 1, true) or heading:find("adjust", 1, true)
-		or heading:find("pick", 1, true) or heading:find("copy", 1, true)
-		or heading:find("import", 1, true) or heading:find("drag", 1, true)
-		or heading:find("left%-click") or heading:find("right%-click")
-		or heading:find("tune", 1, true) then
-		return "action"
-	end
-	return "info"
-end
+-- Dedicated readable help surface that mirrors the addon's card style: every
+-- section renders as an icon (left) + bold title + muted description, using the
+-- same role colors as the tabs (accent title, bright option title, dim copy,
+-- warning red for destructive options). Section data carries its own icon path
+-- and an optional `destructive` flag; for safe options that still hide a
+-- destructive action, the clause is marked inline with |cffbf3838...|r. No
+-- per-kind rainbow, no auto-detected tags.
 
 function _G.AutoDelete_ShowHelpTopicWindow(titleText, sections)
 	if not _G.AutoDeleteHelpTopicPopup then
@@ -2875,12 +3355,6 @@ function _G.AutoDelete_ShowHelpTopicWindow(titleText, sections)
 		topicTitle:SetJustifyH("LEFT")
 		topicTitle:SetText("Help")
 		popup._helpTopicTitle = topicTitle
-
-		local legend = MakeText(popup, 9, C_DIM)
-		legend:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 13))
-		legend:SetJustifyH("RIGHT")
-		legend:SetText(HELP_CODES.action .. "Use|r  " .. HELP_CODES.check .. "Check|r  " .. HELP_CODES.safety .. "Careful|r")
-		popup._helpLegend = legend
 
 		local introRule = popup:CreateTexture(nil, "ARTWORK")
 		introRule:SetTexture(WHITE8x8)
@@ -2915,26 +3389,29 @@ function _G.AutoDelete_ShowHelpTopicWindow(titleText, sections)
 
 	local rows = popup._helpRows
 	for _, row in ipairs(rows) do
-		row.swatch:Hide()
-		row.header:Hide()
+		row.icon:Hide()
+		row.title:Hide()
 		row.body:Hide()
 		row.sep:Hide()
 	end
 
 	local content = popup._helpContent
 	local width = content:GetWidth() or 420
+	local ICON = 18                 -- matches the Process Bags item-row icon size
+	local TEXT_X = 2 + ICON + 8     -- icon (left) + gap; title/body start here
 	local y = -2
 
 	for i, section in ipairs(sections or {}) do
 		local row = rows[i]
 		if not row then
 			row = {}
-			row.swatch = content:CreateTexture(nil, "ARTWORK")
-			row.swatch:SetTexture(WHITE8x8)
-			row.swatch:SetSize(4, 14)
-			row.header = MakeText(content, 11, C_TEXT, "OUTLINE")
-			row.header:SetJustifyH("LEFT")
-			row.body = MakeText(content, 10, C_TEXT)
+			row.icon = content:CreateTexture(nil, "ARTWORK")
+			row.icon:SetSize(ICON, ICON)
+			-- Trim the stock icon border so it reads as a clean glyph.
+			row.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+			row.title = MakeText(content, 11, C_TEXT, "OUTLINE")
+			row.title:SetJustifyH("LEFT")
+			row.body = MakeText(content, 10, C_DIM)
 			row.body:SetJustifyH("LEFT")
 			row.body:SetWordWrap(true)
 			row.body:SetNonSpaceWrap(false)
@@ -2945,33 +3422,43 @@ function _G.AutoDelete_ShowHelpTopicWindow(titleText, sections)
 			rows[i] = row
 		end
 
-		local kind = HelpKind(section)
-		local c = HelpColor(kind)
-		row.swatch:ClearAllPoints()
-		row.swatch:SetPoint("TOPLEFT", content, "TOPLEFT", 2, y - 1)
-		row.swatch:SetVertexColor(c[1], c[2], c[3], 1)
-		row.swatch:Show()
+		-- Icon on the left. Bad paths fall back to the stock question mark.
+		row.icon:ClearAllPoints()
+		row.icon:SetPoint("TOPLEFT", content, "TOPLEFT", 2, y - 1)
+		row.icon:SetTexture(section.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+		row.icon:Show()
 
-		row.header:ClearAllPoints()
-		row.header:SetPoint("TOPLEFT", content, "TOPLEFT", 12, y)
-		row.header:SetWidth(width - 14)
-		row.header:SetTextColor(c[1], c[2], c[3], 1)
-		row.header:SetText(section.heading or "")
-		row.header:Show()
+		-- Bold option title: bright by default, warning red for destructive ones.
+		row.title:ClearAllPoints()
+		row.title:SetPoint("TOPLEFT", content, "TOPLEFT", TEXT_X, y)
+		row.title:SetWidth(width - TEXT_X - 2)
+		if section.destructive then
+			row.title:SetTextColor(C_RED[1], C_RED[2], C_RED[3], 1)
+		else
+			row.title:SetTextColor(C_TEXT[1], C_TEXT[2], C_TEXT[3], 1)
+		end
+		row.title:SetText(section.title or "")
+		row.title:Show()
+		local titleH = row.title:GetStringHeight() or 12
 
+		-- Muted description below the title. Inline |cffbf3838...|r marks any
+		-- destructive clause inside an otherwise-safe option.
 		row.body:ClearAllPoints()
-		row.body:SetPoint("TOPLEFT", content, "TOPLEFT", 12, y - 18)
-		row.body:SetWidth(width - 14)
-		row.body:SetText(HelpTag(kind) .. (section.body or ""))
+		row.body:SetPoint("TOPLEFT", content, "TOPLEFT", TEXT_X, y - titleH - 4)
+		row.body:SetWidth(width - TEXT_X - 2)
+		row.body:SetText(section.body or "")
 		row.body:Show()
-
 		local bodyH = row.body:GetStringHeight() or 14
-		y = y - 18 - bodyH - 10
+
+		-- Advance by the taller of (title + gap + body) or the icon, so short
+		-- descriptions never overlap the icon.
+		local rowH = math.max(titleH + 4 + bodyH, ICON)
+		y = y - rowH - 10
 
 		row.sep:ClearAllPoints()
-		row.sep:SetPoint("TOPLEFT", content, "TOPLEFT", 12, y)
+		row.sep:SetPoint("TOPLEFT", content, "TOPLEFT", TEXT_X, y)
 		row.sep:SetPoint("RIGHT", content, "RIGHT", -2, 0)
-		row.sep:SetVertexColor(c[1], c[2], c[3], 0.28)
+		row.sep:SetVertexColor(C_BORDER[1], C_BORDER[2], C_BORDER[3], 0.5)
 		row.sep:Show()
 		y = y - 10
 	end
@@ -3279,7 +3766,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Open Panel", 1, 1, 1)
-			GameTooltip:AddLine("Opens the Process Bags window, a separate panel that lists every item in your bags eligible for One-Key Disenchant, Mill, Prospect, or Open. Click an item there to arm it for the next keybind press.",
+			GameTooltip:AddLine("Opens the Process Bags window. Use the filters to review All, Sell, Delete, DE, Mill, Prospect, Open, or Kept rows before acting.",
 				C_DIM[1], C_DIM[2], C_DIM[3], true)
 			GameTooltip:Show()
 		end)
@@ -3297,18 +3784,21 @@ local function BuildUI(self)
 		local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
 		local c = getter(profile)
 		if not c or c.total == 0 then
-			self._processCount:SetText("No eligible items")
+			self._processCount:SetText("No bag items found")
 			return
 		end
 		local parts = {}
+		if c.delete     > 0 then table.insert(parts, c.delete     .. " Del") end
+		if c.sell       > 0 then table.insert(parts, c.sell       .. " Sell") end
 		if c.disenchant > 0 then table.insert(parts, c.disenchant .. " DE") end
 		if c.mill       > 0 then table.insert(parts, c.mill       .. " Mill") end
-		if c.prospect   > 0 then table.insert(parts, c.prospect   .. " Prospect") end
+		if c.prospect   > 0 then table.insert(parts, c.prospect   .. " Pros") end
 		if c.open       > 0 then table.insert(parts, c.open       .. " Open") end
+		if c.kept       > 0 then table.insert(parts, c.kept       .. " Kept") end
 		if (c.copies or c.total) > c.total then
-			self._processCount:SetText(c.total .. " rows (" .. c.copies .. " copies): " .. table.concat(parts, ", "))
+			self._processCount:SetText(c.total .. " rows, " .. c.copies .. " copies: " .. table.concat(parts, ", "))
 		else
-			self._processCount:SetText(c.total .. " items: " .. table.concat(parts, ", "))
+			self._processCount:SetText(c.total .. " rows: " .. table.concat(parts, ", "))
 		end
 	end
 
@@ -3378,131 +3868,140 @@ local function BuildUI(self)
 				label = "General",
 				title = "General",
 				sections = {
-					{ heading = "Protect Gear First", body = "Click Auto-Add Equipped after you change gear or copy a profile. AutoDelete adds your equipped items to Keep, then skips shirts and tabards. Use this before turning on broad delete or sell rules." },
-					{ heading = "Open Process Bags", body = "Click Process Bags when you want to preview DE, Mill, Prospect, or Open targets. Review the rows first, then use the matching keybind when the next item is the one you expect." },
-					{ heading = "Set Scan Speed", body = "Use fast scans when you want Delete and Sell list matches handled quickly. Use slower scans if you only want quiet background cleanup. Vendor selling still runs when a merchant is open." },
+					{ icon = "Interface\\Icons\\INV_Misc_Gear_01", title = "Enable Addon", body = "The master switch on the General tab. While it is off, nothing is auto-deleted or auto-sold. Auto-Invite and Hide Greedy Spam keep working either way." },
+					{ icon = "Interface\\Icons\\Ability_Defend", title = "Auto-Add Equipped", body = "Adds gear you equip to your Keep list so it is never sold or deleted by mistake. Shirts and tabards are skipped. Click it again after you change gear or copy a profile." },
+					{ icon = "Interface\\Icons\\Ability_Repair", title = "Auto-Repair", body = "Repairs your gear whenever you talk to a vendor. Turn on Use Guild Bank money below it to pay from the guild bank first when you can." },
+					{ icon = "Interface\\Icons\\INV_Misc_Bag_10_Black", title = "Process Bags", body = "Open Panel opens the Process Bags window, a separate list of every bag item ready for One-Key Disenchant, Mill, Prospect, or Open. The card also shows a live count." },
+					{ icon = "Interface\\Icons\\INV_Misc_PocketWatch_01", title = "Scan Speed", body = "How often your bags are checked against the Delete and Sell lists. Fast clears matches almost instantly, slow is quieter in the background. Vendor selling always runs when a merchant opens." },
 				}
 			},
 			{
 				label = "Pets",
 				title = "Pets",
 				sections = {
-					{ heading = "Summon Scavenger", body = "Turn this on if you want AutoDelete to call the Scavenger for cleanup support. If nothing happens, check that the feature is enabled and that combat is not blocking the action." },
-					{ heading = "Use Goblin Merchant", body = "Enable this when you want merchant help as your bags fill up. Set the free-slot warning low enough that you have time to react before bags are full." },
-					{ heading = "Set Bag Warning", body = "Choose the number of free bag slots that should trigger a warning. Raise the number if you want an earlier heads-up, lower it if you only care when bags are nearly full." },
-					{ heading = "Quiet Repeated Messages", body = "Turn on Hide Greedy Spam if the Scavenger messages are distracting. This only quiets repeated chat noise; it does not change cleanup rules." },
+					{ icon = "Interface\\Icons\\Ability_Hunter_BeastCall", title = "Summon Scavenger", body = "Manages your Greedy Scavenger pet and brings it back when it gets stuck or after you mount. The sub-toggles pick when to resummon: After sell, After vendor close, and Only in Combat." },
+					{ icon = "Interface\\Icons\\INV_Misc_Coin_16", title = "Summon Merchant", body = "Summons your Goblin Merchant once your bags stay full for two seconds. Target the merchant and press your Interact key to open the shop." },
+					{ icon = "Interface\\Icons\\INV_Misc_Bell_01", title = "Bag warning", body = "Warns you in chat when free bag slots drop to the number in Free slots. It warns once, then stays quiet until your bags fill up again." },
+					{ icon = "Interface\\Icons\\Ability_Vanish", title = "Hide Greedy Spam", body = "Hides the Greedy Scavenger chat messages and speech bubbles. It only quiets the noise, it does not change any cleanup rules." },
 				}
 			},
 			{
 				label = "Affix",
 				title = "Affix",
 				sections = {
-					{ heading = "Protect Affix Items", body = "Turn on No Auto-Sell when you are collecting Project Ebonhold affixes. AutoDelete will block automatic sell and delete decisions for protected affix gear." },
-					{ heading = "Choose Min iLvl", body = "Set the minimum item level for affix protection. Items below this floor can still be cleaned up, which keeps old low-level affix junk from clogging your bags." },
-					{ heading = "Read The Dot", body = "Turn on Show Dot to mark affix items in your bags. Gold means AutoDelete thinks the affix is missing or unlearned. Use Why? if a dot or decision looks wrong." },
-					{ heading = "Audit Your Lists", body = "Run the audit before a release, after importing lists, or after a big rules change. It checks Delete and Sell lists for affix items so you can fix risky entries." },
+					{ icon = "Interface\\Icons\\Spell_Holy_DivineProtection", title = "Affix Protection", body = "No Auto-Sell stops Auto-Sell from selling items that carry a Project Ebonhold affix. Min iLvl sets the floor: affix items at that item level or higher are protected, lower ones can still be sold." },
+					{ icon = "Interface\\Icons\\Spell_Nature_WispSplode", title = "Affix Display", body = "Show affix dot marks affix items in your bags, colored by tier, with gold meaning an affix you have not learned. Only missing affixes narrows the dot to unlearned affixes and protects them." },
+					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_02", title = "Affix Tools", body = "Audit Lists checks your Delete and Sell lists for affix items and prints what it finds without changing anything. Scan Learned Affixes refreshes and lists every affix you own by tier." },
 				}
 			},
 			{
 				label = "Invites",
 				title = "Invites",
 				sections = {
-					{ heading = "Set The Keyword", body = "Pick the whisper keyword first, then turn Auto Invite on. A player who whispers that exact keyword can be invited automatically." },
-					{ heading = "Use Loot Rule Carefully", body = "Enable the loot rule option only if you want AutoDelete to set group loot after invites. Leave it off when another addon, raid lead, or manual setup controls loot." },
-					{ heading = "Convert When Needed", body = "Use Convert Raid only when the group should become a raid automatically. Leave it off for normal party invites." },
-					{ heading = "Safe Setup", body = "Test the keyword with one trusted player before using it publicly. Turn Auto Invite off whenever whispers should not change your group." },
+					{ icon = "Interface\\Icons\\INV_Misc_GroupLooking", title = "Auto-Invite", body = "When someone whispers one of your Keywords, you invite them to your group. You must be the leader or a raid assistant. Set the Keywords first, then turn the toggle on." },
+					{ icon = "Interface\\Icons\\INV_Misc_Dice_01", title = "Apply loot rule", body = "After an auto-invite, sets the party loot rule to the one you pick in the dropdown. Leave it off when a raid lead or another addon controls loot." },
+					{ icon = "Interface\\Icons\\Ability_Warrior_BattleShout", title = "Convert to raid when full", body = "When the sixth player joins, the party becomes a raid automatically. Leave it off for normal five-person parties." },
 				}
 			},
 			{
 				label = "Filters",
 				title = "Filters",
 				sections = {
-					{ heading = "Set Auto Actions", body = "Choose Off, Delete, or Sell for Junk, Common, and Greens. Start with Off if you are unsure, then move one quality at a time once the preview looks right." },
-					{ heading = "Know Delete vs Sell", body = "Delete happens during bag scans. Sell happens when a merchant is open. Keep list entries win before either action." },
-					{ heading = "Tune DE Filters", body = "Use the DE filters to control One-Key Disenchant targets. These filters do not change normal Delete, Sell, or Keep list behavior." },
-					{ heading = "Use Ignore For Process Only", body = "Ignore hides an item from Process Bags on this character. It is not a Keep rule and it does not protect the item from Delete or Sell list matches." },
+					{ icon = "Interface\\Icons\\INV_Broom_01", title = "Auto Actions", body = "Sets Junk, Common, and Greens each to Del or Sell, or leaves them off. |cffbf3838Del deletes matching items on bag scans|r, Sell vendors them. Keep-list and quest items are always safe." },
+					{ icon = "Interface\\Icons\\INV_Enchant_ShardGlimmering", title = "DE Filters", body = "Controls which items One-Key Disenchant will target, by bind state (BoP, BoE), quality (Unc, Rare, Epic), and the iLvl range. It does not touch your Delete, Sell, or Keep lists." },
+					{ icon = "Interface\\Icons\\Spell_Shadow_DetectInvisibility", title = "Ignored Items", body = "Manage Ignored opens the list of items you marked Ignore on the Keep-list popup. Ignore only hides an item from Process Bags, it is not protection from cleanup." },
 				}
 			},
 			{
 				label = "Keybinds",
 				title = "Keybinds",
 				sections = {
-					{ heading = "Bind One-Key Actions", body = "Set keys for Disenchant, Mill, Prospect, and Open before using Process Bags. Each key acts on the next eligible row for that action." },
-					{ heading = "Check The Next Target", body = "Open Process Bags and read the row status before pressing a key. If the next target is wrong, change filters or use Ignore for Process first." },
-					{ heading = "Watch Requirements", body = "If a row says a feature is off or a profession is missing, fix that first. The keybind will not make an unavailable action work." },
-					{ heading = "Adjust Filters", body = "Change DE target rules on the Filters tab. Reopen or refresh Process Bags after changing rules so the next target is current." },
+					{ icon = "Interface\\Icons\\INV_Box_01", title = "One-Key Open", body = "Binds one key to open the next clam, coin purse, or egg in your bags. Locked boxes are skipped until you can pick the lock." },
+					{ icon = "Interface\\Icons\\INV_Enchant_Disenchant", title = "One-Key Disenchant", body = "Binds one key to disenchant your next eligible item. Needs the Enchanting profession. Pick which items count under DE Filters on the Filters tab." },
+					{ icon = "Interface\\Icons\\INV_Inscription_Tradeskill01", title = "One-Key Mill", body = "Binds one key to mill the next stack of at least five herbs. Needs the Inscription profession." },
+					{ icon = "Interface\\Icons\\INV_Misc_Gem_01", title = "One-Key Prospect", body = "Binds one key to prospect the next stack of at least five ore. Needs the Jewelcrafting profession." },
 				}
 			},
 			{
 				label = "Tracking",
 				title = "Tracking",
 				sections = {
-					{ heading = "Read Your Totals", body = "Use Tracking to check gold earned, items sold, items deleted, repairs, repair cost, and average inventory value. It is a quick sanity check after testing rules." },
-					{ heading = "Reset On Purpose", body = "Click Reset only when you want a clean counter for a new test or session. If you are comparing before and after values, write the old totals down first." },
-					{ heading = "Verify A Rule Change", body = "After changing a Sell or Delete rule, watch Tracking while you test on known items. The totals should move only for the action you expected." },
+					{ icon = "Interface\\Icons\\INV_Misc_Coin_01", title = "Gold Earned", body = "Total gold from auto-selling, shown in two columns: SESSION since your last login and LIFETIME for this character overall." },
+					{ icon = "Interface\\Icons\\INV_Misc_Coin_06", title = "Items Sold", body = "How many items AutoDelete has vendored for you, counted for the session and for this character lifetime." },
+					{ icon = "Interface\\Icons\\INV_Misc_Bone_HumanSkull_01", title = "Items Deleted", body = "How many items AutoDelete has destroyed on bag scans, for the session and lifetime." },
+					{ icon = "Interface\\Icons\\INV_Hammer_20", title = "Repairs", body = "How many times Auto-Repair has fixed your gear at a vendor." },
+					{ icon = "Interface\\Icons\\Trade_BlackSmithing", title = "Repair Spend", body = "Total gold Auto-Repair has spent keeping your gear repaired." },
+					{ icon = "Interface\\Icons\\INV_Misc_Bag_08", title = "Inventory Avg", body = "The average gold value of your bags over time, a rough sense of how much you are carrying." },
+					{ icon = "Interface\\Icons\\Spell_ChargeNegative", title = "Reset Stats", destructive = true, body = "Clears every counter above for this character. This cannot be undone, so note any totals you want to keep before you confirm." },
 				}
 			},
 			{
 				label = "Profiles",
 				title = "Profiles",
 				sections = {
-					{ heading = "Pick The Right Character", body = "Profiles keep settings and lists per character. Confirm the active character/profile before making big list or filter changes." },
-					{ heading = "Copy A Full Setup", body = "Use Copy when a new character should inherit another character's full AutoDelete setup. Review risky rules afterward, especially Sell, Delete, and Affix protection." },
-					{ heading = "Import Only Lists", body = "Use Import Lists when you want another profile's item lists but not its toggles, scan speed, invite settings, or filter choices." },
-					{ heading = "Use Raw Tools For Bulk Edits", body = "Export Raw before a large manual edit. Import Raw only after checking the item IDs and names, because raw imports can change many entries at once." },
+					{ icon = "Interface\\Icons\\INV_Misc_Book_09", title = "Current profile", body = "The dropdown lists every character profile, including the one you are on now, and the Current line shows the active character. Copy, Delete, and Import Lists all act on the profile picked here." },
+					{ icon = "Interface\\Icons\\INV_Misc_Note_05", title = "Copy", body = "Copies the selected profile full AutoDelete setup onto this character. |cffbf3838It overwrites your current settings and lists|r, so review Sell, Delete, and Affix rules afterward." },
+					{ icon = "Interface\\Icons\\Ability_Creature_Cursed_05", title = "Delete", destructive = true, body = "Deletes the profile selected in the dropdown. This cannot be undone. It does not touch the character you are currently playing." },
+					{ icon = "Interface\\Icons\\INV_Misc_Note_06", title = "Import Lists", body = "Merges only the Delete, Sell, and Keep lists from the selected profile into this one. Toggles, scan speed, and filters are left alone. Conflicts open a review window." },
+					{ icon = "Interface\\Icons\\Spell_Holy_Purify", title = "Clear List", destructive = true, body = "Opens a picker to wipe one list, or all three, on the current character. Clearing a list cannot be undone." },
+					{ icon = "Interface\\Icons\\INV_Scroll_03", title = "Import Raw", body = "Paste plain item names and AutoDelete looks each one up and adds it to the Delete, Sell, or Keep list you choose. Check the names first, a large paste changes many entries at once." },
+					{ icon = "Interface\\Icons\\INV_Scroll_08", title = "Export Raw", body = "Copies your Delete, Sell, or Keep list out as plain item names so you can share them or paste them elsewhere. It only reads your lists, it changes nothing." },
 				}
 			},
 			{
 				label = "Sell Filters",
 				title = "Sell Filters",
 				sections = {
-					{ heading = "Enable One Rule At A Time", body = "Turn on BoE Armor, BoP, or BoE Weapons only after you know what that rule should catch. Test with a merchant open and a small set of items first." },
-					{ heading = "Choose Quality And iLvl", body = "Use the Rare and Epic toggles with the iLvl range to narrow the rule. If too much is selling, tighten the iLvl range or turn off a quality." },
-					{ heading = "Know The Safety Order", body = "Keep list entries win before sell filters. Quest items are protected. Affix protection can also block selling when enabled." },
-					{ heading = "Check Weapon Priority", body = "BoE Weapons wins over BoE Armor when an item could match both. Use Why? on the item if the chosen rule surprises you." },
+					{ icon = "Interface\\Icons\\INV_Chest_Chain", title = "BoE Armor", body = "Sells Bind-on-Equip armor and accessories that match the Rare and Epic toggles and the iLvl range on the card. Weapons belong to BoE Weapons. Keep-list and quest items stay safe." },
+					{ icon = "Interface\\Icons\\INV_Helmet_06", title = "BoP", body = "Sells Bind-on-Pickup gear in any slot, including weapons, that matches the Rare and Epic toggles and the iLvl range. Keep-list and quest items stay safe." },
+					{ icon = "Interface\\Icons\\INV_Sword_27", title = "BoE Weapons", body = "Sells Bind-on-Equip weapons, shields, ranged, thrown, and relics in range. It wins over BoE Armor when an item could fit both. Use Why? if a sale surprises you." },
 				}
 			},
 			{
 				label = "Lists",
 				title = "Lists",
 				sections = {
-					{ heading = "Use Delete With Care", body = "Add an item to Delete only when you are sure matching item IDs should be destroyed on bag scan. Test with one safe item before adding many entries." },
-					{ heading = "Use Sell At Merchants", body = "Add vendor trash or known sell targets to Sell. The item sells when a merchant is open, not during normal bag use." },
-					{ heading = "Use Keep As Protection", body = "Add anything important to Keep before broad rules are enabled. Keep is the protection list and should win over automatic cleanup." },
-					{ heading = "Rely On Item IDs", body = "Normal list entries use item IDs, so heroic and non-heroic items with the same name can stay separate. If two items look identical, use Why? to confirm the ID." },
+					{ icon = "Interface\\Icons\\Spell_Shadow_DeathCoil", title = "Delete", destructive = true, body = "The Delete list. Items whose ID matches are destroyed on the next bag scan, so add with care and test one safe item first. Entries match by item ID, so heroic and normal versions stay separate." },
+					{ icon = "Interface\\Icons\\INV_Misc_Coin_02", title = "Sell", body = "The Sell list. Matching items are vendored when a merchant is open, not during normal bag use. Good for known vendor trash and surplus." },
+					{ icon = "Interface\\Icons\\INV_Misc_Key_03", title = "Keep", body = "The Keep list, your protection list. Anything here wins over every automatic rule, so add important items before turning on broad delete or sell actions." },
+					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_03", title = "Search & Manage", body = "Below the tabs, Search items filters the current list, Raw shows the plain stored text, and Refresh rebuilds the view. Drag a bag item onto the Delete, Sell, or Keep tab to add it." },
 				}
 			},
 			{
 				label = "Bag Features",
 				title = "Bag Features",
 				sections = {
-					{ heading = "Drag To List Buttons", body = "Drag a real bag item onto Delete, Sell, or Keep to add that item to the matching list. Right-click those buttons to jump to the matching list tab." },
-					{ heading = "Use The Bag Quick Menu", body = "Alt+Right-click a real bag item to open the AutoDelete quick menu. Choose Keep, Sell, Delete, or Why? from there." },
-					{ heading = "Leave Normal Right-Click Alone", body = "Normal right-click belongs to WoW and your bag addon. Use it for eating, drinking, equipping, selling, or using items. AutoDelete should only open its bag menu on Alt+Right-click." },
-					{ heading = "If A Click Feels Wrong", body = "Stop and test normal right-click first. If normal item use is blocked, that is a bug, not intended behavior." },
+					{ icon = "Interface\\Icons\\INV_Misc_Bag_09", title = "Drag to Delete, Sell, or Keep", body = "Drag a real bag item onto the Delete, Sell, or Keep tab to add it to that list. An empty list also shows a Drag items here hint." },
+					{ icon = "Interface\\Icons\\INV_Misc_Gear_02", title = "Alt+Right-click menu", body = "Alt+Right-click a real bag item to open the AutoDelete quick menu, with Keep, Sell, |cffbf3838Delete|r, and Why?. Picking Delete adds the item to the Delete list." },
+					{ icon = "Interface\\Icons\\INV_Misc_Food_15", title = "Normal right-click", body = "Plain right-click still belongs to WoW and your bag addon for eating, drinking, equipping, and using items. AutoDelete only acts on Alt+Right-click. |cffbf3838If a plain right-click ever stops working, that is a bug, not intended.|r" },
 				}
 			},
 			{
 				label = "Process Bags",
 				title = "Process Bags",
 				sections = {
-					{ heading = "Review Before Pressing Keys", body = "Open Process Bags to see DE, Mill, Prospect, and Open targets before you act. If the list is empty, no current process action matched." },
-					{ heading = "Left-Click A Row", body = "Left-click a row when you want that item to be the next target for its matching keybind. Read the row again before pressing the key." },
-					{ heading = "Right-Click A Row", body = "Right-click a Process Bags row to open Keep, Sell, Delete, Ignore for Process, and Why?. This right-click is only inside the Process Bags list." },
-					{ heading = "Use Ignore For Process", body = "Choose Ignore for Process when an item should stop showing in Process Bags on this character. Use Keep instead if the item needs real protection from cleanup rules." },
-					{ heading = "Use Why?", body = "Choose Why? when an item is kept, sold, deleted, dotted, or skipped and you need the reason. The report shows lists, item facts, affix protection, and matched process action." },
+					{ icon = "Interface\\Icons\\INV_Misc_Bag_07", title = "Process Bags window", body = "A separate panel listing every bag item ready for One-Key Disenchant, Mill, Prospect, or Open, with an Item column and an Action column. An empty list means nothing matched right now." },
+					{ icon = "Interface\\Icons\\Ability_Hunter_MasterMarksman", title = "Left-click a row", body = "Left-click a row to arm that item as the next target for its matching keybind. Read the row once more before you press the key." },
+					{ icon = "Interface\\Icons\\Trade_Engineering", title = "Right-click a row", body = "Right-click a row to open Keep, Sell, |cffbf3838Delete|r, Ignore for Process, and Why?. This menu only appears inside the Process Bags list." },
+					{ icon = "Interface\\Icons\\INV_Misc_Blindfold_01", title = "Ignore for Process", body = "Stops an item from showing in Process Bags on this character. It is not protection: use Keep if the item needs to be safe from cleanup rules." },
+					{ icon = "Interface\\Icons\\INV_Misc_QuestionMark", title = "Why?", body = "Explains why an item is kept, sold, deleted, dotted, or skipped. The report shows list membership, item facts, affix protection, and any matched process action." },
 				}
 			},
 		}
 
-		-- Fixed tab-content math: helpBox is tabContent width/height with
-		-- y=-4/4 padding, so 12 buttons must fit in 4 rows inside 92px.
-		-- 4 * 18px + 3 * 4px + top 6px = 90px, leaving 2px bottom room.
+		-- Centered 3x4 grid of topic buttons inside helpBox (the tab content
+		-- area, 538 wide, minus its 4px top/bottom inset = 92 tall). Uniform
+		-- gaps and even margins, with the block centered so it no longer hugs
+		-- the top edge.
 		local helpContentW = CONTENT_W - TAB_INNER_PAD * 2
-		local gapX = 8
-		local gapY = 4
-		local btnH = 18
-		local btnW = math.floor((helpContentW - CARD_INNER_PAD_X * 2 - gapX * 2) / 3)
+		local helpContentH = CONTENT_AREA_H - 8
+		local gap = 6
+		local btnH = 16
+		local btnW = math.floor((helpContentW - gap * 2 - 12) / 3)
+		local blockW = btnW * 3 + gap * 2
+		local blockH = btnH * 4 + gap * 3
+		local startX = math.floor((helpContentW - blockW) / 2)
+		local startY = math.floor((helpContentH - blockH) / 2)
 		for i, topic in ipairs(topics) do
 			local col = (i - 1) % 3
 			local row = math.floor((i - 1) / 3)
@@ -3511,7 +4010,7 @@ local function BuildUI(self)
 					_G.AutoDelete_ShowHelpTopicWindow(topic.title, topic.sections)
 				end
 			end, btnW, btnH)
-			btn:SetPoint("TOPLEFT", CARD_INNER_PAD_X + col * (btnW + gapX), -6 - row * (btnH + gapY))
+			btn:SetPoint("TOPLEFT", startX + col * (btnW + gap), -startY - row * (btnH + gap))
 		end
 	end
 
@@ -3905,7 +4404,6 @@ local function BuildUI(self)
 		fg     = { 1, 1, 1, 1 },
 	}
 	local QUALITY_STATES_DEL_SELL  = { QSTATE_DEL, QSTATE_SELL }
-	local QUALITY_STATES_SELL_ONLY = { QSTATE_SELL }
 
 	-- Helper that builds one row inside the card: [label LEFT, segments RIGHT].
 	-- Returns the segmented control so BuildUI can wire up state restore.
@@ -4137,10 +4635,10 @@ local function BuildUI(self)
 		card3Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
 		card3Title:SetText("Affix Tools")
 
-		-- Audit Lists button (was on Card 1). Scans the user's Delete + Sell
+		-- Refresh List button (was Audit Lists on Card 1). Scans the user's Delete + Sell
 		-- lists for items carrying PE's @affix@ tooltip marker; prints a
 		-- chat summary. Doesn't modify the lists.
-		local auditBtn = MakeActionButton(aCard3, "Audit Lists", C_BLUE, function()
+		local auditBtn = MakeActionButton(aCard3, "Refresh List", C_BLUE, function()
 			if _G.AutoDelete_AuditAffixOnLists then
 				_G.AutoDelete_AuditAffixOnLists(GetActiveProfile(db))
 			end
@@ -4151,7 +4649,7 @@ local function BuildUI(self)
 			btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
-			GameTooltip:SetText("Audit Lists", 1, 1, 1)
+			GameTooltip:SetText("Refresh List", 1, 1, 1)
 			GameTooltip:AddLine("Checks your Delete and Sell lists for items with a Project Ebonhold affix. Prints what it finds in chat. Doesn't change your lists.",
 				C_DIM[1], C_DIM[2], C_DIM[3], true)
 			GameTooltip:Show()
@@ -4162,10 +4660,10 @@ local function BuildUI(self)
 			GameTooltip:Hide()
 		end)
 
-		-- Scan Learned Affixes button (was on Card 2). Refreshes the
+		-- Update Affix List button (was Scan Learned Affixes on Card 2). Refreshes the
 		-- addon's owned-affix mirror from PE and opens the scrollable
-		-- Learned Affixes window grouped by tier.
-		local scanBtn = MakeActionButton(aCard3, "Scan Learned Affixes", C_BLUE, function()
+		-- Learned Affixes window with Learned and Unlearned tabs.
+		local scanBtn = MakeActionButton(aCard3, "Update Affix List", C_BLUE, function()
 			if _G.AutoDelete_ScanLearnedAffixes then
 				_G.AutoDelete_ScanLearnedAffixes()
 			end
@@ -4176,8 +4674,8 @@ local function BuildUI(self)
 			btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
-			GameTooltip:SetText("Scan Learned Affixes", 1, 1, 1)
-			GameTooltip:AddLine("Opens a window showing every affix you have learned, grouped by tier.",
+			GameTooltip:SetText("Update Affix List", 1, 1, 1)
+			GameTooltip:AddLine("Opens a window with Learned and Unlearned tabs, grouped by tier.",
 				C_DIM[1], C_DIM[2], C_DIM[3], true)
 			GameTooltip:Show()
 		end)
@@ -4731,9 +5229,12 @@ local function BuildUI(self)
 		--     Profile dropdown at  y=-30 (below label, 22 tall)
 		--
 		--   RIGHT half (cols 3+4):
-		--     Row 1 (y=-10): [Copy]        [Delete]
-		--     Row 2 (y=-40): [Import Lists] [Clear List]
-		--     Buttons are 113 wide, 26 tall, 6px gap between rows.
+		--     Row 1: [Copy]         [Delete]
+		--     Row 2: [Import Lists] [Clear List]
+		--     Row 3: [Import Raw]   [Export Raw]
+		--     Row 4: [Audit Lists]  [Fix Safe]
+		--     Four rows must fit inside the fixed tab content frame. Keep the
+		--     row math tight enough that the last row clears the bottom border.
 		--
 		-- Semantic colors per Addon_UI_StyleGuide.md:
 		--   Copy / Import Lists  -> C_GREEN (additive, copies data in)
@@ -4745,13 +5246,13 @@ local function BuildUI(self)
 		local PROF_COL_GAP  = 10
 		local PROF_COL3_X   = PROF_LEFT_PAD + PROF_COL_W * 2 + PROF_COL_GAP * 2   -- 254
 		local PROF_COL4_X   = PROF_COL3_X   + PROF_COL_W + PROF_COL_GAP           -- 377
-		local PROF_BTN_H    = 26
-		local PROF_BTN_GAP  = 6
+		local PROF_BTN_H    = 20
+		local PROF_BTN_GAP  = 4
 		local PROF_DD_W     = PROF_COL_W * 2 + PROF_COL_GAP                       -- 236
-		local PROF_LABEL_Y  = -10
-		local PROF_DD_Y     = PROF_LABEL_Y - 20                                   -- -30
-		local PROF_ROW1_Y   = PROF_LABEL_Y                                        -- top-aligned with LEFT label
-		local PROF_ROW2_Y   = PROF_ROW1_Y - PROF_BTN_H - PROF_BTN_GAP             -- -42
+		local PROF_LABEL_Y  = -6
+		local PROF_DD_Y     = PROF_LABEL_Y - 20                                   -- -26
+		local PROF_ROW1_Y   = -4
+		local PROF_ROW2_Y   = PROF_ROW1_Y - PROF_BTN_H - PROF_BTN_GAP             -- -28
 
 		-- LEFT half / row 1: "Current: <charname>" label (small accent text).
 		local curHeader = MakeText(profilesPage, 10, C_TITLE, "OUTLINE")
@@ -4885,6 +5386,54 @@ local function BuildUI(self)
 			GameTooltip:Show()
 		end)
 		exportRawBtn:SetScript("OnLeave", function(btn)
+			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+			btn._text:SetTextColor(unpack(C_TEXT))
+			GameTooltip:Hide()
+		end)
+
+		-- Row 4: List Audit (report-only) + Fix Safe (mechanical cleanup).
+		-- Audit is non-mutating. Fix Safe removes same-list duplicate lines
+		-- and normalizes full item links / plain numeric IDs to item:<id>.
+		local PROF_ROW4_Y = PROF_ROW3_Y - PROF_BTN_H - PROF_BTN_GAP
+		local auditBtn = MakeActionButton(profilesPage, "Audit Lists", C_BLUE, function()
+			if _G.AutoDelete_ShowListAudit then
+				_G.AutoDelete_ShowListAudit()
+			end
+		end, PROF_COL_W, PROF_BTN_H)
+		auditBtn:SetPoint("TOPLEFT", PROF_COL3_X, PROF_ROW4_Y)
+		auditBtn:SetScript("OnEnter", function(btn)
+			btn:SetBackdropColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.3)
+			btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
+			btn._text:SetTextColor(1, 1, 1)
+			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+			GameTooltip:SetText("Audit Lists", 1, 1, 1)
+			GameTooltip:AddLine("Open a copyable report for duplicate entries, cross-list conflicts, name-only entries, and same-name item ID traps.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		auditBtn:SetScript("OnLeave", function(btn)
+			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+			btn._text:SetTextColor(unpack(C_TEXT))
+			GameTooltip:Hide()
+		end)
+
+		local fixAuditBtn = MakeActionButton(profilesPage, "Fix Safe", C_GREEN, function()
+			if _G.AutoDelete_RunListAuditSafeFix then
+				_G.AutoDelete_RunListAuditSafeFix()
+			end
+		end, PROF_COL_W, PROF_BTN_H)
+		fixAuditBtn:SetPoint("TOPLEFT", PROF_COL4_X, PROF_ROW4_Y)
+		fixAuditBtn:SetScript("OnEnter", function(btn)
+			btn:SetBackdropColor(C_GREEN[1], C_GREEN[2], C_GREEN[3], 0.3)
+			btn:SetBackdropBorderColor(C_GREEN[1], C_GREEN[2], C_GREEN[3], 1)
+			btn._text:SetTextColor(1, 1, 1)
+			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+			GameTooltip:SetText("Fix Safe", 1, 1, 1)
+			GameTooltip:AddLine("Apply only safe mechanical list cleanup: same-list duplicates and item reference normalization. Cross-list and same-name item ID traps stay for review.",
+				C_DIM[1], C_DIM[2], C_DIM[3], true)
+			GameTooltip:Show()
+		end)
+		fixAuditBtn:SetScript("OnLeave", function(btn)
 			ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
 			btn._text:SetTextColor(unpack(C_TEXT))
 			GameTooltip:Hide()
@@ -5415,10 +5964,15 @@ local function BuildUI(self)
 
 	-- ========================================================================
 	-- Search Row (inside manageBox)
-	-- Layout: [🔍 search box .....................] [Raw ☐] [↻ Refresh]
+	-- Layout: [search box ...........] [Raw] [Refresh] [short helper]
 	-- ========================================================================
+	local LIST_SEARCH_W = 240
+	local LIST_RAW_W = 55
+	local LIST_REFRESH_W = 86
+	local LIST_REFRESH_HELP_W = 100
+
 	local searchFrame = CreateFrame("Frame", nil, manageBox)
-	searchFrame:SetSize(280, 22)
+	searchFrame:SetSize(LIST_SEARCH_W, 22)
 	searchFrame:SetPoint("TOPLEFT", 12, -12)
 	ApplyBackdrop(searchFrame, C_DROP_BG, C_DROP_BORDER)
 
@@ -5473,13 +6027,13 @@ local function BuildUI(self)
 
 	-- Raw toggle
 	local tglRaw = MakeToggle(manageBox, "Raw", C_ACCENT)
-	tglRaw:SetSize(55, 20)
+	tglRaw:SetSize(LIST_RAW_W, 20)
 	tglRaw:SetPoint("LEFT", searchFrame, "RIGHT", 8, 0)
 	self._tglRaw = tglRaw
 
 	-- Refresh button (circular arrow icon + text)
 	local refreshBtn = CreateFrame("Button", nil, manageBox)
-	refreshBtn:SetSize(86, 22)
+	refreshBtn:SetSize(LIST_REFRESH_W, 22)
 	refreshBtn:SetPoint("LEFT", tglRaw, "RIGHT", 8, 0)
 	ApplyBackdrop(refreshBtn, C_ROW_ODD, C_BORDER)
 	local refreshIcon = refreshBtn:CreateTexture(nil, "OVERLAY")
@@ -5490,6 +6044,13 @@ local function BuildUI(self)
 	local refreshText = MakeText(refreshBtn, 10, C_DIM, "OUTLINE")
 	refreshText:SetPoint("LEFT", refreshIcon, "RIGHT", 5, 0)
 	refreshText:SetText("Refresh")
+	local refreshHint = MakeText(manageBox, 9, C_DIM, "OUTLINE")
+	refreshHint:SetPoint("LEFT", refreshBtn, "RIGHT", 8, 0)
+	refreshHint:SetWidth(LIST_REFRESH_HELP_W)
+	refreshHint:SetJustifyH("LEFT")
+	refreshHint:SetWordWrap(false)
+	refreshHint:SetNonSpaceWrap(false)
+	refreshHint:SetText("Loads item names.")
 	refreshBtn:SetScript("OnEnter", function()
 		ApplyBackdrop(refreshBtn, C_ROW_HOVER, C_BORDER)
 		refreshText:SetTextColor(unpack(C_TEXT))
@@ -6306,7 +6867,7 @@ local function BuildUI(self)
 	end)
 
 	-- Filters tab -> Affix Display: Collection Mode toggle. Mirrors the
-	-- `/del collection` slash command. On toggle-on we re-pull PE's
+	-- Only missing affixes toggle. On toggle-on we re-pull PE's
 	-- learned-affix table (it may have grown since the player last
 	-- reloaded) and force a dot refresh so existing bag slots reflect
 	-- the new owned/missing partition immediately. Accessed through

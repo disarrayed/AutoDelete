@@ -38,9 +38,10 @@ Quest items are protected from every auto-rule, regardless of list state.
 - Drag-and-drop or shift-click to add items
 - Per-character lists with profile copy
 - Built-in search and raw view
-- **Import Raw** (Profile tab): paste item names or links into a popup, then pick Delete, Sell, or Keep. Bulk-loads a list from text in one go.
+- **Import Raw** (Profile tab): paste item names, item links, `item:<id>`, or plain numeric IDs, then pick Delete, Sell, or Keep. AutoDelete resolves cached names, current bag items, and known list entries, while reporting ambiguous or unresolved names instead of guessing.
 - **Import Lists** (Profile tab): copy lists from a known item-name catalog
 - **Export Raw** (Profile tab): dumps any list as plain text for sharing or backup. Pre-selected on open so Ctrl+C grabs it.
+- **Audit Lists** (Profile tab or `/del audit`): copyable report for duplicates, cross-list conflicts, name-only entries, same-name item ID traps, and uncached item IDs. **Fix Safe** removes same-list duplicates and normalizes safe item references only.
 - **Manage Ignored Items** (Filters tab): view and clear the per-item skip list that builds up when you accept Keep-override popups
 
 **ElvUI bag buttons**
@@ -63,12 +64,13 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 **Affix Protection** (Affix tab)
 - Skip Auto-Delete and Auto-Sell for items carrying Project Ebonhold's affix marker
 - Optional minimum iLvl floor so low-iLvl affix junk can still be cleared
-- "Audit Lists" button scans your Delete / Sell lists for items the filter would now save
-- "Scan Learned Affixes" opens a scrollable window of every PE affix you've learned, grouped by tier
-- **Affix Collection Mode** (`/del collection`): only show the affix dot on items whose affixes you haven't learned yet. Helps you spot fresh affixes worth keeping.
+- "Refresh List" scans your Delete / Sell lists for items the filter would now save
+- "Update Affix List" opens a scrollable window with Learned and Unlearned tabs, grouped by tier. Click an affix name to select it for Ctrl+C; Enter or Escape clears the copy box.
+- **Only missing affixes**: only show the affix dot on items whose affixes you haven't learned yet. Helps you spot fresh affixes worth keeping.
 
 **Companion management**
 - Auto-summon Greedy Scavenger and Goblin Merchant
+- **Only in Combat** gates every automatic Greedy Scavenger summon, including After sell and After vendor close
 - Mount-aware dismiss and re-summon
 - Stuck detection via loot-event tracking
 - Three-state Goblin defer: won't summon until AutoDelete has had a chance to clear bags
@@ -82,14 +84,18 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 
 **Process Bags panel** (`/del process`)
 - Standalone window showing what AutoDelete would do to each bag slot
+- Filter rows by All, Sell, Delete, DE, Mill, Prospect, Open, or Kept
 - Inspect what's about to happen before it does
 - Items with the same item ID are grouped together to reduce repeated rows when affix names differ
-- Right-click a row for quick actions: Keep, Sell, Delete, Ignore for Process, or Why?
+- Left-click DE / Mill / Prospect / Open rows to arm that item for the matching keybind
+- Left-click Sell / Delete / Kept rows to open Why?
+- Right-click a row for quick actions: Keep, Sell, Delete, or Why? Ignore for Process appears only for one-key action rows.
 - Alt+Right-click a real bag item for the same quick actions, without changing normal right-click item use
 
 **Why? and report**
 - Right-click a Process Bags row, then choose **Why?** for a copyable item decision report
 - `/del report` opens a copyable diagnostic summary
+- `/del history` opens a copyable recent decision log for this session
 - The Help tab has topic buttons with practical how-to guidance for each main area
 
 **Quality of life**
@@ -120,11 +126,15 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 /del setup         Reopen the welcome popup
 /del process       Open the Process Bags inspection window
 /del report        Open a copyable diagnostic report
-/del collection    Toggle Affix Collection Mode (show only unlearned affixes)
+/del history       Open recent sell / delete / keep decisions
+/del audit         Open a copyable Delete / Sell / Keep list audit
+/del audit fix     Apply safe list cleanup only
+/del affix         Open the Learned / Unlearned affix list
 /del debug         Toggle the auto-sell / auto-delete debug trace
 /del bench         Run a loot-burst performance benchmark (diagnostic)
 /del spike         Capture frame-level performance spikes (diagnostic)
-/del goblin        Show the auto-summon decision state (diagnostic)
+/del goblin        Open a copyable Goblin Merchant summon diagnostic
+/del scav          Open a copyable Scavenger summon / retry / stuck-detection diagnostic
 /autodelete        Alias for /del
 ```
 
@@ -153,13 +163,21 @@ The chocolate box stays. We appreciate the passion. The chocolate would like you
 
 Got good ideas? Use 'em anytime. Thanks for the shoutouts!
 
+---
+
 ### A note on Auto-Open Containers
 
-An attempt to auto-open lootable containers (clams, crates, mysterious eggs, etc.) on bag update shipped in development but was removed before the public release.
+Auto-open was tested in development and removed before public release.
 
-WoW 3.3.5a flags `UseContainerItem` as a protected function for many container types. When called from an addon scan or event handler (rather than from a real player click or keypress) the client rejects the call and fires `ADDON_ACTION_BLOCKED`. This is documented Blizzard behavior, not a server modification, and it affects every addon that attempts the same approach. The supported workaround is a secure button bound to a user keybind or macro, which is a manual interaction rather than a true automatic open.
+Why it was removed:
+- WoW 3.3.5a blocks many container uses when an addon tries to fire them automatically.
+- The client raises `ADDON_ACTION_BLOCKED` unless the action comes from a real click or key press.
 
-We may revisit this as a keybind-driven feature in a future release. Until then, containers that don't respond to automatic opens must be right-clicked manually.
+What to do now:
+- Right-click those containers manually.
+- Use keybind-driven tools where available.
+
+We may revisit this later as a keybind-first feature.
 
 ---
 
