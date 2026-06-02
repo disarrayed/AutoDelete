@@ -2,7 +2,7 @@
 
 # AutoDelete
 
-WoW 3.3.5a inventory manager for Project Ebonhold. Mark items to **Delete**, **Sell**, or **Keep**. Every automatic feature is opt-in.
+WoW 3.3.5a inventory manager for Project Ebonhold. Mark items to **Delete**, **Sell**, **Keep**, **KeepOne**, or **KeepStack**. Every automatic feature is opt-in.
 
 [![Latest release](https://img.shields.io/github/v/release/disarrayed/AutoDelete.svg?style=for-the-badge&color=ff8000)](https://github.com/disarrayed/AutoDelete/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/disarrayed/AutoDelete/total.svg?label=downloads&style=for-the-badge&color=ff8000)](https://github.com/disarrayed/AutoDelete/releases)
@@ -18,13 +18,15 @@ WoW 3.3.5a inventory manager for Project Ebonhold. Mark items to **Delete**, **S
 
 ## 🧠 How it works
 
-Three lists per character:
+Five lists per character:
 
 | List | Behavior |
 |------|----------|
 | **Delete** | Destroyed on the next bag scan |
 | **Sell** | Sold the next time you open a vendor |
 | **Keep** | Protected from every auto-rule |
+| **KeepOne** | Cleanup list: keeps one unit and deletes extra units |
+| **KeepStack** | Cleanup list: keeps one bag stack and deletes extra stacks |
 
 Drag items onto the Delete / Sell / Keep buttons next to your bags, or open the settings panel and edit each list directly.
 
@@ -38,9 +40,9 @@ Quest items are protected from every auto-rule, regardless of list state.
 - Drag-and-drop or shift-click to add items
 - Per-character lists with profile copy
 - Built-in search and raw view
-- **Import Raw** (Profile tab): paste item names, item links, `item:<id>`, or plain numeric IDs, then pick Delete, Sell, Keep, or KeepOne. AutoDelete resolves cached names, current bag items, and known list entries, while reporting ambiguous or unresolved names instead of guessing.
+- **Import Raw** (Profile tab): paste item names, item links, `item:<id>`, or plain numeric IDs, then pick Delete, Sell, Keep, KeepOne, or KeepStack. AutoDelete resolves cached names, current bag items, and known list entries, while reporting ambiguous or unresolved names instead of guessing.
 - **Import Lists** (Profile tab): copy lists from a known item-name catalog
-- **Export Raw** (Profile tab): dumps any list as plain text for sharing or backup. Pre-selected on open so Ctrl+C grabs it.
+- **Export Raw** (Profile tab): dumps any list as plain names by default, or stable `item:<id>` lines with name comments when Raw is checked. Pre-selected on open so Ctrl+C grabs it.
 - **Audit Lists** (Profile tab or `/del audit`): copyable report for duplicates, cross-list conflicts, name-only entries, same-name item ID traps, and uncached item IDs. **Fix Safe** removes same-list duplicates and normalizes safe item references only.
 - **Manage Ignored Items** (Filters tab): view and clear the per-item skip list that builds up when you accept Keep-override popups
 
@@ -58,15 +60,17 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 **Auto Actions** (Filters tab)
 - Per-quality Del / Sell pills for Junk, Common, and Greens
 - Click a pill to light it red (delete) or blue (sell). Click again to turn it off.
+- If ElvUI is loaded, Junk set to Del hides ElvUI's junk coin while that mode is active.
 - Greens defaults to off. Green gear stays in bags unless you opt in.
 - Cosmetic slots (shirts, tabards) and quest items are always protected
 
 **Affix Protection** (Affix tab)
-- Skip Auto-Delete and Auto-Sell for items carrying Project Ebonhold's affix marker
-- Optional minimum iLvl floor so low-iLvl affix junk can still be cleared
+- Tier I-V checkboxes protect matching affix tiers before Delete or Sell rules
 - "Refresh List" scans your Delete / Sell lists for items the filter would now save
 - "Update Affix List" opens a scrollable window with Learned and Unlearned tabs, grouped by tier. Click an affix name to select it for Ctrl+C; Enter or Escape clears the copy box.
-- **Only missing affixes**: only show the affix dot on items whose affixes you haven't learned yet. Helps you spot fresh affixes worth keeping.
+- **Show/Keep Missing Affix**: only show the affix dot on items whose affixes you haven't learned yet and protect those missing affixes from Sell/Delete cleanup.
+- **Missing Affix Color**: choose the dot color for affixes your account has not learned. Defaults to `#ff3b41`.
+- **KeepOne Missing Affix**: protect one gear item for each missing affix from Delete and Sell rules. Duplicate missing-affix gear can still clear through normal cleanup rules. It is a toggle, not a list, and learned affixes are ignored.
 
 **Companion management**
 - Auto-summon Greedy Scavenger and Goblin Merchant
@@ -126,7 +130,7 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 /del setup         Reopen the welcome popup
 /del process       Open the Process Bags inspection window
 /del report        Open a copyable diagnostic report
-/del history       Open recent sell / delete / keep decisions
+/del history       Open searchable recent sell / delete / keep decisions
 /del audit         Open a copyable item-list audit
 /del audit fix     Apply safe list cleanup only
 /del affix         Open the Learned / Unlearned affix list

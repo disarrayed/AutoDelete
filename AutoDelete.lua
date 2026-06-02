@@ -259,6 +259,9 @@ function _G.AutoDelete_BenchSnapConfig()
 					itemLevelThreshold  = db.itemLevelThreshold,
 					junkIcon            = db.junkIcon            and true or false,
 					junkDesaturate      = db.junkDesaturate      and true or false,
+					autoDeleteJunkIconSuppressed = _G.AutoDelete_ElvUIJunkIconState
+						and _G.AutoDelete_ElvUIJunkIconState.active
+						and true or false,
 					qualityColors       = db.qualityColors       and true or false,
 					questIcon           = db.questIcon           and true or false,
 					questItemColors     = db.questItemColors     and true or false,
@@ -476,9 +479,9 @@ function _G.AutoDelete_ShowBenchReport(name)
 		if b.config.elvuiBags then
 			local eb = b.config.elvuiBags
 			table.insert(lines, string.format(
-				"  elvuiBags: showBindType=%s itemLevel=%s ilvlThresh=%s junkIcon=%s junkDesat=%s qualityColors=%s questIcon=%s questItemColors=%s professionBagColors=%s moduleEnabled=%s",
+				"  elvuiBags: showBindType=%s itemLevel=%s ilvlThresh=%s junkIcon=%s junkDesat=%s autoDeleteJunkIconSuppressed=%s qualityColors=%s questIcon=%s questItemColors=%s professionBagColors=%s moduleEnabled=%s",
 				tostring(eb.showBindType), tostring(eb.itemLevel), tostring(eb.itemLevelThreshold or "?"),
-				tostring(eb.junkIcon), tostring(eb.junkDesaturate),
+				tostring(eb.junkIcon), tostring(eb.junkDesaturate), tostring(eb.autoDeleteJunkIconSuppressed),
 				tostring(eb.qualityColors), tostring(eb.questIcon), tostring(eb.questItemColors),
 				tostring(eb.professionBagColors), tostring(eb.moduleEnabled)
 			))
@@ -702,6 +705,7 @@ function _G.AutoDelete_BenchCompare(nameA, nameB)
 	rowStr("E.bags itemLevel",           eba.itemLevel,           ebb.itemLevel)
 	rowStr("E.bags junkIcon",            eba.junkIcon,            ebb.junkIcon)
 	rowStr("E.bags junkDesaturate",      eba.junkDesaturate,      ebb.junkDesaturate)
+	rowStr("E.bags junkIcon suppressed", eba.autoDeleteJunkIconSuppressed, ebb.autoDeleteJunkIconSuppressed)
 	rowStr("E.bags qualityColors",       eba.qualityColors,       ebb.qualityColors)
 	rowStr("E.bags questIcon",           eba.questIcon,           ebb.questIcon)
 	rowStr("E.bags questItemColors",     eba.questItemColors,     ebb.questItemColors)
@@ -1196,7 +1200,7 @@ local DEFAULT_PROFILE = {
 	-- ============================================================
 	-- Item lists (newline-delimited "item:<id>" strings)
 	-- ============================================================
-	-- Three mutually-exclusive lists. AddItemToList enforces this:
+	-- Mutually-exclusive lists. AddItemToList enforces this:
 	-- adding an item to one list rejects the add if it's already on
 	-- another. The Keep list always wins at scan time; nothing on it
 	-- can be auto-sold or auto-deleted by any rule.
@@ -1204,6 +1208,7 @@ local DEFAULT_PROFILE = {
 	sellListText  = "",   -- Sell list    (auto-sold at any vendor)
 	whitelistText = "",   -- Keep list    (protected from all rules)
 	keepOneText   = "",   -- KeepOne list (delete extras, leave one unit)
+	keepStackText = "",   -- KeepStack list (delete extra stacks, leave one stack)
 
 	-- ============================================================
 	-- Periodic scan
@@ -1219,14 +1224,18 @@ local DEFAULT_PROFILE = {
 	-- ============================================================
 	-- Tools (Tools tab)
 	-- ============================================================
-	-- Affix Protection (Tools tab): skip auto-rules on items that carry the
-	-- PE @affix@ tooltip marker. affixIlvlMin is a floor: items with iLvl
-	-- below this value are NOT protected, even if the toggles are on. This
-	-- lets the user keep high-iLvl affixed gear while still clearing low-
-	-- iLvl affix junk. 0 = no floor (every affixed item is protected).
-	protectAffixFromDelete = false,
-	protectAffixFromSell   = false,
-	affixIlvlMin           = 0,
+	-- Affix Protection (Affix tab): tier checkboxes block destructive rules
+	-- before Delete or Sell can act. Checked tiers are absolute and run
+	-- before Show/Keep Missing Affix or KeepOne Missing Affix cleanup.
+	protectAffixFromDelete = false, -- legacy; retained for old profiles
+	protectAffixFromSell   = false, -- legacy migration source
+	affixIlvlMin           = 0,     -- legacy; no longer used
+	protectAffixTier1      = false,
+	protectAffixTier2      = false,
+	protectAffixTier3      = false,
+	protectAffixTier4      = false,
+	protectAffixTier5      = false,
+	keepSingleMissingAffix    = false,
 
 	-- Visual cyan dot in the bottom-left corner of bag slots with affixed
 	-- items. On by default since most users want the visual cue; toggle
@@ -1236,14 +1245,18 @@ local DEFAULT_PROFILE = {
 	-- Affix Collection Mode (Filters tab, Affix Protection card).
 	-- When OFF (default): the affix dot shows on every affixed item,
 	-- colored by tier (white/green/blue/purple/orange). Affix
-	-- protection applies to all affixed items above the iLvl floor.
+	-- tier protection applies to all checked affix tiers.
 	-- When ON: the dot ONLY shows for affixes the player hasn't yet
 	-- learned in PE's perk system (reads ExtractionService.learnedAffixes
-	-- directly), colored a single attention-gold. Items whose affix is
+	-- directly), colored with missingAffixColor. Items whose affix is
 	-- already owned at the same tier pass through to normal sell/delete
 	-- rules (duplicate-cleanup behavior). Fallback when the PE addon
 	-- isn't loaded: behaves as if mode is OFF.
 	affixCollectionMode    = false,
+	missingAffixColor      = "red",
+	missingAffixColorR     = 1.00,
+	missingAffixColorG     = 0.231,
+	missingAffixColorB     = 0.255,
 
 	-- Bag Space / Goblin summon (Pets tab):
 	--   bagSpaceWarnThreshold is the free-slot count at or below which
@@ -1529,9 +1542,36 @@ local function EnsureProfileFields(p)
 		_G._AutoDelete_NeedMigrationNotice = true
 	end
 
+	local hasAffixTierProtection = p.protectAffixTier1 ~= nil
+		or p.protectAffixTier2 ~= nil
+		or p.protectAffixTier3 ~= nil
+		or p.protectAffixTier4 ~= nil
+		or p.protectAffixTier5 ~= nil
+	if not hasAffixTierProtection and p.protectAffixFromSell == true then
+		p.protectAffixTier1 = true
+		p.protectAffixTier2 = true
+		p.protectAffixTier3 = true
+		p.protectAffixTier4 = true
+		p.protectAffixTier5 = true
+	end
+
 	for k, v in pairs(DEFAULT_PROFILE) do
 		if p[k] == nil then p[k] = v end
 	end
+	if p.missingAffixColor ~= "red"
+		and p.missingAffixColor ~= "gold"
+		and p.missingAffixColor ~= "mage"
+		and p.missingAffixColor ~= "green"
+		and p.missingAffixColor ~= "purple"
+		and p.missingAffixColor ~= "custom" then
+		p.missingAffixColor = DEFAULT_PROFILE.missingAffixColor
+	end
+	if type(p.missingAffixColorR) ~= "number" then p.missingAffixColorR = DEFAULT_PROFILE.missingAffixColorR end
+	if type(p.missingAffixColorG) ~= "number" then p.missingAffixColorG = DEFAULT_PROFILE.missingAffixColorG end
+	if type(p.missingAffixColorB) ~= "number" then p.missingAffixColorB = DEFAULT_PROFILE.missingAffixColorB end
+	if p.missingAffixColorR < 0 then p.missingAffixColorR = 0 elseif p.missingAffixColorR > 1 then p.missingAffixColorR = 1 end
+	if p.missingAffixColorG < 0 then p.missingAffixColorG = 0 elseif p.missingAffixColorG > 1 then p.missingAffixColorG = 1 end
+	if p.missingAffixColorB < 0 then p.missingAffixColorB = 0 elseif p.missingAffixColorB > 1 then p.missingAffixColorB = 1 end
 end
 
 -- AutoDeleteDB schema version. Bumped when a non-additive change to the
@@ -1748,7 +1788,7 @@ _G.AutoDelete_Stats = {
 -- permanent audit database.
 _G.AutoDelete_DecisionHistory = _G.AutoDelete_DecisionHistory or {
 	entries = {},
-	cap = 40,
+	cap = 200,
 	lastKey = nil,
 	lastAt = 0,
 }
@@ -1757,18 +1797,23 @@ function _G.AutoDelete_RecordDecision(data)
 	if not data then return end
 	local hist = _G.AutoDelete_DecisionHistory
 	hist.entries = hist.entries or {}
-	hist.cap = hist.cap or 40
+	hist.cap = math.max(hist.cap or 0, 200)
 	local now = (GetTime and GetTime()) or 0
 	local itemId = data.itemId or data.id
 	local itemName = data.itemName or data.name or (itemId and GetItemInfo(itemId)) or "Unknown item"
 	local action = data.action or "unknown"
 	local reason = data.reason or "No reason recorded"
 	local source = data.sourceRule or data.source or "Unknown rule"
+	local affixName = data.affixName or data.affixKey
+	if not affixName and _G.AutoDelete_GetAffixKeyForItemName then
+		affixName = _G.AutoDelete_GetAffixKeyForItemName(itemName)
+	end
 	local key = table.concat({
 		tostring(itemId or itemName),
 		tostring(action),
 		tostring(reason),
 		tostring(source),
+		tostring(affixName or ""),
 	}, "|")
 	local first = hist.entries[1]
 	if first and hist.lastKey == key and (now - (hist.lastAt or 0)) < 10 then
@@ -1784,6 +1829,7 @@ function _G.AutoDelete_RecordDecision(data)
 		action = action,
 		reason = reason,
 		sourceRule = source,
+		affixName = affixName,
 		bag = data.bag,
 		slot = data.slot,
 		repeatCount = 1,
@@ -1808,24 +1854,64 @@ function _G.AutoDelete_FormatDecisionHistoryAgo(entry, now)
 	return string.format("%.1fs ago", math.max(0, (now or 0) - t))
 end
 
-function _G.AutoDelete_BuildDecisionHistoryReport()
+function _G.AutoDelete_BuildDecisionHistoryReport(searchText)
 	local hist = _G.AutoDelete_DecisionHistory or {}
 	local entries = hist.entries or {}
 	local now = (GetTime and GetTime()) or 0
+	local function SearchKey(value)
+		value = tostring(value or "")
+		value = string.lower(value)
+		value = string.gsub(value, "^%s+", "")
+		value = string.gsub(value, "%s+$", "")
+		return value
+	end
+	local query = SearchKey(searchText or "")
+	local filtered = {}
+	local function Matches(entry)
+		if query == "" then return true end
+		local fields = {
+			entry.itemName,
+			entry.itemId and ("item:" .. tostring(entry.itemId)) or nil,
+			entry.action,
+			entry.reason,
+			entry.sourceRule,
+			entry.affixName,
+			entry.bag and entry.slot and (tostring(entry.bag) .. "." .. tostring(entry.slot)) or nil,
+		}
+		for _, value in ipairs(fields) do
+			if value and string.find(SearchKey(value), query, 1, true) then
+				return true
+			end
+		end
+		return false
+	end
+	for _, entry in ipairs(entries) do
+		if Matches(entry) then table.insert(filtered, entry) end
+	end
 	local lines = {
 		"AutoDelete recent decision history",
 		"Session entries: " .. tostring(#entries),
 		"",
 	}
+	if query ~= "" then
+		table.insert(lines, 3, "Search: " .. tostring(searchText) .. " (" .. tostring(#filtered) .. " match" .. (#filtered == 1 and "" or "es") .. ")")
+	end
+	if query ~= "" and #filtered == 0 then
+		table.insert(lines, "No matching decisions found this session.")
+		return table.concat(lines, "\n")
+	end
 	if #entries == 0 then
 		table.insert(lines, "No decisions recorded this session.")
 		table.insert(lines, "")
 		table.insert(lines, "This log records actual deletes, actual sells, and matching rules blocked by Keep or Affix Protection.")
 		return table.concat(lines, "\n")
 	end
-	for i, entry in ipairs(entries) do
+	for i, entry in ipairs(filtered) do
 		table.insert(lines, string.format("%d. %s", i, _G.AutoDelete_FormatDecisionHistoryAgo(entry, now)))
 		table.insert(lines, "   Item: " .. tostring(entry.itemName) .. (entry.itemId and (" (item:" .. entry.itemId .. ")") or ""))
+		if entry.affixName then
+			table.insert(lines, "   Affix: " .. tostring(entry.affixName))
+		end
 		table.insert(lines, "   Final action: " .. tostring(entry.action))
 		table.insert(lines, "   Reason: " .. tostring(entry.reason))
 		table.insert(lines, "   Source rule: " .. tostring(entry.sourceRule))
@@ -1835,7 +1921,7 @@ function _G.AutoDelete_BuildDecisionHistoryReport()
 		if (entry.repeatCount or 1) > 1 then
 			table.insert(lines, "   Repeated: " .. tostring(entry.repeatCount) .. " times")
 		end
-		if i < #entries then table.insert(lines, "") end
+		if i < #filtered then table.insert(lines, "") end
 	end
 	return table.concat(lines, "\n")
 end
@@ -1843,7 +1929,12 @@ end
 function _G.AutoDelete_ShowDecisionHistory()
 	local text = _G.AutoDelete_BuildDecisionHistoryReport()
 	if _G.AutoDelete_ShowReportWindow then
-		_G.AutoDelete_ShowReportWindow(text, "Decision History")
+		_G.AutoDelete_ShowReportWindow(text, "Decision History", {
+			searchPlaceholder = "Search item, affix, rule...",
+			searchBuilder = function(query)
+				return _G.AutoDelete_BuildDecisionHistoryReport(query)
+			end,
+		})
 	else
 		print("|cffff8000[AutoDelete]|r " .. text:gsub("\n", "\n|cffff8000[AutoDelete]|r "))
 	end
@@ -2001,13 +2092,15 @@ end
 local function FindCrossListConflict(profile, targetKey, line)
 	local otherKeys
 	if targetKey == "listText" then
-		otherKeys = { "sellListText", "whitelistText", "keepOneText" }
+		otherKeys = { "sellListText", "whitelistText", "keepOneText", "keepStackText" }
 	elseif targetKey == "sellListText" then
-		otherKeys = { "listText", "whitelistText", "keepOneText" }
+		otherKeys = { "listText", "whitelistText", "keepOneText", "keepStackText" }
 	elseif targetKey == "whitelistText" then
-		otherKeys = { "listText", "sellListText", "keepOneText" }
+		otherKeys = { "listText", "sellListText", "keepOneText", "keepStackText" }
 	elseif targetKey == "keepOneText" then
-		otherKeys = { "listText", "sellListText", "whitelistText" }
+		otherKeys = { "listText", "sellListText", "whitelistText", "keepStackText" }
+	elseif targetKey == "keepStackText" then
+		otherKeys = { "listText", "sellListText", "whitelistText", "keepOneText" }
 	else
 		return false, nil
 	end
@@ -2022,6 +2115,7 @@ local function ListLabelForKey(key)
 	if key == "sellListText" then return "Sell" end
 	if key == "whitelistText" then return "Keep" end
 	if key == "keepOneText" then return "KeepOne" end
+	if key == "keepStackText" then return "KeepStack" end
 	return key
 end
 
@@ -2052,6 +2146,7 @@ local function AddItemToList(listKey, itemId)
 	if listKey == "sellListText" then label = "sell"
 	elseif listKey == "whitelistText" then label = "keep"
 	elseif listKey == "keepOneText" then label = "KeepOne"
+	elseif listKey == "keepStackText" then label = "KeepStack"
 	else label = "delete" end
 	print("|cffff8000[AutoDelete]|r: Added " .. itemName .. " to " .. label .. " list")
 	return true
@@ -2098,6 +2193,7 @@ _G.AutoDelete_RemoveItemFromList = RemoveItemFromList
 _G.AutoDelete_AddToDeleteList = function() HandleItemDrop("listText") end
 _G.AutoDelete_AddToSellList = function() HandleItemDrop("sellListText") end
 _G.AutoDelete_AddToKeepList = function() HandleItemDrop("whitelistText") end
+_G.AutoDelete_AddToKeepStackList = function() HandleItemDrop("keepStackText") end
 
 -- Opens the AutoDelete options panel and switches the Delete/Sell/Keep
 -- list tab to the requested mode. Used by the ElvUI bag buttons so a
@@ -2336,7 +2432,8 @@ local function ResetCurrentProfile()
 end
 
 -- Clear one list or all item lists on the current character's profile.
--- `target` is "Delete" / "Sell" / "Keep" / "KeepOne" / "All". Returns true, cleared-count
+-- `target` is "Delete" / "Sell" / "Keep" / "KeepOne" / "KeepStack" / "All".
+-- Returns true, cleared-count
 -- on success, or false, reason on failure.
 local function ClearListOnCurrent(target)
 	local db = GetDB()
@@ -2365,15 +2462,20 @@ local function ClearListOnCurrent(target)
 	elseif target == "KeepOne" then
 		clearedCount = CountEntries(profile.keepOneText)
 		profile.keepOneText = ""
+	elseif target == "KeepStack" then
+		clearedCount = CountEntries(profile.keepStackText)
+		profile.keepStackText = ""
 	elseif target == "All" then
 		clearedCount = CountEntries(profile.listText)
 			+ CountEntries(profile.sellListText)
 			+ CountEntries(profile.whitelistText)
 			+ CountEntries(profile.keepOneText)
+			+ CountEntries(profile.keepStackText)
 		profile.listText = ""
 		profile.sellListText = ""
 		profile.whitelistText = ""
 		profile.keepOneText = ""
+		profile.keepStackText = ""
 	else
 		return false, "invalid target"
 	end
@@ -2485,7 +2587,7 @@ end
 -- Exposed API for Options.lua.
 -- Scan Delete + Sell + Keep and remove any entry whose
 -- item's GetItemInfo 7th return (localized itemSubType) matches the target.
--- KeepOne is intentionally excluded; it is not a filter-cleanup list.
+-- KeepOne and KeepStack are intentionally excluded; they are not filter-cleanup lists.
 -- Used by the "Remove Patterns by Profession" UI to prune recipes/patterns/
 -- plans/schematics/formulas/designs/techniques/manuals from the user's lists.
 -- Plain-name entries (no item:ID) are preserved -- we can't identify them
@@ -2639,6 +2741,26 @@ _G.AutoDelete_CountBagUnitsByItemId = function(itemId)
 	return total
 end
 
+_G.AutoDelete_GetKeepStackSlotChoice = function(itemId)
+	if not itemId then return 0, nil, nil end
+	local stackCount, keepBag, keepSlot, keepCount = 0, nil, nil, -1
+	for bag = 0, 4 do
+		for slot = 1, GetContainerNumSlots(bag) do
+			local _, count, locked, _, _, _, link = GetContainerItemInfo(bag, slot)
+			if link and not locked and GetItemIDFromLink(link) == itemId then
+				stackCount = stackCount + 1
+				count = count or 1
+				if count > keepCount then
+					keepCount = count
+					keepBag = bag
+					keepSlot = slot
+				end
+			end
+		end
+	end
+	return stackCount, keepBag, keepSlot
+end
+
 -- Cosmetic slots (shirts + tabards). Items in these slots are NEVER touched
 -- by the automatic rules (Auto-Delete Junk, Auto-Delete Common, Auto-Sell
 -- Greens, the BoE/BoP/BoE Weapons sell categories). They must be explicitly
@@ -2724,10 +2846,13 @@ local function DeleteItems()
 	local hasWanted = next(wantedNames) or next(wantedIDs)
 	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
 	local hasKeepOne = next(keepOneIDs) ~= nil
+	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+	local hasKeepStack = next(keepStackIDs) ~= nil
 	-- Pre-built Keep-list hash sets so the inner loop doesn't re-parse
 	-- the whitelist text per-item. See IsWhitelistedFast for the perf
 	-- rationale (the slow path was the dominant cost in DeleteItems).
 	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	local singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
 	AutoDelete_PerfEnd("DeleteItems/parse", _pParse)
 	-- Tri-state quality filter: only "delete" is a delete-path trigger.
 	-- "sell" is handled in SellItems; "off" is a no-op for both paths.
@@ -2738,9 +2863,9 @@ local function DeleteItems()
 	-- consumables, bags, and quest items stay safe.
 	local doGreens = (profile.qualityActionGreens == "delete")
 
-	if not hasWanted and not hasKeepOne and not doGray and not doCommon and not doGreens then
+	if not hasWanted and not hasKeepOne and not hasKeepStack and not doGray and not doCommon and not doGreens then
 		if _G.AutoDelete_DebugSell and not _G._AutoDelete_DebugDelEmptyLogged then
-			print("|cffff8000[AutoDelete DEBUG]|r delete scan: no work - Delete/KeepOne lists empty AND Junk/Common/Greens quality filters not in delete mode.")
+			print("|cffff8000[AutoDelete DEBUG]|r delete scan: no work - Delete/KeepOne/KeepStack lists empty AND Junk/Common/Greens quality filters not in delete mode.")
 			_G._AutoDelete_DebugDelEmptyLogged = true
 		end
 		AutoDelete_PerfEnd("DeleteItems", _p)
@@ -2805,8 +2930,13 @@ local function DeleteItems()
 				local shouldDelete = false
 				local onDeleteList = false
 				local onKeepOneList = false
+				local onKeepStackList = false
 				local deleteSourceRule = nil
 				local keepOneUnitsToDelete = nil
+				local singleAffixExtra = false
+				local singleAffixKey = nil
+				local singleAffixKept = false
+				local singleAffixSlot = nil
 
 				-- Check KeepOne FIRST. It is explicit user intent to delete
 				-- extras while leaving exactly one unit. Runtime only accepts
@@ -2840,8 +2970,30 @@ local function DeleteItems()
 					end
 				end
 
+				-- Check KeepStack next. It preserves one bag stack for the item
+				-- and removes additional stacks. Runtime only accepts item-ID
+				-- entries for the same same-name safety reason as KeepOne.
+				if not shouldDelete and hasKeepStack and itemId and keepStackIDs[itemId] then
+					onKeepStackList = true
+					local stackCount, keepBag, keepSlot = _G.AutoDelete_GetKeepStackSlotChoice(itemId)
+					if stackCount > 1 and (bag ~= keepBag or slot ~= keepSlot) then
+						shouldDelete = true
+						deleteSourceRule = "KeepStack"
+					elseif _G.AutoDelete_RecordDecision then
+						_G.AutoDelete_RecordDecision({
+							itemName = itemName,
+							itemId = itemId,
+							action = "kept",
+							reason = "KeepStack kept one stack",
+							sourceRule = "KeepStack",
+							bag = bag,
+							slot = slot,
+						})
+					end
+				end
+
 				-- Check delete list next. If listed, user wants it gone
-				-- regardless of quest type. KeepOne is mutually exclusive
+				-- regardless of quest type. KeepOne/KeepStack are mutually exclusive
 				-- and wins here if legacy/manual data overlaps.
 				if hasWanted then
 					if itemId and wantedIDs[itemId] then onDeleteList = true end
@@ -2851,6 +3003,32 @@ local function DeleteItems()
 				if not shouldDelete and onDeleteList then
 					shouldDelete = true
 					deleteSourceRule = "Delete list"
+				end
+
+				if singleAffixPlan then
+					singleAffixSlot = singleAffixPlan.slots[bag .. ":" .. slot]
+					if singleAffixSlot then
+						singleAffixExtra = singleAffixSlot.extra == true
+						singleAffixKey = singleAffixSlot.affixKey
+						singleAffixKept = not singleAffixExtra
+						if singleAffixKept and not shouldDelete and _G.AutoDelete_RecordDecision then
+							_G.AutoDelete_RecordDecision({
+								itemName = itemName,
+								itemId = itemId,
+								action = "kept",
+								reason = "KeepOne Missing Affix protected missing-affix item",
+								sourceRule = "KeepOne Missing Affix",
+								affixName = singleAffixSlot.affixKey,
+								bag = bag,
+								slot = slot,
+							})
+						end
+					end
+				end
+
+				if singleAffixKept then
+					-- The selected keeper is protected; duplicate extras fall
+					-- through to the normal Delete/Sell rule checks.
 				elseif not shouldDelete and not isQuestItem then
 					-- Auto rules: only run when item is NOT on Delete list AND
 					-- NOT a quest item. Quest protection still applies here.
@@ -2896,8 +3074,7 @@ local function DeleteItems()
 
 				-- Execute the delete. Keep list always overrides - even Delete
 				-- list entries can't bypass it (Keep is the safety net of
-				-- last resort). Affix Protection (when toggled on, and item
-				-- meets the iLvl floor) is the second safety net. Uses
+				-- last resort). Affix Protection is the second safety net. Uses
 				-- IsWhitelistedFast against pre-built keepNames/keepIDs to
 				-- avoid the per-item re-parse of the entire whitelist text.
 				--
@@ -2907,10 +3084,16 @@ local function DeleteItems()
 				-- with diagnostic counters.
 				if shouldDelete then
 					local keepBlocked = _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
-					local affixBlocked = (not keepBlocked) and IsAffixProtected(profile, bag, slot, itemLink, "delete")
+					local missingAffixBlocked = false
+					local missingAffixState = nil
+					if not keepBlocked then
+						missingAffixBlocked, missingAffixState = _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot)
+					end
+					local affixBlocked = (not keepBlocked) and (missingAffixBlocked or IsAffixProtected(profile, bag, slot, itemLink, "delete", singleAffixSlot))
 					if not keepBlocked and not affixBlocked then
 						if _G.AutoDelete_DebugSell then
 							local reason = (deleteSourceRule == "KeepOne" and "KeepOne")
+								or (deleteSourceRule == "KeepStack" and "KeepStack")
 								or (onDeleteList and "DeleteList")
 								or "auto"
 							local questNote = (onDeleteList and isQuestItem) and " [QUEST ITEM, overridden by Delete list]" or ""
@@ -2937,6 +3120,9 @@ local function DeleteItems()
 							sourceRule = deleteSourceRule or "Delete scanner",
 							keepOne = onKeepOneList,
 							keepOneUnits = keepOneUnitsToDelete,
+							keepStack = onKeepStackList,
+							singleAffix = singleAffixExtra,
+							affixKey = singleAffixKey,
 							-- Retry counter for the drain's locked-slot
 							-- deferral. Incremented when the slot is briefly
 							-- locked (server-lag race, mid-flight BAG_UPDATE)
@@ -2982,7 +3168,9 @@ local function DeleteItems()
 								itemName = itemName,
 								itemId = itemId,
 								action = "kept",
-								reason = "Affix Protection blocked delete",
+								reason = missingAffixBlocked
+									and ("Missing affix hard stop blocked delete" .. (missingAffixState == "unknown" and " (ownership unknown)" or ""))
+									or "Affix Protection blocked delete",
 								sourceRule = deleteSourceRule or "Delete scanner",
 								bag = bag,
 								slot = slot,
@@ -2990,7 +3178,8 @@ local function DeleteItems()
 						end
 						if _G.AutoDelete_DebugSell then
 							print(string.format(
-								"|cffff8000[AutoDelete DEBUG]|r delete BLOCKED by Affix Protection: %s (id=%s)",
+								"|cffff8000[AutoDelete DEBUG]|r delete BLOCKED by %s: %s (id=%s)",
+								missingAffixBlocked and "missing affix hard stop" or "Affix Protection",
 								tostring(itemName), tostring(itemId)
 							))
 						end
@@ -3049,7 +3238,7 @@ _G.AutoDelete_QueueMaxTries = _G.AutoDelete_QueueMaxTries or 4
 -- between enqueue and drain (up to a few seconds for a 32-item queue
 -- at 90ms throttle) the user may have:
 --   * Added the item to the Keep list
---   * Toggled Affix Protection on / raised its iLvl floor
+--   * Toggled Affix Protection on / changed protected tiers
 --   * Changed quality-action filters (e.g. Greens delete -> off)
 --   * Removed the item from the Delete list
 --   * Switched to a different profile entirely
@@ -3081,8 +3270,22 @@ _G.AutoDelete_ValidateDrainEntry = function(profile, entry, currentLink)
 	-- by listText pointer so an unchanged list returns the prior tables
 	-- in O(1); a changed list rebuilds once and caches the new tables.
 	local wantedNames, wantedIDs = BuildWantedSets(profile.listText,      "delete-list")
+	local sellNames,   sellIDs   = BuildWantedSets(profile.sellListText,  "sell-list")
 	local keepNames,   keepIDs   = BuildWantedSets(profile.whitelistText, "keep-list")
 	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+	local function ValidateAffixBlock()
+		local plan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
+		local slotPlan = plan and plan.slots[entry.bag .. ":" .. entry.slot]
+		local missingBlocked, missingState = _G.AutoDelete_IsMissingAffixHardStop(profile, entry.bag, entry.slot, currentLink, slotPlan)
+		if missingBlocked then
+			return false, missingState == "unknown" and "missing-affix-unknown" or "missing-affix-blocked"
+		end
+		if IsAffixProtected(profile, entry.bag, entry.slot, currentLink, "delete", slotPlan) then
+			return false, "affix-blocked"
+		end
+		return true, nil
+	end
 
 	if entry.keepOne then
 		if not entry.id or not keepOneIDs[entry.id] then
@@ -3091,9 +3294,8 @@ _G.AutoDelete_ValidateDrainEntry = function(profile, entry, currentLink)
 		if _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, entry.id, itemName) then
 			return false, "keep-blocked"
 		end
-		if IsAffixProtected(profile, entry.bag, entry.slot, currentLink, "delete") then
-			return false, "affix-blocked"
-		end
+		local affixOk, affixReason = ValidateAffixBlock()
+		if not affixOk then return false, affixReason end
 		local _, currentCount = GetContainerItemInfo(entry.bag, entry.slot)
 		local total = _G.AutoDelete_CountBagUnitsByItemId(entry.id)
 		local action, amount = PlanKeepOneSlotAction(total, currentCount or 1)
@@ -3105,6 +3307,49 @@ _G.AutoDelete_ValidateDrainEntry = function(profile, entry, currentLink)
 		end
 		entry.keepOneAction = action
 		entry.keepOneUnits = amount
+		return true, nil
+	end
+
+	if entry.keepStack then
+		if not entry.id or not keepStackIDs[entry.id] then
+			return false, "rule-changed"
+		end
+		if _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, entry.id, itemName) then
+			return false, "keep-blocked"
+		end
+		local affixOk, affixReason = ValidateAffixBlock()
+		if not affixOk then return false, affixReason end
+		local stackCount, keepBag, keepSlot = _G.AutoDelete_GetKeepStackSlotChoice(entry.id)
+		if stackCount <= 1 or entry.bag == keepBag and entry.slot == keepSlot then
+			return false, "keepstack-complete"
+		end
+		return true, nil
+	end
+
+	if entry.singleAffix then
+		if _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, entry.id, itemName) then
+			return false, "keep-blocked"
+		end
+		local affixOk, affixReason = ValidateAffixBlock()
+		if not affixOk then return false, affixReason end
+		local onDeleteList = false
+		if entry.id and wantedIDs[entry.id] then onDeleteList = true end
+		if not onDeleteList and itemName and wantedNames[Normalize(itemName)] then
+			onDeleteList = true
+		end
+		local onSellList = false
+		if entry.id and sellIDs[entry.id] then onSellList = true end
+		if not onSellList and itemName and sellNames[Normalize(itemName)] then
+			onSellList = true
+		end
+		if onSellList and not onDeleteList then
+			return false, "rule-changed"
+		end
+		local plan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
+		local slotPlan = plan and plan.slots[entry.bag .. ":" .. entry.slot]
+		if not slotPlan or not slotPlan.extra then
+			return false, "single-affix-complete"
+		end
 		return true, nil
 	end
 
@@ -3151,11 +3396,16 @@ _G.AutoDelete_ValidateDrainEntry = function(profile, entry, currentLink)
 		return false, "keep-blocked"
 	end
 
+	local singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
+	local singleAffixSlot = singleAffixPlan and singleAffixPlan.slots[entry.bag .. ":" .. entry.slot]
+	if singleAffixSlot and not singleAffixSlot.extra and not onDeleteList then
+		return false, "single-affix-kept"
+	end
+
 	-- Step 4: NOW affix-protected? (Affix Protection toggle or iLvl
 	-- floor change between enqueue and drain).
-	if IsAffixProtected(profile, entry.bag, entry.slot, currentLink, "delete") then
-		return false, "affix-blocked"
-	end
+	local affixOk, affixReason = ValidateAffixBlock()
+	if not affixOk then return false, affixReason end
 
 	return true, nil
 end
@@ -3223,8 +3473,13 @@ function _G.AutoDelete_DrainDeleteQueue(now)
 					itemId = entry.id,
 					action = "kept",
 					reason = (reason == "keep-blocked" and "Keep list blocked queued delete")
+						or (reason == "missing-affix-blocked" and "Missing affix hard stop blocked queued delete")
+						or (reason == "missing-affix-unknown" and "Missing affix hard stop blocked queued delete (ownership unknown)")
 						or (reason == "affix-blocked" and "Affix Protection blocked queued delete")
+						or (reason == "single-affix-kept" and "KeepOne Missing Affix kept queued delete")
 						or (reason == "keepone-complete" and "KeepOne already has one unit left")
+						or (reason == "keepstack-complete" and "KeepStack already has one stack left")
+						or (reason == "single-affix-complete" and "KeepOne Missing Affix already has one item left")
 						or "Delete rule changed before queued delete executed",
 					sourceRule = entry.sourceRule or "Delete scanner",
 					bag = entry.bag,
@@ -3265,7 +3520,10 @@ function _G.AutoDelete_DrainDeleteQueue(now)
 				itemName = entry.name,
 				itemId = entry.id,
 				action = "deleted",
-				reason = entry.keepOne and "KeepOne extra unit(s) deleted" or "Queued delete executed",
+				reason = entry.keepOne and "KeepOne extra unit(s) deleted"
+					or (entry.keepStack and "KeepStack extra stack deleted")
+					or (entry.singleAffix and "KeepOne Missing Affix extra item deleted")
+					or "Queued delete executed",
 				sourceRule = entry.sourceRule or "Delete scanner",
 				bag = entry.bag,
 				slot = entry.slot,
@@ -3374,15 +3632,23 @@ function AutoDelete_HasPendingDeleteItems(profile)
 	local hasWanted = next(wantedNames) or next(wantedIDs)
 	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
 	local hasKeepOne = next(keepOneIDs) ~= nil
+	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+	local hasKeepStack = next(keepStackIDs) ~= nil
+	local hasSingleAffixCleanup = profile.keepSingleMissingAffix == true
 	-- Bail early if there's nothing to look for. Saves the full bag walk
 	-- in the common case of a brand-new profile with no rules enabled.
-	if not (hasWanted or hasKeepOne or doGray or doCommon) then return false end
+	if not (hasWanted or hasKeepOne or hasKeepStack or doGray or doCommon) then return false end
 
 	-- Pre-built Keep-list sets so the inner loop's up-to-3 IsWhitelisted
 	-- calls per slot become 3 hash lookups instead of 3 full whitelist
 	-- re-parses. Same optimization as DeleteItems' hot path. Shares the
 	-- "keep-list" cache slot with DeleteItems / SellItems.
 	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+
+	local affixPlan = nil
+	if hasSingleAffixCleanup then
+		affixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
+	end
 
 	for bag = 0, 4 do
 		for slot = 1, (GetContainerNumSlots(bag) or 0) do
@@ -3391,12 +3657,23 @@ function AutoDelete_HasPendingDeleteItems(profile)
 				local itemName, _, itemQuality, _, _, itemClass, _, _, equipSlot = GetItemInfo(link)
 				local itemId = GetItemIDFromLink(link)
 				local isQuestItem = (itemClass == "Quest")
+				local singleAffixSlot = affixPlan and affixPlan.slots[bag .. ":" .. slot]
+				local singleAffixKept = singleAffixSlot and not singleAffixSlot.extra
 
 				if hasKeepOne and itemId and keepOneIDs[itemId]
 					and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
 					and not IsAffixProtected(profile, bag, slot, link, "delete")
 					and _G.AutoDelete_CountBagUnitsByItemId(itemId) > 1 then
 					return true
+				end
+
+				if hasKeepStack and itemId and keepStackIDs[itemId]
+					and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
+					and not IsAffixProtected(profile, bag, slot, link, "delete") then
+					local stackCount, keepBag, keepSlot = _G.AutoDelete_GetKeepStackSlotChoice(itemId)
+					if stackCount > 1 and (bag ~= keepBag or slot ~= keepSlot) then
+						return true
+					end
 				end
 
 				-- (1) Explicit Delete list. Wins over quest protection.
@@ -3416,12 +3693,14 @@ function AutoDelete_HasPendingDeleteItems(profile)
 				if not isQuestItem then
 					if doGray and itemQuality and itemQuality == 0
 						and not IsCosmeticSlot(link)
+						and not singleAffixKept
 						and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then
 						return true
 					end
 					if doCommon and itemQuality and itemQuality == 1
 						and not IsCosmeticSlot(link)
 						and equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG"
+						and not singleAffixKept
 						and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then
 						return true
 					end
@@ -3530,7 +3809,7 @@ _G.AutoDelete_TooltipCache = _G.AutoDelete_TooltipCache or {
 -- so we drop the affected sub-cache here when the version doesn't
 -- match. Bump _CACHE_VERSION whenever parsing semantics change.
 do
-	local _CACHE_VERSION = 5
+	local _CACHE_VERSION = 6
 	if _G.AutoDelete_TooltipCache._cacheVersion ~= _CACHE_VERSION then
 		_G.AutoDelete_TooltipCache.affix     = {}
 		_G.AutoDelete_TooltipCache.soulbound = {}
@@ -3606,20 +3885,24 @@ function AutoDelete_ScanBagItemMarkers(bag, slot, link)
 	end
 	boeTip:Hide()
 	-- Determine affix tier. The @affix@ tooltip markers tell us an item
-	-- HAS an affix, but the actual tier (I-IV) is encoded as a trailing
-	-- Roman numeral on the item NAME, not in the tooltip body. Examples:
-	-- "Belt of Draconic Runes of Iron Will IV", "Hydra-fang Necklace of
-	-- Cold II". We parse the trailing Roman from the name via
-	-- AutoDelete_ExtractAffixLevel; if the marker is present but the
-	-- name has no parseable suffix, default to tier 1 so the dot still
-	-- renders (better to over-show than silently hide).
+	-- HAS an affix, but the actual tier (I-V) is encoded as a trailing
+	-- Roman numeral on the item NAME. If the marker is hidden/missing,
+	-- fall back to PE's known affix names so learned affixes still obey
+	-- No Auto-Sell tier protection.
 	local affixLevel = false
+	local itemName = GetItemInfo(link)
 	if hasAffixMarker then
-		local itemName = GetItemInfo(link)
 		affixLevel = AutoDelete_ExtractAffixLevel(itemName) or 1
 		if _G.AutoDelete_DebugSell then
 			print(string.format(
 				"|cffff8000[AutoDelete DEBUG]|r affix-marker found: name='%s' -> tier=%d",
+				tostring(itemName), affixLevel))
+		end
+	else
+		affixLevel = AutoDelete_ExtractKnownAffixLevel(itemName) or false
+		if affixLevel and _G.AutoDelete_DebugSell then
+			print(string.format(
+				"|cffff8000[AutoDelete DEBUG]|r affix-name fallback: name='%s' -> tier=%d",
 				tostring(itemName), affixLevel))
 		end
 	end
@@ -3799,6 +4082,16 @@ function AutoDelete_ExtractAffixLevel(itemName)
 	return AFFIX_ROMAN_TO_NUM[roman]
 end
 
+function AutoDelete_ExtractKnownAffixLevel(itemName)
+	local tier = AutoDelete_ExtractAffixLevel(itemName)
+	if not tier then return nil end
+	if _G.AutoDelete_GetAffixKeyForItemName
+		and _G.AutoDelete_GetAffixKeyForItemName(itemName) then
+		return tier
+	end
+	return nil
+end
+
 -- ============================================================================
 -- Affix Collection Mode
 -- ============================================================================
@@ -3806,7 +4099,7 @@ end
 -- "you haven't learned this yet" indicator rather than a "this item has
 -- an affix" indicator. Owned-at-this-tier items pass through normal
 -- sell/delete rules so the player can clear duplicates; missing-affix
--- items get a single attention-gold dot AND keep their affix protection.
+-- items get the chosen missing-affix color AND keep their affix protection.
 --
 -- Data source: PE's ExtractionService.learnedAffixes global (populated
 -- by PE's SEND_LEARNED_AFFIXES server packet). Each entry has fields
@@ -3823,6 +4116,7 @@ end
 -- cap (we've already had to globalize a lot for this reason).
 _G.AutoDelete_OwnedAffixes = _G.AutoDelete_OwnedAffixes or {}
 _G.AutoDelete_KnownAffixes = _G.AutoDelete_KnownAffixes or {}
+_G.AutoDelete_OwnedAffixCount = _G.AutoDelete_OwnedAffixCount or 0
 
 -- Mirror of PE's AFFIX_ALIASES table at extraction.lua:129. PE's
 -- internal spell names don't always match the names that appear in
@@ -3830,7 +4124,7 @@ _G.AutoDelete_KnownAffixes = _G.AutoDelete_KnownAffixes or {}
 -- IV"; spell "Cold IV" -> item suffix "Precision IV"). PE handles
 -- this via GetAffixSearchNames at extraction.lua:184; we must do the
 -- same or our suffix-match check returns false on every aliased
--- affix and draws a "missing" gold dot on items the player actually
+-- affix and draws a "missing" dot on items the player actually
 -- owns.
 --
 -- KEEP THIS TABLE IN SYNC with PE's extraction.lua AFFIX_ALIASES.
@@ -3891,6 +4185,7 @@ function AutoDelete_RefreshOwnedAffixes()
 	end
 	_G.AutoDelete_OwnedAffixes = map
 	_G.AutoDelete_KnownAffixes = known
+	_G.AutoDelete_OwnedAffixCount = count
 	if _G.AutoDelete_DebugSell then
 		print(string.format(
 			"|cffff8000[AutoDelete DEBUG]|r owned-affix map rebuilt: %d learned affixes mirrored (alias expansion included).",
@@ -3930,10 +4225,10 @@ function AutoDelete_InstallPEAffixHook()
 	hooksecurefunc(_G.ExtractionUI, "OnLearnedAffixesReceived", function()
 		-- PE just rebuilt learnedAffixes. Mirror it now.
 		AutoDelete_RefreshOwnedAffixes()
-		-- Missing-affix gold is visible even when collection mode is off,
+		-- Missing-affix color is visible even when collection mode is off,
 		-- so any ownership refresh can change dots: recognized missing
-		-- affixes turn gold, newly learned affixes return to tier color or
-		-- hide if Only Missing is on.
+		-- affixes turn to that color, newly learned affixes return to tier color or
+		-- hide if Show/Keep Missing Affix is on.
 		if cachedProfile and cachedProfile.showAffixDot ~= false then
 			if _G.AutoDelete_RefreshAffixDots then
 				_G.AutoDelete_RefreshAffixDots()
@@ -3977,11 +4272,44 @@ function AutoDelete_IsAffixOwnedByItemName(itemName)
 	return false
 end
 
--- AFFIX_GOLD is the single attention color used by the dot when
--- affixCollectionMode is ON and the item's affix is missing from the
--- player's owned set. WoW gold (#FFD200), the same shade used for
--- legendary item-name links so it reads as "noteworthy".
-local AFFIX_GOLD = { 1.00, 0.82, 0.00 }
+_G.AutoDelete_MissingAffixColorPresets = {
+	red    = { 1.00, 0.231, 0.255 },
+	gold   = { 1.00, 0.82, 0.00 },
+	mage   = { 0.247, 0.780, 0.922 },
+	green  = { 0.20, 1.00, 0.20 },
+	purple = { 0.64, 0.21, 0.93 },
+}
+_G.AutoDelete_MissingAffixColorLabels = {
+	red    = "bright red",
+	gold   = "gold",
+	mage   = "mage blue",
+	green  = "green",
+	purple = "purple",
+	custom = "custom color",
+}
+_G.AutoDelete_MissingAffixColorScratch = _G.AutoDelete_MissingAffixColorScratch or { 1.00, 0.231, 0.255 }
+function _G.AutoDelete_GetMissingAffixColorKey(profile)
+	local key = profile and profile.missingAffixColor or DEFAULT_PROFILE.missingAffixColor
+	if not _G.AutoDelete_MissingAffixColorPresets[key]
+		and key ~= "custom" then
+		key = DEFAULT_PROFILE.missingAffixColor
+	end
+	return key
+end
+function _G.AutoDelete_GetMissingAffixDotColor(profile)
+	if profile and type(profile.missingAffixColorR) == "number"
+		and type(profile.missingAffixColorG) == "number"
+		and type(profile.missingAffixColorB) == "number" then
+		_G.AutoDelete_MissingAffixColorScratch[1] = profile.missingAffixColorR
+		_G.AutoDelete_MissingAffixColorScratch[2] = profile.missingAffixColorG
+		_G.AutoDelete_MissingAffixColorScratch[3] = profile.missingAffixColorB
+		return _G.AutoDelete_MissingAffixColorScratch
+	end
+	return _G.AutoDelete_MissingAffixColorPresets[_G.AutoDelete_GetMissingAffixColorKey(profile)]
+end
+function _G.AutoDelete_GetMissingAffixColorLabel(profile)
+	return _G.AutoDelete_MissingAffixColorLabels[_G.AutoDelete_GetMissingAffixColorKey(profile)] or "bright red"
+end
 
 local function HasAffix(bag, slot)
 	-- Phase D cache: @affix@ marker is server-attached to a specific item
@@ -4033,9 +4361,17 @@ local function HasAffix(bag, slot)
 				bag, slot, n, tostring(itemName), foundLevel,
 				foundLine and (" | " .. foundLine) or ""))
 		else
-			print(string.format(
-				"|cffff8000[AutoDelete DEBUG]|r HasAffix bag=%d slot=%d lines=%d (no @affix@ marker)",
-				bag, slot, n))
+			local itemName = link and GetItemInfo(link) or nil
+			foundLevel = AutoDelete_ExtractKnownAffixLevel(itemName) or false
+			if foundLevel then
+				print(string.format(
+					"|cffff8000[AutoDelete DEBUG]|r HasAffix bag=%d slot=%d lines=%d name='%s' level=%d (known-affix name fallback)",
+					bag, slot, n, tostring(itemName), foundLevel))
+			else
+				print(string.format(
+					"|cffff8000[AutoDelete DEBUG]|r HasAffix bag=%d slot=%d lines=%d (no @affix@ marker or known affix suffix)",
+					bag, slot, n))
+			end
 		end
 		return foundLevel
 	end
@@ -4087,14 +4423,15 @@ local function HasAffixByLink(link)
 		end
 	end
 	boeTip:Hide()
+	local itemName = GetItemInfo(link)
 	if not hasAffixMarker then
-		_G.AutoDelete_TooltipCache.affix[link] = false
-		return false
+		local fallbackLevel = AutoDelete_ExtractKnownAffixLevel(itemName) or false
+		_G.AutoDelete_TooltipCache.affix[link] = fallbackLevel
+		return fallbackLevel
 	end
 	-- Marker present: resolve the tier from the item name. Default to
 	-- tier 1 if the name has no trailing Roman numeral (still better
 	-- than hiding the dot entirely).
-	local itemName = GetItemInfo(link)
 	local level = AutoDelete_ExtractAffixLevel(itemName) or 1
 	_G.AutoDelete_TooltipCache.affix[link] = level
 	return level
@@ -4152,7 +4489,7 @@ _G.AutoDelete_AuditAffixOnLists = AuditAffixOnLists
 
 -- Scan + display the player's learned and unlearned affixes. Two jobs in one call:
 --   1. Refresh the owned-affix mirror from PE's current data (same call
---      the Only missing affixes toggle makes internally) so we're not displaying stale
+--      Show/Keep Missing Affix makes internally) so we're not displaying stale
 --      info if PE's table changed since the last hook fire.
 --   2. Build tier-grouped roster strings and hand them off to the
 --      Learned Affixes popup (lives in Options.lua) for display.
@@ -4433,7 +4770,7 @@ function AutoDelete_ProcessAffixScanQueue(now)
 			-- way the live ContainerFrame_Update / B:UpdateSlot hooks do.
 			-- Previously we drew tier-color dots here unconditionally,
 			-- which produced wrong dots on owned items (should be hidden)
-			-- and tier-color instead of gold on missing items, with the
+			-- and tier-color instead of the selected color on missing items, with the
 			-- per-button link-cache short-circuit then locking the wrong
 			-- dot in until the next item move / version bump.
 			local effLevel, effColor = _G.AutoDelete_DecideDot(
@@ -4510,8 +4847,8 @@ function AutoDelete_SetButtonAffixDot(button, affixLevel, colorOverride)
 	local dot = button._autoDeleteAffixDot
 	local back = button._autoDeleteAffixBacking
 	if affixLevel then
-		-- Color comes from colorOverride if provided (collection-mode
-		-- "missing affix" path uses AFFIX_GOLD); otherwise pick the tier
+		-- Color comes from colorOverride if provided (missing-affix
+		-- path uses the profile color); otherwise pick the tier
 		-- color. Fall back to level 1 (white) for unrecognized tiers.
 		local color = colorOverride
 			or AFFIX_DOT_COLORS[affixLevel]
@@ -4585,9 +4922,9 @@ local affixDotVersion = 0
 --   no marker / showAffixDot off       -> (false, nil)  hide
 --   PE data unknown                    -> (tier, nil)   tier color
 --   collection OFF, affix is owned     -> (tier, nil)   tier color
---   collection OFF, affix is missing   -> (tier, GOLD)  gold "you need this"
+--   collection OFF, affix is missing   -> (tier, color) selected missing color
 --   collection ON, affix is owned      -> (false, nil)  hide (dup)
---   collection ON, affix is missing    -> (tier, GOLD)  gold "you need this"
+--   collection ON, affix is missing    -> (tier, color) selected missing color
 --
 -- Globalized so the deferred-scan queue (ProcessAffixScanQueue, declared
 -- earlier in the file) can call it without a forward-reference dance.
@@ -4604,7 +4941,7 @@ _G.AutoDelete_DecideDot = function(link, bag, slot, button)
 	if not tier then return false, nil end
 
 	-- If PE ownership data is available, missing affixes should always
-	-- use the gold attention dot. "Only missing affixes" only changes
+	-- use the selected attention dot. Show/Keep Missing Affix only changes
 	-- what happens to owned affixes: hide them instead of tier-coloring
 	-- them. If PE data is not ready yet, keep the tier color so dots do
 	-- not silently disappear during PE's startup window.
@@ -4621,8 +4958,112 @@ _G.AutoDelete_DecideDot = function(link, bag, slot, button)
 		end
 		return tier, nil
 	end
-	-- Missing affix -> gold "attention" dot regardless of tier.
-	return tier, AFFIX_GOLD
+	-- Missing affix -> selected attention dot regardless of tier.
+	return tier, _G.AutoDelete_GetMissingAffixDotColor(cachedProfile)
+end
+
+_G.AutoDelete_GetAffixKeyForItemName = function(itemName)
+	if not itemName or not _G.ExtractionService or not _G.ExtractionService.learnedAffixes then
+		return nil
+	end
+	if not next(_G.AutoDelete_KnownAffixes or {}) and AutoDelete_RefreshOwnedAffixes then
+		AutoDelete_RefreshOwnedAffixes()
+	end
+	local lower = Normalize(itemName)
+	local best = nil
+	for affixName in pairs(_G.AutoDelete_KnownAffixes or {}) do
+		local suffix = " of " .. affixName
+		if #lower >= #suffix and lower:sub(-#suffix) == suffix then
+			if not best or #affixName > #best then
+				best = affixName
+			end
+		end
+	end
+	return best
+end
+
+_G.AutoDelete_IsSingleAffixSlot = function(itemClass, equipSlot)
+	if not equipSlot or not GEAR_SLOTS[equipSlot] then return false end
+	return itemClass == "Armor" or itemClass == "Weapon"
+end
+
+_G.AutoDelete_GetMissingAffixKeyForSlot = function(profile, bag, slot, link, itemName, itemClass, equipSlot)
+	if not profile or profile.keepSingleMissingAffix ~= true then return nil end
+	if not _G.AutoDelete_IsSingleAffixSlot(itemClass, equipSlot) then return nil end
+	if not HasAffix(bag, slot) then return nil end
+	local owned = AutoDelete_IsAffixOwnedByItemName(itemName)
+	if owned ~= false then return nil end
+	return _G.AutoDelete_GetAffixKeyForItemName(itemName)
+end
+
+_G.AutoDelete_BuildSingleAffixPlan = function(profile, keepIDs, keepNames)
+	if not profile or profile.keepSingleMissingAffix ~= true then return nil end
+	local byAffix = {}
+	local slots = {}
+	local hasExtras = false
+
+	for bag = 0, (NUM_BAG_SLOTS or 4) do
+		for slot = 1, (GetContainerNumSlots(bag) or 0) do
+			local _, _, locked, _, _, _, link = GetContainerItemInfo(bag, slot)
+			if link and not locked then
+				local name, _, quality, ilvl, _, itemClass, _, _, equipSlot = GetItemInfo(link)
+				local key = _G.AutoDelete_GetMissingAffixKeyForSlot(profile, bag, slot, link, name, itemClass, equipSlot)
+				if key then
+					local id = GetItemIDFromLink(link)
+					local onKeep = _G.AutoDelete_IsWhitelistedFast(keepIDs or {}, keepNames or {}, id, name)
+					local rec = {
+						bag = bag,
+						slot = slot,
+						id = id,
+						name = name,
+						quality = quality or 0,
+						ilvl = ilvl or 0,
+						affixKey = key,
+						onKeep = onKeep,
+					}
+					byAffix[key] = byAffix[key] or { items = {}, keepCount = 0 }
+					table.insert(byAffix[key].items, rec)
+					if onKeep then byAffix[key].keepCount = byAffix[key].keepCount + 1 end
+				end
+			end
+		end
+	end
+
+	for affixKey, group in pairs(byAffix) do
+		local items = group.items
+		if #items >= 1 then
+			local keeper = nil
+			if group.keepCount == 0 then
+				for _, rec in ipairs(items) do
+					if not keeper
+						or rec.ilvl > keeper.ilvl
+						or (rec.ilvl == keeper.ilvl and rec.quality > keeper.quality)
+						or (rec.ilvl == keeper.ilvl and rec.quality == keeper.quality
+							and (rec.bag < keeper.bag or (rec.bag == keeper.bag and rec.slot < keeper.slot))) then
+						keeper = rec
+					end
+				end
+			end
+			for _, rec in ipairs(items) do
+				local slotKey = rec.bag .. ":" .. rec.slot
+				local extra = false
+				if group.keepCount > 0 then
+					extra = not rec.onKeep
+				else
+					extra = rec ~= keeper
+				end
+				slots[slotKey] = {
+					extra = extra,
+					affixKey = affixKey,
+					count = #items,
+					keepCount = group.keepCount,
+				}
+				if extra then hasExtras = true end
+			end
+		end
+	end
+
+	return { slots = slots, hasExtras = hasExtras }
 end
 
 local function UpdateAffixDotForFrame(frame)
@@ -4793,60 +5234,51 @@ local function InstallElvUIAffixDotHook()
 	end)
 end
 
+_G.AutoDelete_AffixTierProtectionFields = {
+	[1] = "protectAffixTier1",
+	[2] = "protectAffixTier2",
+	[3] = "protectAffixTier3",
+	[4] = "protectAffixTier4",
+	[5] = "protectAffixTier5",
+}
+
+_G.AutoDelete_HasAnyAffixTierProtection = function(profile)
+	if not profile then return false end
+	for _, field in pairs(_G.AutoDelete_AffixTierProtectionFields) do
+		if profile[field] == true then return true end
+	end
+	return false
+end
+
+_G.AutoDelete_IsMissingAffixHardStop = function(profile, bag, slot, itemLink, singleAffixSlot)
+	if not profile or not (profile.affixCollectionMode or profile.keepSingleMissingAffix) then
+		return false, nil
+	end
+	if singleAffixSlot and singleAffixSlot.extra then return false, nil end
+	if not HasAffix(bag, slot) then return false, nil end
+	local itemName = GetItemInfo(itemLink)
+	local owned = AutoDelete_IsAffixOwnedByItemName(itemName)
+	if owned == false then return true, "missing" end
+	if owned == nil then return true, "unknown" end
+	return false, nil
+end
+
 -- Combined check used by the delete scanner and the sell loop. Returns true
--- if the item should be protected from the given action ("delete" or "sell")
--- because:
---   1. The user has the matching protect-affix toggle on, AND
---   2. The item's iLvl is at or above affixIlvlMin (0 = no floor), AND
---   3. The item actually carries the @affix@ marker.
--- Assigned (not `local function`) because the name was forward-declared
--- above DeleteItems so the scanner can capture it as an upvalue.
-IsAffixProtected = function(profile, bag, slot, itemLink, action)
+-- when the item should be protected from destructive rules. Checked tier
+-- protection is absolute. Missing-affix hard stop blocks Delete/Sell when
+-- Show/Keep Missing Affix or KeepOne Missing Affix is on; KeepOne Missing Affix extras
+-- bypass only that hard stop, not checked tier protection.
+IsAffixProtected = function(profile, bag, slot, itemLink, action, singleAffixSlot)
 	if action ~= "delete" and action ~= "sell" then return false end
-	-- (Fix C, 2026-05-23) Early exit when NO affix gate is active for the
-	-- action. Without this we still entered the collection-mode HasAffix
-	-- tooltip-scan branch below even when neither collection mode nor the
-	-- per-action protection toggle was on. Per-item in the DeleteItems
-	-- hot loop, that turned every delete-eligible item into a tooltip scan
-	-- the user couldn't disable. The branches below preserve the original
-	-- behavior when ANY gate is active; this just skips the work when none
-	-- is. The visible delete-loop hiccups the user reported in 2026-05-23
-	-- traced back to here.
-	local protectThisAction = (action == "delete" and profile.protectAffixFromDelete)
-		or (action == "sell" and profile.protectAffixFromSell)
-	if not profile.affixCollectionMode and not protectThisAction then
-		return false
+
+	if _G.AutoDelete_HasAnyAffixTierProtection(profile) then
+		local tier = HasAffix(bag, slot)
+		local field = tier and _G.AutoDelete_AffixTierProtectionFields[tonumber(tier)]
+		if field and profile[field] == true then return true end
 	end
-	-- Collection-mode hard-protect: when collection mode is ON, items
-	-- carrying an UNKNOWN affix are NEVER auto-sold or auto-deleted,
-	-- regardless of the per-action toggles AND regardless of the iLvl
-	-- floor. Losing the only copy of an un-learned affix defeats the
-	-- whole point of collection mode -- the user explicitly turned this
-	-- on to COLLECT, so we err on the side of preservation. Owned-affix
-	-- items (`owned == true`) fall through to the per-action gating
-	-- below so duplicates can still be cleared by normal rules. PE data
-	-- unavailable (`owned == nil`) also gets protected for the same
-	-- safety reason as before.
-	if profile.affixCollectionMode and HasAffix(bag, slot) then
-		local itemName = GetItemInfo(itemLink)
-		local owned = AutoDelete_IsAffixOwnedByItemName(itemName)
-		if owned ~= true then return true end
-		-- Owned -> drop through to standard per-action gating.
-	end
-	-- Standard per-action gating (the original "No Auto-Sell" /
-	-- "No Auto-Delete" toggles + iLvl floor).
-	if action == "delete" then
-		if not profile.protectAffixFromDelete then return false end
-	else  -- "sell"
-		if not profile.protectAffixFromSell then return false end
-	end
-	local threshold = tonumber(profile.affixIlvlMin) or 0
-	if threshold > 0 then
-		local _, _, _, ilvl = GetItemInfo(itemLink)
-		if not ilvl or ilvl < threshold then return false end
-	end
-	if not HasAffix(bag, slot) then return false end
-	return true
+
+	if _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot) then return true end
+	return false
 end
 
 -- Copper → "Xg Ys Zc" string. Defined before functions that use it.
@@ -5739,6 +6171,7 @@ local function SellItems(silent)
 	-- old IsWhitelisted re-parse was the dominant cost in scan loops.
 	-- "keep-list" cache key is shared with DeleteItems / HasPendingDeleteItems.
 	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	local singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
 
 	local batchCount = 0
 
@@ -5796,10 +6229,11 @@ local function SellItems(silent)
 					local itemId = GetItemIDFromLink(itemLink)
 
 					-- Step 1: Keep list short-circuits the whole chain.
-					-- Step 1b: Affix Protection (when toggled on, and item meets
-					-- the iLvl floor) also short-circuits before any sell rule.
+					-- Step 1b: Affix Protection also short-circuits before any sell rule.
 					local isOnKeepList = _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, name)
-					local isAffixProtected = IsAffixProtected(profile, bag, slot, itemLink, "sell")
+					local singleAffixSlot = singleAffixPlan and singleAffixPlan.slots[bag .. ":" .. slot]
+					local missingAffixBlocked, missingAffixState = _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot)
+					local isAffixProtected = missingAffixBlocked or IsAffixProtected(profile, bag, slot, itemLink, "sell", singleAffixSlot)
 
 					if not isOnKeepList and not isAffixProtected then
 
@@ -5899,7 +6333,10 @@ local function SellItems(silent)
 								itemName = name,
 								itemId = itemId,
 								action = "kept",
-								reason = isOnKeepList and "Keep list blocked sell" or "Affix Protection blocked sell",
+								reason = isOnKeepList and "Keep list blocked sell"
+									or (missingAffixBlocked
+										and ("Missing affix hard stop blocked sell" .. (missingAffixState == "unknown" and " (ownership unknown)" or "")))
+									or "Affix Protection blocked sell",
 								sourceRule = blockedSourceRule,
 								bag = bag,
 								slot = slot,
@@ -6037,9 +6474,9 @@ local function CreateElvUIBagButton()
 
 	btn:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT")
-		GameTooltip:AddLine("AutoDelete", 0, 1, 0)
+		GameTooltip:AddLine("AutoDelete", 0.247, 0.780, 0.922)
 		GameTooltip:AddLine("Drop item to add to delete list.", 1, 1, 1)
-		GameTooltip:AddLine("Right-click to open settings.", 0.7, 0.7, 0.7)
+		GameTooltip:AddLine("Right-click to open settings.", 1, 1, 1)
 		GameTooltip:Show()
 		btn:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
 		icon:SetVertexColor(1, 0.2, 0.2)
@@ -6086,10 +6523,10 @@ local function CreateElvUIBagButton()
 
 	sellBtn:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT")
-		GameTooltip:AddLine("Sell Items", 0.12, 1, 0)
+		GameTooltip:AddLine("Sell Items", 0.247, 0.780, 0.922)
 		GameTooltip:AddLine("Click to sell at vendor.", 1, 1, 1)
-		GameTooltip:AddLine("Drop item to add to sell list.", 0.7, 0.7, 0.7)
-		GameTooltip:AddLine("Right-click to open settings.", 0.7, 0.7, 0.7)
+		GameTooltip:AddLine("Drop item to add to sell list.", 1, 1, 1)
+		GameTooltip:AddLine("Right-click to open settings.", 1, 1, 1)
 		if not MerchantFrame or not MerchantFrame:IsShown() then
 			GameTooltip:AddLine("Not at a vendor.", 1, 0.3, 0.3)
 		end
@@ -6143,10 +6580,10 @@ local function CreateElvUIBagButton()
 
 	keepBtn:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT")
-		GameTooltip:AddLine("Keep List", 0.4, 0.7, 1)
+		GameTooltip:AddLine("Keep List", 0.247, 0.780, 0.922)
 		GameTooltip:AddLine("Drop item to add to keep list.", 1, 1, 1)
-		GameTooltip:AddLine("Right-click to open settings.", 0.7, 0.7, 0.7)
-		GameTooltip:AddLine("Items on this list are never auto-sold or auto-deleted.", 0.55, 0.55, 0.55)
+		GameTooltip:AddLine("Right-click to open settings.", 1, 1, 1)
+		GameTooltip:AddLine("Items on this list are never auto-sold or auto-deleted.", 1, 1, 1)
 		GameTooltip:Show()
 		keepBtn:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
 		keepIcon:SetVertexColor(0.6, 0.85, 1)
@@ -6177,6 +6614,54 @@ end
 -- (do NOT use `local function` here - that would shadow the forward-declared
 -- local that all the closures captured).
 --
+-- ElvUI shows a coin marker on junk items when E.db.bags.junkIcon is on.
+-- If AutoDelete is set to delete junk, that marker becomes misleading: those
+-- items will be destroyed, not sold. Suppress only ElvUI's native setting and
+-- restore the user's prior value once Junk is no longer in Delete mode.
+local function RefreshElvUIJunkIconSuppression(profile)
+	local E = _G.ElvUI and _G.ElvUI[1]
+	local bags = E and E.db and E.db.bags
+	if not bags then return end
+	local db = _G.AutoDeleteDB or {}
+	_G.AutoDeleteDB = db
+	local state = _G.AutoDelete_ElvUIJunkIconState or { active = false, restore = nil }
+	_G.AutoDelete_ElvUIJunkIconState = state
+	local shouldSuppress = profile and profile.qualityActionJunk == "delete"
+	local changed = false
+
+	if shouldSuppress then
+		if not state.active then
+			if db.elvuiJunkIconRestore == nil then
+				db.elvuiJunkIconRestore = bags.junkIcon and true or false
+			end
+			state.restore = db.elvuiJunkIconRestore
+			state.active = true
+		end
+		if bags.junkIcon ~= false then
+			bags.junkIcon = false
+			changed = true
+		end
+	elseif state.active or db.elvuiJunkIconRestore ~= nil then
+		local restore = state.restore
+		if restore == nil then restore = db.elvuiJunkIconRestore end
+		if restore ~= nil and bags.junkIcon ~= restore then
+			bags.junkIcon = restore
+			changed = true
+		end
+		state.active = false
+		state.restore = nil
+		db.elvuiJunkIconRestore = nil
+	end
+
+	if changed then
+		pcall(function()
+			local B = E.GetModule and E:GetModule("Bags", true)
+			if B and B.UpdateAllBagSlots then B:UpdateAllBagSlots() end
+		end)
+	end
+end
+_G.AutoDelete_RefreshElvUIJunkIconSuppression = RefreshElvUIJunkIconSuppression
+
 -- The `scanner` Frame is the single event hub for the addon. Its OnEvent
 -- handler lives further down (after Welcome Popup is defined, because that
 -- handler calls ShowWelcomePopup). Its OnUpdate handler is at the very
@@ -6187,6 +6672,7 @@ end
 RefreshCachedProfile = function()
 	local db = GetDB()
 	cachedProfile = GetActiveProfile(db)
+	RefreshElvUIJunkIconSuppression(cachedProfile)
 end
 _G.AutoDelete_RefreshCachedProfile = RefreshCachedProfile
 -- Read-only accessor for the cached profile. Used by the Process Bags
@@ -7668,25 +8154,40 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 	local sellNames, sellIDs
 	local keepNames, keepIDs
 	local keepOneIDs
+	local keepStackIDs
+	local singleAffixPlan
 	if ruleCtx then
 		deleteNames, deleteIDs = ruleCtx.deleteNames, ruleCtx.deleteIDs
 		sellNames, sellIDs = ruleCtx.sellNames, ruleCtx.sellIDs
 		keepNames, keepIDs = ruleCtx.keepNames, ruleCtx.keepIDs
 		keepOneIDs = ruleCtx.keepOneIDs
+		keepStackIDs = ruleCtx.keepStackIDs
+		singleAffixPlan = ruleCtx.singleAffixPlan
 	else
 		deleteNames, deleteIDs = BuildWantedSets(profile.listText, "delete-list")
 		sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
 		keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
 		keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+		keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+		singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
 	end
 	local onKeep = _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, id, name)
 	local onKeepOne = id and keepOneIDs and keepOneIDs[id]
+	local onKeepStack = id and keepStackIDs and keepStackIDs[id]
+	local onSell = (id and sellIDs[id]) or (name and sellNames[Normalize(name)])
+	local missingAffixBlocked, missingAffixState = _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, link)
+	local missingAffixReason = "Missing affix hard stop"
+	if missingAffixState == "unknown" then
+		missingAffixReason = missingAffixReason .. " (ownership unknown)"
+	end
 
 	if onKeepOne then
 		local _, count = GetContainerItemInfo(bag, slot)
 		local seen = ruleCtx and ruleCtx.keepOneSeenUnits and (ruleCtx.keepOneSeenUnits[id] or 0) or 0
 		if onKeep then
 			return "kept", "Keep list blocked KeepOne", "KeepOne", name
+		elseif missingAffixBlocked then
+			return "kept", missingAffixReason .. " blocked KeepOne", "KeepOne", name
 		elseif IsAffixProtected(profile, bag, slot, link, "delete") then
 			return "kept", "Affix Protection blocked KeepOne", "KeepOne", name
 		elseif seen >= 1 or (count or 1) > 1 then
@@ -7696,6 +8197,33 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 			if ruleCtx and ruleCtx.keepOneSeenUnits then ruleCtx.keepOneSeenUnits[id] = seen + (count or 1) end
 			return "kept", "KeepOne kept final unit", "KeepOne", name
 		end
+	end
+
+	if onKeepStack then
+		if onKeep then
+			return "kept", "Keep list blocked KeepStack", "KeepStack", name
+		elseif missingAffixBlocked then
+			return "kept", missingAffixReason .. " blocked KeepStack", "KeepStack", name
+		elseif IsAffixProtected(profile, bag, slot, link, "delete") then
+			return "kept", "Affix Protection blocked KeepStack", "KeepStack", name
+		end
+		local stackCount, keepBag, keepSlot = _G.AutoDelete_GetKeepStackSlotChoice(id)
+		if stackCount > 1 and (bag ~= keepBag or slot ~= keepSlot) then
+			return "delete", "KeepStack extra stack", "KeepStack", name
+		end
+		return "kept", "KeepStack kept one stack", "KeepStack", name
+	end
+
+	local singleAffixSlot = singleAffixPlan and singleAffixPlan.slots[bag .. ":" .. slot]
+	if singleAffixSlot then
+		missingAffixBlocked, missingAffixState = _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, link, singleAffixSlot)
+		missingAffixReason = "Missing affix hard stop"
+		if missingAffixState == "unknown" then
+			missingAffixReason = missingAffixReason .. " (ownership unknown)"
+		end
+	end
+	if singleAffixSlot and not singleAffixSlot.extra then
+		return "kept", "KeepOne Missing Affix kept one missing-affix item", "KeepOne Missing Affix", name
 	end
 
 	local deleteRule = nil
@@ -7716,7 +8244,9 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 	if deleteRule then
 		if onKeep then
 			return "kept", "Keep list blocked delete", deleteRule, name
-		elseif IsAffixProtected(profile, bag, slot, link, "delete") then
+		elseif missingAffixBlocked then
+			return "kept", missingAffixReason .. " blocked delete", deleteRule, name
+		elseif IsAffixProtected(profile, bag, slot, link, "delete", singleAffixSlot) then
 			return "kept", "Affix Protection blocked delete", deleteRule, name
 		else
 			return "delete", "Would delete", deleteRule, name
@@ -7762,7 +8292,9 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 	if sellRule then
 		if onKeep then
 			return "kept", "Keep list blocked sell", sellRule, name
-		elseif IsAffixProtected(profile, bag, slot, link, "sell") then
+		elseif missingAffixBlocked then
+			return "kept", missingAffixReason .. " blocked sell", sellRule, name
+		elseif IsAffixProtected(profile, bag, slot, link, "sell", singleAffixSlot) then
 			return "kept", "Affix Protection blocked sell", sellRule, name
 		else
 			return "sell", "Would sell at vendor", sellRule, name
@@ -7810,6 +8342,7 @@ local function ProcessScan(profile)
 	local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
 	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
 	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
 	local ruleCtx = {
 		deleteNames = deleteNames,
 		deleteIDs = deleteIDs,
@@ -7818,8 +8351,10 @@ local function ProcessScan(profile)
 		keepNames = keepNames,
 		keepIDs = keepIDs,
 		keepOneIDs = keepOneIDs,
+		keepStackIDs = keepStackIDs,
 		keepOneSeenUnits = {},
 	}
+	ruleCtx.singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
 
 	for bag = 0, NUM_BAG_SLOTS do
 		local slots = GetContainerNumSlots(bag) or 0
@@ -7991,16 +8526,30 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 	local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
 	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
 	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
 	local onKeep = _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
 	local onDelete = (itemId and deleteIDs[itemId]) or (itemName and deleteNames[Normalize(itemName)])
 	local onSell = (itemId and sellIDs[itemId]) or (itemName and sellNames[Normalize(itemName)])
 	local onKeepOne = itemId and keepOneIDs[itemId]
+	local onKeepStack = itemId and keepStackIDs[itemId]
+	local singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
+	local singleAffixSlot = (bag and slot and singleAffixPlan) and singleAffixPlan.slots[bag .. ":" .. slot] or nil
 
 	table.insert(lines, "List rules:")
 	table.insert(lines, "  Keep list: " .. (onKeep and "yes - protects item" or "no"))
 	table.insert(lines, "  Delete list: " .. (onDelete and "yes" or "no"))
 	table.insert(lines, "  Sell list: " .. (onSell and "yes" or "no"))
 	table.insert(lines, "  KeepOne list: " .. (onKeepOne and "yes - keep one unit" or "no"))
+	table.insert(lines, "  KeepStack list: " .. (onKeepStack and "yes - keep one stack" or "no"))
+	table.insert(lines, "  KeepOne Missing Affix: " .. ((profile.keepSingleMissingAffix and singleAffixSlot)
+		and (singleAffixSlot.extra and "duplicate extra follows cleanup rules" or "protected missing-affix item")
+		or "no"))
+
+	table.insert(lines, "")
+	table.insert(lines, "Runtime gates:")
+	table.insert(lines, "  AutoDelete enabled: " .. (profile.enabled and "yes" or "no - auto cleanup is disabled"))
+	table.insert(lines, "  Cursor busy: " .. ((CursorHasItem and CursorHasItem()) and "yes - delete queue waits" or "no"))
+	table.insert(lines, "  Delete queue: " .. tostring(#((_G.AutoDelete_DeleteQueue or {}).items or {})) .. " pending")
 
 	local name, quality, ilvl, itemClass, maxStack, equipSlot, vendorPrice = nil, nil, nil, nil, nil, nil, nil
 	if itemLink then
@@ -8026,6 +8575,14 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		end
 	end
 	local isCosmetic = itemLink and IsCosmeticSlot(itemLink)
+	local missingAffixBlocked, missingAffixState = false, nil
+	if bag and slot and itemLink then
+		missingAffixBlocked, missingAffixState = _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot)
+	end
+	local missingAffixWhyText = "missing affix hard stop"
+	if missingAffixState == "unknown" then
+		missingAffixWhyText = missingAffixWhyText .. " (ownership unknown)"
+	end
 	local function InItemLevelRange(minIlvl, maxIlvl)
 		return ilvl and ilvl >= (minIlvl or 1) and ilvl <= (maxIlvl or 199)
 	end
@@ -8045,18 +8602,37 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 
 	table.insert(lines, "")
 	table.insert(lines, "Delete decision:")
-	if onKeep then
+	if not profile.enabled then
+		table.insert(lines, "  Final: no auto-delete. AutoDelete is disabled.")
+	elseif onKeep then
 		table.insert(lines, "  Final: keep. Keep list wins before Delete or auto-delete.")
 	elseif onKeepOne then
 		local total = itemId and _G.AutoDelete_CountBagUnitsByItemId(itemId) or 0
-		if bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "delete") then
+		if missingAffixBlocked then
+			table.insert(lines, "  Final: keep. " .. missingAffixWhyText .. " blocks KeepOne.")
+		elseif bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "delete", singleAffixSlot) then
 			table.insert(lines, "  Final: keep. Affix protection blocks KeepOne.")
 		elseif total > 1 then
 			table.insert(lines, "  Final: delete extra unit(s). KeepOne leaves one unit.")
 		else
 			table.insert(lines, "  Final: keep. KeepOne already has one unit left.")
 		end
-	elseif bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "delete") then
+	elseif onKeepStack then
+		local stackCount, keepBag, keepSlot = itemId and _G.AutoDelete_GetKeepStackSlotChoice(itemId) or 0
+		if missingAffixBlocked then
+			table.insert(lines, "  Final: keep. " .. missingAffixWhyText .. " blocks KeepStack.")
+		elseif bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "delete", singleAffixSlot) then
+			table.insert(lines, "  Final: keep. Affix protection blocks KeepStack.")
+		elseif stackCount > 1 and bag and slot and (bag ~= keepBag or slot ~= keepSlot) then
+			table.insert(lines, "  Final: delete extra stack. KeepStack leaves one stack.")
+		else
+			table.insert(lines, "  Final: keep. KeepStack already has one stack left.")
+		end
+	elseif singleAffixSlot and not singleAffixSlot.extra then
+		table.insert(lines, "  Final: keep. KeepOne Missing Affix kept one missing-affix item.")
+	elseif missingAffixBlocked then
+		table.insert(lines, "  Final: keep. " .. missingAffixWhyText .. " blocks delete.")
+	elseif bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "delete", singleAffixSlot) then
 		table.insert(lines, "  Final: keep. Affix protection blocks delete.")
 	elseif onDelete then
 		table.insert(lines, "  Final: delete. Explicit Delete list entry matches.")
@@ -8074,9 +8650,13 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 
 	table.insert(lines, "")
 	table.insert(lines, "Sell decision:")
-	if onKeep then
+	if not profile.enabled then
+		table.insert(lines, "  Final: no auto-sell. AutoDelete is disabled.")
+	elseif onKeep then
 		table.insert(lines, "  Final: keep. Keep list wins before Sell or auto-sell.")
-	elseif bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "sell") then
+	elseif missingAffixBlocked then
+		table.insert(lines, "  Final: keep. " .. missingAffixWhyText .. " blocks sell.")
+	elseif bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "sell", singleAffixSlot) then
 		table.insert(lines, "  Final: keep. Affix protection blocks sell.")
 	elseif onSell then
 		table.insert(lines, "  Final: sell at vendor. Explicit Sell list entry matches.")
@@ -8129,9 +8709,9 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 			table.insert(lines, "  Tier: " .. tostring(tier))
 			table.insert(lines, "  PE ownership: " .. (owned == nil and "unknown" or (owned and "owned" or "missing")))
 			if not dotLevel then
-				table.insert(lines, "  Dot: hidden because Only Missing is on and the affix is owned.")
-			elseif dotColor == AFFIX_GOLD then
-				table.insert(lines, "  Dot: gold because the affix is missing or unlearned.")
+				table.insert(lines, "  Dot: hidden because Show/Keep Missing Affix is on and the affix is owned.")
+			elseif owned == false then
+				table.insert(lines, "  Dot: " .. _G.AutoDelete_GetMissingAffixColorLabel(cachedProfile) .. " because the affix is missing or unlearned.")
 			else
 				table.insert(lines, "  Dot: tier color.")
 			end
@@ -8151,6 +8731,9 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 					table.insert(lines, "  Row action: " .. (meta and meta.label or entry.action))
 					if entry.reason then table.insert(lines, "  Reason: " .. tostring(entry.reason)) end
 					if entry.sourceRule then table.insert(lines, "  Source rule: " .. tostring(entry.sourceRule)) end
+					if not profile.enabled and (entry.action == "delete" or entry.action == "sell") then
+						table.insert(lines, "  Runtime: preview only while AutoDelete is disabled.")
+					end
 					if (entry.count or 1) > 1 then
 						table.insert(lines, "  Grouped copies: " .. tostring(entry.count) .. " share this item ID.")
 					end
@@ -8166,6 +8749,9 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 					table.insert(lines, "  Row action: " .. (meta and meta.label or entry.action) .. " (grouped by item ID).")
 					if entry.reason then table.insert(lines, "  Reason: " .. tostring(entry.reason)) end
 					if entry.sourceRule then table.insert(lines, "  Source rule: " .. tostring(entry.sourceRule)) end
+					if not profile.enabled and (entry.action == "delete" or entry.action == "sell") then
+						table.insert(lines, "  Runtime: preview only while AutoDelete is disabled.")
+					end
 					if (entry.count or 1) > 1 then
 						table.insert(lines, "  Grouped copies: " .. tostring(entry.count) .. " share this item ID.")
 					end
@@ -8224,17 +8810,24 @@ function _G.AutoDelete_BuildDiagnosticReport()
 		"  Sell: " .. CountEntries(profile.sellListText),
 		"  Keep: " .. CountEntries(profile.whitelistText),
 		"  KeepOne: " .. CountEntries(profile.keepOneText),
+		"  KeepStack: " .. CountEntries(profile.keepStackText),
 		"",
 		"Auto actions:",
 		"  Junk: " .. tostring(profile.qualityActionJunk),
+		"  ElvUI junk coin hidden: " .. tostring(_G.AutoDelete_ElvUIJunkIconState and _G.AutoDelete_ElvUIJunkIconState.active or false),
 		"  Common: " .. tostring(profile.qualityActionCommon),
 		"  Greens: " .. tostring(profile.qualityActionGreens),
 		"",
 		"Affix:",
 		"  Show dot: " .. tostring(profile.showAffixDot),
-		"  Only missing: " .. tostring(profile.affixCollectionMode),
-		"  No Auto-Sell: " .. tostring(profile.protectAffixFromSell),
-		"  Min iLvl: " .. tostring(profile.affixIlvlMin),
+		"  Show/Keep Missing Affix: " .. tostring(profile.affixCollectionMode),
+		"  KeepOne Missing Affix: " .. tostring(profile.keepSingleMissingAffix),
+		"  Missing affix color: " .. _G.AutoDelete_GetMissingAffixColorLabel(profile),
+		"  Protect tiers: I=" .. tostring(profile.protectAffixTier1)
+			.. " II=" .. tostring(profile.protectAffixTier2)
+			.. " III=" .. tostring(profile.protectAffixTier3)
+			.. " IV=" .. tostring(profile.protectAffixTier4)
+			.. " V=" .. tostring(profile.protectAffixTier5),
 		"  Learned affixes mirrored: " .. owned,
 		"",
 		"Process Bags:",
@@ -8320,6 +8913,12 @@ function _G.AutoDelete_ShowItemQuickMenu(data, owner)
 		end },
 		{ label = "KeepOne", func = function()
 			if AddItemToList("keepOneText", id) then
+				if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+				if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+			end
+		end },
+		{ label = "KeepStack", func = function()
+			if AddItemToList("keepStackText", id) then
 				if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
 				if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
 			end
@@ -8507,7 +9106,7 @@ local function ShowWelcomePopup()
 	intro:SetJustifyH("LEFT")
 	intro:SetWordWrap(true)
 	intro:SetTextColor(0.9, 0.9, 0.9, 1)
-	intro:SetText("All AutoDelete settings start |cffff8000OFF|r by default. Open the settings panel after this dialog to enable features and configure your Delete, Sell, Keep, and KeepOne lists.")
+	intro:SetText("All AutoDelete settings start |cffff8000OFF|r by default. Open the settings panel after this dialog to enable features and configure your Delete, Sell, Keep, KeepOne, and KeepStack lists.")
 	intro:SetHeight(50)
 
 	-- Section: Macro creation
@@ -8733,15 +9332,16 @@ local function ShowWelcomePopup()
 	hiwBody:SetWordWrap(true)
 	hiwBody:SetTextColor(0.85, 0.85, 0.85, 1)
 	hiwBody:SetText(
-		"AutoDelete uses four item lists. Drop an item onto the icons next to your bag, or open the panel and use the tabs.\n" ..
+		"AutoDelete uses five item lists. Drop an item onto the icons next to your bag, or open the panel and use the tabs.\n" ..
 		"|cffff5050Delete|r: items are destroyed on next scan.\n" ..
 		"|cffffd700Sell|r: items are sold the next time you open a vendor.\n" ..
 		"|cff80c0ffKeep|r: items are protected and never auto-sold or auto-deleted.\n" ..
-		"|cffff5050KeepOne|r: extra units are deleted until one unit remains.\n\n" ..
+		"|cffff5050KeepOne|r: extra units are deleted until one unit remains.\n" ..
+		"|cffff5050KeepStack|r: extra stacks are deleted until one stack remains.\n\n" ..
 		"|cff66ddffSell filters|r (on the Sell tab, BoE Armor / BoP / BoE Weapons): vendor-only auto-sell rules. " ..
 		"Match by quality and item level, no per-item entry needed."
 	)
-	hiwBody:SetHeight(110)
+	hiwBody:SetHeight(125)
 
 	-- Auto-Add Equipped opt-in checkbox. Sits between 'How it works' and the
 	-- warning callout. Toggling this on writes the setting to the active
@@ -8997,7 +9597,7 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 		if AutoDelete_RefreshOwnedAffixes then AutoDelete_RefreshOwnedAffixes() end
 		-- Install the PE auto-refresh hook NOW. This is the primary
 		-- trigger that keeps our mirror in sync with PE's table without
-		-- the user having to re-toggle Only missing affixes after every Extract.
+		-- the user having to re-toggle Show/Keep Missing Affix after every Extract.
 		-- See AutoDelete_InstallPEAffixHook for the design rationale.
 		-- If PE isn't loaded yet (rare -- both addons should be loaded
 		-- by PLAYER_LOGIN), the install is a no-op and the SPELLS_CHANGED
@@ -9145,6 +9745,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 			-- Last-resort compatibility path for ElvUI's replacement bag UI.
 			-- Default Blizzard bags use ContainerFrame_Update above.
 			InstallElvUIAffixDotHook()
+			if _G.AutoDelete_RefreshElvUIJunkIconSuppression then
+				_G.AutoDelete_RefreshElvUIJunkIconSuppression(cachedProfile)
+			end
 			-- Show the welcome popup unless the user clicked
 			-- "Don't show this again" on a previous login.
 			if not (_G.AutoDeleteDB and _G.AutoDeleteDB.welcomeDismissed) then
@@ -9169,13 +9772,18 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 				local sellSet = buildKeySet(p.sellListText)
 				local keepSet = buildKeySet(p.whitelistText)
 				local keepOneSet = buildKeySet(p.keepOneText)
+				local keepStackSet = buildKeySet(p.keepStackText)
 				local conflicts = 0
 				for k in pairs(delSet)  do if sellSet[k] then conflicts = conflicts + 1 end end
 				for k in pairs(delSet)  do if keepSet[k] then conflicts = conflicts + 1 end end
 				for k in pairs(delSet)  do if keepOneSet[k] then conflicts = conflicts + 1 end end
+				for k in pairs(delSet)  do if keepStackSet[k] then conflicts = conflicts + 1 end end
 				for k in pairs(sellSet) do if keepSet[k] then conflicts = conflicts + 1 end end
 				for k in pairs(sellSet) do if keepOneSet[k] then conflicts = conflicts + 1 end end
+				for k in pairs(sellSet) do if keepStackSet[k] then conflicts = conflicts + 1 end end
 				for k in pairs(keepSet) do if keepOneSet[k] then conflicts = conflicts + 1 end end
+				for k in pairs(keepSet) do if keepStackSet[k] then conflicts = conflicts + 1 end end
+				for k in pairs(keepOneSet) do if keepStackSet[k] then conflicts = conflicts + 1 end end
 				if conflicts > 0 then
 					print("|cffff4444[AutoDelete]|r Warning: " .. conflicts ..
 						" item(s) appear on more than one list. Run |cff00ff00/del clean|r to resolve.")
@@ -10183,8 +10791,9 @@ end)
 -- ============================================================================
 -- Rules:
 --   * Within a single list: keep first occurrence, remove subsequent duplicates
---   * Keep wins over Delete, Sell, and KeepOne
---   * Across Delete + Sell + KeepOne: if an item appears on more than one, remove it
+--   * Keep wins over Delete, Sell, KeepOne, and KeepStack
+--   * Across Delete + Sell + KeepOne + KeepStack: if an item appears on more
+--     than one, remove it
 --     (reported so the user can re-add to their preferred list)
 --
 -- Identity resolution: entries are either "item:N" or a plain name.
@@ -10219,9 +10828,10 @@ function _G.AutoDelete_BuildListAuditReport(prefixLines)
 		{ field = "sellListText", label = "Sell" },
 		{ field = "whitelistText", label = "Keep" },
 		{ field = "keepOneText", label = "KeepOne" },
+		{ field = "keepStackText", label = "KeepStack" },
 	}
 	local entries, byKey, byName = {}, {}, {}
-	local totals = { Delete = 0, Sell = 0, Keep = 0, KeepOne = 0 }
+	local totals = { Delete = 0, Sell = 0, Keep = 0, KeepOne = 0, KeepStack = 0 }
 	local safeLinkOrNumberFixes, duplicateFixes, nameOnlyCount, uncachedIdCount = 0, 0, 0, 0
 
 	local function AddToBucket(t, key, entry)
@@ -10351,6 +10961,7 @@ function _G.AutoDelete_BuildListAuditReport(prefixLines)
 	table.insert(lines, "  Sell: " .. tostring(totals.Sell))
 	table.insert(lines, "  Keep: " .. tostring(totals.Keep))
 	table.insert(lines, "  KeepOne: " .. tostring(totals.KeepOne))
+	table.insert(lines, "  KeepStack: " .. tostring(totals.KeepStack))
 	table.insert(lines, "")
 	table.insert(lines, "Safe fixes available:")
 	table.insert(lines, "  Duplicate lines in the same list: " .. tostring(duplicateFixes))
@@ -10426,6 +11037,7 @@ function _G.AutoDelete_FixSafeListAuditIssues()
 		{ field = "sellListText", label = "Sell" },
 		{ field = "whitelistText", label = "Keep" },
 		{ field = "keepOneText", label = "KeepOne" },
+		{ field = "keepStackText", label = "KeepStack" },
 	}
 	local removedDupes, normalizedRefs = 0, 0
 
@@ -10515,6 +11127,7 @@ local function CleanLists()
 	local sellEntries = Parse(profile.sellListText)
 	local keepEntries = Parse(profile.whitelistText)
 	local keepOneEntries = Parse(profile.keepOneText)
+	local keepStackEntries = Parse(profile.keepStackText)
 
 	-- 1. Dedupe within each list (first occurrence wins)
 	local function DedupeWithin(entries)
@@ -10534,14 +11147,15 @@ local function CleanLists()
 	local keptSell, internalSellDupes = DedupeWithin(sellEntries)
 	local keptKeep, internalKeepDupes = DedupeWithin(keepEntries)
 	local keptKeepOne, internalKeepOneDupes = DedupeWithin(keepOneEntries)
+	local keptKeepStack, internalKeepStackDupes = DedupeWithin(keepStackEntries)
 
 	-- 2a. Keep overrides Delete/Sell. Items on Keep AND Delete/Sell get
 	-- removed from Delete/Sell (matches runtime semantics: Keep always wins).
 	local keepKeys = {}
 	for _, e in ipairs(keptKeep) do keepKeys[e.key] = true end
 
-	local keepBlockedFromDel, keepBlockedFromSell, keepBlockedFromKeepOne = {}, {}, {}
-	local afterKeepDel, afterKeepSell, afterKeepOne = {}, {}, {}
+	local keepBlockedFromDel, keepBlockedFromSell, keepBlockedFromKeepOne, keepBlockedFromKeepStack = {}, {}, {}, {}
+	local afterKeepDel, afterKeepSell, afterKeepOne, afterKeepStack = {}, {}, {}, {}
 	for _, e in ipairs(keptDel) do
 		if keepKeys[e.key] then
 			table.insert(keepBlockedFromDel, e.display)
@@ -10563,20 +11177,29 @@ local function CleanLists()
 			table.insert(afterKeepOne, e)
 		end
 	end
+	for _, e in ipairs(keptKeepStack) do
+		if keepKeys[e.key] then
+			table.insert(keepBlockedFromKeepStack, e.display)
+		else
+			table.insert(afterKeepStack, e)
+		end
+	end
 
-	-- 2b. Find Delete + Sell + KeepOne overlap. All get removed (no winner; user
-	-- re-adds to their preferred list manually).
+	-- 2b. Find Delete + Sell + KeepOne + KeepStack overlap. All get removed
+	-- (no winner; user re-adds to their preferred list manually).
 	local sellKeys = {}
 	for _, e in ipairs(afterKeepSell) do sellKeys[e.key] = true end
 	local keepOneKeys = {}
 	for _, e in ipairs(afterKeepOne) do keepOneKeys[e.key] = true end
+	local keepStackKeys = {}
+	for _, e in ipairs(afterKeepStack) do keepStackKeys[e.key] = true end
 	local delKeys = {}
 	for _, e in ipairs(afterKeepDel) do delKeys[e.key] = true end
 
-	local crossDupes, finalDel, finalSell, finalKeepOne = {}, {}, {}, {}
+	local crossDupes, finalDel, finalSell, finalKeepOne, finalKeepStack = {}, {}, {}, {}, {}
 	local crossKeys = {}
 	for _, e in ipairs(afterKeepDel) do
-		if sellKeys[e.key] or keepOneKeys[e.key] then
+		if sellKeys[e.key] or keepOneKeys[e.key] or keepStackKeys[e.key] then
 			crossKeys[e.key] = true
 			table.insert(crossDupes, e.display)
 		else
@@ -10584,7 +11207,7 @@ local function CleanLists()
 		end
 	end
 	for _, e in ipairs(afterKeepSell) do
-		if delKeys[e.key] or keepOneKeys[e.key] then
+		if delKeys[e.key] or keepOneKeys[e.key] or keepStackKeys[e.key] then
 			if not crossKeys[e.key] then
 				crossKeys[e.key] = true
 				table.insert(crossDupes, e.display)
@@ -10594,13 +11217,23 @@ local function CleanLists()
 		end
 	end
 	for _, e in ipairs(afterKeepOne) do
-		if delKeys[e.key] or sellKeys[e.key] then
+		if delKeys[e.key] or sellKeys[e.key] or keepStackKeys[e.key] then
 			if not crossKeys[e.key] then
 				crossKeys[e.key] = true
 				table.insert(crossDupes, e.display)
 			end
 		elseif not crossKeys[e.key] then
 			table.insert(finalKeepOne, e.raw)
+		end
+	end
+	for _, e in ipairs(afterKeepStack) do
+		if delKeys[e.key] or sellKeys[e.key] or keepOneKeys[e.key] then
+			if not crossKeys[e.key] then
+				crossKeys[e.key] = true
+				table.insert(crossDupes, e.display)
+			end
+		elseif not crossKeys[e.key] then
+			table.insert(finalKeepStack, e.raw)
 		end
 	end
 
@@ -10616,6 +11249,8 @@ local function CleanLists()
 	if #finalKeep > 0 then profile.whitelistText = profile.whitelistText .. "\n" end
 	profile.keepOneText = table.concat(finalKeepOne, "\n")
 	if #finalKeepOne > 0 then profile.keepOneText = profile.keepOneText .. "\n" end
+	profile.keepStackText = table.concat(finalKeepStack, "\n")
+	if #finalKeepStack > 0 then profile.keepStackText = profile.keepStackText .. "\n" end
 
 	RefreshCachedProfile()
 
@@ -10633,6 +11268,9 @@ local function CleanLists()
 	if #internalKeepOneDupes > 0 then
 		print("  |cff999999Removed " .. #internalKeepOneDupes .. " internal duplicate(s) in KeepOne list:|r " .. table.concat(internalKeepOneDupes, ", "))
 	end
+	if #internalKeepStackDupes > 0 then
+		print("  |cff999999Removed " .. #internalKeepStackDupes .. " internal duplicate(s) in KeepStack list:|r " .. table.concat(internalKeepStackDupes, ", "))
+	end
 	if #keepBlockedFromDel > 0 then
 		print("|cff80c0ff  Removed from Delete (already on Keep, Keep wins):|r " .. table.concat(keepBlockedFromDel, ", "))
 	end
@@ -10642,13 +11280,17 @@ local function CleanLists()
 	if #keepBlockedFromKeepOne > 0 then
 		print("|cff80c0ff  Removed from KeepOne (already on Keep, Keep wins):|r " .. table.concat(keepBlockedFromKeepOne, ", "))
 	end
+	if #keepBlockedFromKeepStack > 0 then
+		print("|cff80c0ff  Removed from KeepStack (already on Keep, Keep wins):|r " .. table.concat(keepBlockedFromKeepStack, ", "))
+	end
 	if #crossDupes > 0 then
-		print("|cffff4444  Removed cross-list conflict(s) from Delete / Sell / KeepOne:|r " .. table.concat(crossDupes, ", "))
+		print("|cffff4444  Removed cross-list conflict(s) from Delete / Sell / KeepOne / KeepStack:|r " .. table.concat(crossDupes, ", "))
 		print("  |cffaaaaaaRe-add these manually to your preferred list.|r")
 	end
 	if #internalDelDupes == 0 and #internalSellDupes == 0 and #internalKeepDupes == 0
-		and #internalKeepOneDupes == 0 and #keepBlockedFromDel == 0
-		and #keepBlockedFromSell == 0 and #keepBlockedFromKeepOne == 0
+		and #internalKeepOneDupes == 0 and #internalKeepStackDupes == 0
+		and #keepBlockedFromDel == 0 and #keepBlockedFromSell == 0
+		and #keepBlockedFromKeepOne == 0 and #keepBlockedFromKeepStack == 0
 		and #crossDupes == 0 then
 		print("  |cff999999No duplicates found.|r")
 	end
@@ -10665,18 +11307,20 @@ end
 -- ============================================================================
 -- The list keys in a profile, with their display labels. Order matters for the
 -- popup list buttons.
-local IMPORT_LIST_KEYS = { "listText", "sellListText", "whitelistText", "keepOneText" }
+local IMPORT_LIST_KEYS = { "listText", "sellListText", "whitelistText", "keepOneText", "keepStackText" }
 local IMPORT_LIST_DISPLAY = {
 	listText       = "Delete",
 	sellListText   = "Sell",
 	whitelistText  = "Keep",
 	keepOneText    = "KeepOne",
+	keepStackText  = "KeepStack",
 }
 local IMPORT_DISPLAY_TO_KEY = {
 	Delete = "listText",
 	Sell   = "sellListText",
 	Keep   = "whitelistText",
 	KeepOne = "keepOneText",
+	KeepStack = "keepStackText",
 }
 
 -- Walk a list text and build a map: canonicalKey → rawLine.
@@ -10800,8 +11444,8 @@ local function ApplyImport(sourceCharKey, resolutions)
 	local profile = GetActiveProfile(db)
 	resolutions = resolutions or {}
 
-	local addedByList = { Delete = 0, Sell = 0, Keep = 0, KeepOne = 0 }
-	local movedByList = { Delete = 0, Sell = 0, Keep = 0, KeepOne = 0 }
+	local addedByList = { Delete = 0, Sell = 0, Keep = 0, KeepOne = 0, KeepStack = 0 }
+	local movedByList = { Delete = 0, Sell = 0, Keep = 0, KeepOne = 0, KeepStack = 0 }
 
 	-- Apply additions (no conflict, always add to source's list).
 	for _, add in ipairs(preview.additions) do
@@ -10829,14 +11473,14 @@ local function ApplyImport(sourceCharKey, resolutions)
 	-- Summary report
 	print(string.format("|cffff8000[AutoDelete]|r Import from %s complete.", sourceCharKey))
 	local addParts = {}
-	for _, lbl in ipairs({"Delete","Sell","Keep","KeepOne"}) do
+	for _, lbl in ipairs({"Delete","Sell","Keep","KeepOne","KeepStack"}) do
 		if addedByList[lbl] > 0 then table.insert(addParts, addedByList[lbl] .. " to " .. lbl) end
 	end
 	if #addParts > 0 then
 		print("  |cff999999Added:|r " .. table.concat(addParts, ", "))
 	end
 	local moveParts = {}
-	for _, lbl in ipairs({"Delete","Sell","Keep","KeepOne"}) do
+	for _, lbl in ipairs({"Delete","Sell","Keep","KeepOne","KeepStack"}) do
 		if movedByList[lbl] > 0 then table.insert(moveParts, movedByList[lbl] .. " to " .. lbl) end
 	end
 	if #moveParts > 0 then
