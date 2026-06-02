@@ -20,7 +20,7 @@ local C_TEXT      = { 0.85, 0.85, 0.85, 1 }   -- #D9D9D9
 local C_DIM       = { 0.45, 0.45, 0.45, 1 }   -- #737373
 local C_MAGE_BLUE = { RGB(63, 199, 235, 1) } -- bright WoW mage blue #3FC7EB
 local C_TOOLTIP_BODY = { 1, 1, 1, 1 }
-local C_HOVER     = { 0.122, 0.435, 0.659, 1 }   -- mage blue #1F6FA8 (alias: C_BLUE)
+local C_HOVER     = { 0.122, 0.435, 0.659, 1 }   -- muted hover blue #1F6FA8 (alias: C_BLUE)
 -- =========================================================================
 -- Semantic action palette (HARD RULE: only THREE colors for button hover)
 -- =========================================================================
@@ -111,6 +111,27 @@ local function MakeSeparator(parent, yOff)
 	return sep
 end
 
+local function ShowSimpleTooltip(owner, title, body, warning)
+	if not body or body == "" then return end
+	GameTooltip:SetOwner(owner, "ANCHOR_TOP")
+	GameTooltip:SetText(title or "", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
+	GameTooltip:AddLine(body, C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
+	if warning and warning ~= "" then
+		GameTooltip:AddLine(" ")
+		GameTooltip:AddLine(warning, C_RED[1], C_RED[2], C_RED[3], true)
+	end
+	GameTooltip:Show()
+end
+
+local function AttachSimpleTooltip(frame, title, body, warning)
+	if not frame or not body or body == "" then return end
+	frame:EnableMouse(true)
+	frame:SetScript("OnEnter", function(self)
+		ShowSimpleTooltip(self, title, body, warning)
+	end)
+	frame:SetScript("OnLeave", function() GameTooltip:Hide() end)
+end
+
 -- PEADAR-style toggle: 16x16 box + 8x8 indicator
 local function MakeToggle(parent, label, color, tooltip, tooltipTitle)
 	local row = CreateFrame("Button", nil, parent)
@@ -169,15 +190,14 @@ local function MakeToggle(parent, label, color, tooltip, tooltipTitle)
 		UpdateVisual()
 	end)
 
-	if tooltip then
+	local tipText = tooltip
+	if (not tipText or tipText == "") and label and label ~= "" then
+		tipText = "Turn " .. label .. " on or off."
+	end
+	if tipText then
 		local ttTitle = tooltipTitle or label
 		row:SetScript("OnEnter", function(self)
-			GameTooltip:SetOwner(self, "ANCHOR_TOP")
-			GameTooltip:SetText(ttTitle, C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			-- The 4th param to AddLine is `wrap`. Without it, long descriptions
-			-- render as one ultra-wide line stretching across the screen.
-			GameTooltip:AddLine(tooltip, C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
-			GameTooltip:Show()
+			ShowSimpleTooltip(self, ttTitle, tipText)
 		end)
 		row:SetScript("OnLeave", function() GameTooltip:Hide() end)
 	end
@@ -185,11 +205,11 @@ local function MakeToggle(parent, label, color, tooltip, tooltipTitle)
 	return row
 end
 
--- Small helper for sub-toggles: smaller box (12x12), 9pt text, no description.
+-- Small helper for sub-toggles: smaller box (12x12), 9pt text.
 -- Promoted to file scope so the Disenchant Filters popup (built at file load
 -- time, before BuildUI runs) can call it. BuildUI's own callers resolve to
 -- this same upvalue.
-local function MakeSubToggle(parent, label, color)
+local function MakeSubToggle(parent, label, color, tooltip, tooltipTitle)
 	local row = CreateFrame("Button", nil, parent)
 	row:SetSize(120, 16)
 
@@ -244,6 +264,17 @@ local function MakeSubToggle(parent, label, color)
 		row._checked = not row._checked
 		UpdateVisual()
 	end)
+
+	local tipText = tooltip
+	if (not tipText or tipText == "") and label and label ~= "" then
+		tipText = "Turn " .. label .. " on or off."
+	end
+	if tipText then
+		row:SetScript("OnEnter", function(self)
+			ShowSimpleTooltip(self, tooltipTitle or label, tipText)
+		end)
+		row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	end
 
 	return row
 end
@@ -381,9 +412,11 @@ local function MakeSegmentedControl(parent, segWidth, height, states, offValue, 
 end
 
 -- PEADAR-style custom dropdown
-local function MakeDropdown(parent, width, options, onChange)
+local function MakeDropdown(parent, width, options, onChange, tooltip, tooltipTitle)
 	local dd = CreateFrame("Frame", nil, parent)
 	dd:SetSize(width, 22)
+	dd._tooltip = tooltip
+	dd._tooltipTitle = tooltipTitle
 
 	-- Button: flat near-black bg, thin black border, subtle 1px top gloss
 	-- highlight line, teal-tinted border on hover.
@@ -425,11 +458,13 @@ local function MakeDropdown(parent, width, options, onChange)
 		self:SetBackdropColor(0.14, 0.14, 0.14, 1)
 		self:SetBackdropBorderColor(0.25, 0.55, 0.65, 1)
 		gloss:SetVertexColor(1, 1, 1, 0.14)
+		ShowSimpleTooltip(self, dd._tooltipTitle or "Choose", dd._tooltip)
 	end)
 	btn:SetScript("OnLeave", function(self)
 		self:SetBackdropColor(0.09, 0.09, 0.09, 1)
 		self:SetBackdropBorderColor(0, 0, 0, 1)
 		gloss:SetVertexColor(1, 1, 1, 0.08)
+		GameTooltip:Hide()
 	end)
 
 	-- Popup as its own top-level frame so nothing from the panel overlays it
@@ -534,6 +569,10 @@ local function MakeDropdown(parent, width, options, onChange)
 		btnText:SetText(tostring(val))
 	end
 	function dd:GetValue() return dd._value end
+	function dd:SetTooltip(title, body)
+		dd._tooltipTitle = title
+		dd._tooltip = body
+	end
 
 	-- Dynamic options rebuild. Used by tabs whose dropdown contents change
 	-- at runtime (e.g. Profiles tab - character names may be added/deleted).
@@ -621,7 +660,7 @@ end
 -- MakeSpinnerInput: numeric input with up/down arrow spin buttons on the right.
 -- Uses Blizzard's stock UIPanelSquareButton textures for reliable arrow rendering.
 -- Returns the outer frame (for anchoring) and its .editBox (for value access).
-local function MakeSpinnerInput(parent, width, height, minVal, maxVal, onChanged)
+local function MakeSpinnerInput(parent, width, height, minVal, maxVal, onChanged, tooltip, tooltipTitle)
 	minVal = minVal or 1
 	maxVal = maxVal or 9999
 	height = height or 22
@@ -629,6 +668,9 @@ local function MakeSpinnerInput(parent, width, height, minVal, maxVal, onChanged
 	local frame = CreateFrame("Frame", nil, parent)
 	frame:SetSize(width, height)
 	ApplyBackdrop(frame, C_DROP_BG, C_DROP_BORDER)
+	local function ShowSpinnerTip(owner)
+		ShowSimpleTooltip(owner, tooltipTitle or "Number", tooltip)
+	end
 
 	-- The numeric editbox takes most of the width, arrows take the right ~14px
 	local ARROW_W = 16
@@ -643,6 +685,13 @@ local function MakeSpinnerInput(parent, width, height, minVal, maxVal, onChanged
 	editBox:SetPoint("BOTTOMRIGHT", -ARROW_W - 4, 2)
 	editBox:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
 	editBox:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
+	if tooltip and tooltip ~= "" then
+		frame:EnableMouse(true)
+		frame:SetScript("OnEnter", ShowSpinnerTip)
+		frame:SetScript("OnLeave", function() GameTooltip:Hide() end)
+		editBox:SetScript("OnEnter", ShowSpinnerTip)
+		editBox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	end
 
 	-- Clamp + callback wrapper
 	local function CommitValue(val)
@@ -670,8 +719,14 @@ local function MakeSpinnerInput(parent, width, height, minVal, maxVal, onChanged
 		local cur = tonumber(editBox:GetText()) or minVal
 		CommitValue(cur + 1)
 	end)
-	upBtn:SetScript("OnEnter", function() upGlyph:SetVertexColor(C_HOVER[1], C_HOVER[2], C_HOVER[3], 1) end)
-	upBtn:SetScript("OnLeave", function() upGlyph:SetVertexColor(1, 1, 1, 1) end)
+	upBtn:SetScript("OnEnter", function(btn)
+		upGlyph:SetVertexColor(C_HOVER[1], C_HOVER[2], C_HOVER[3], 1)
+		ShowSpinnerTip(btn)
+	end)
+	upBtn:SetScript("OnLeave", function()
+		upGlyph:SetVertexColor(1, 1, 1, 1)
+		GameTooltip:Hide()
+	end)
 
 	-- Down arrow: pre-rotated arrowdown.tga (no SetRotation needed)
 	local downBtn = CreateFrame("Button", nil, frame)
@@ -686,8 +741,14 @@ local function MakeSpinnerInput(parent, width, height, minVal, maxVal, onChanged
 		local cur = tonumber(editBox:GetText()) or minVal
 		CommitValue(cur - 1)
 	end)
-	downBtn:SetScript("OnEnter", function() downGlyph:SetVertexColor(C_HOVER[1], C_HOVER[2], C_HOVER[3], 1) end)
-	downBtn:SetScript("OnLeave", function() downGlyph:SetVertexColor(1, 1, 1, 1) end)
+	downBtn:SetScript("OnEnter", function(btn)
+		downGlyph:SetVertexColor(C_HOVER[1], C_HOVER[2], C_HOVER[3], 1)
+		ShowSpinnerTip(btn)
+	end)
+	downBtn:SetScript("OnLeave", function()
+		downGlyph:SetVertexColor(1, 1, 1, 1)
+		GameTooltip:Hide()
+	end)
 
 	-- Thin divider between the editbox and the arrow column
 	local divider = frame:CreateTexture(nil, "OVERLAY")
@@ -862,6 +923,10 @@ local DEFAULT_PROFILE = {
 	protectAffixTier5    = false,
 	affixCollectionMode  = false,
 	keepSingleMissingAffix = false,
+	missingAffixColor    = "red",
+	missingAffixColorR   = 1.00,
+	missingAffixColorG   = 0.231,
+	missingAffixColorB   = 0.255,
 	summonScavenger   = false,
 }
 
@@ -948,6 +1013,20 @@ local function EnsureProfileFields(p)
 	for k, v in pairs(DEFAULT_PROFILE) do
 		if p[k] == nil then p[k] = v end
 	end
+	if p.missingAffixColor ~= "red"
+		and p.missingAffixColor ~= "gold"
+		and p.missingAffixColor ~= "mage"
+		and p.missingAffixColor ~= "green"
+		and p.missingAffixColor ~= "purple"
+		and p.missingAffixColor ~= "custom" then
+		p.missingAffixColor = DEFAULT_PROFILE.missingAffixColor
+	end
+	if type(p.missingAffixColorR) ~= "number" then p.missingAffixColorR = DEFAULT_PROFILE.missingAffixColorR end
+	if type(p.missingAffixColorG) ~= "number" then p.missingAffixColorG = DEFAULT_PROFILE.missingAffixColorG end
+	if type(p.missingAffixColorB) ~= "number" then p.missingAffixColorB = DEFAULT_PROFILE.missingAffixColorB end
+	if p.missingAffixColorR < 0 then p.missingAffixColorR = 0 elseif p.missingAffixColorR > 1 then p.missingAffixColorR = 1 end
+	if p.missingAffixColorG < 0 then p.missingAffixColorG = 0 elseif p.missingAffixColorG > 1 then p.missingAffixColorG = 1 end
+	if p.missingAffixColorB < 0 then p.missingAffixColorB = 0 elseif p.missingAffixColorB > 1 then p.missingAffixColorB = 1 end
 end
 
 local function GetDB()
@@ -1807,7 +1886,19 @@ local TGL_Y_QUAL = QUAL_Y - 16
 local TGL_W      = 52
 
 local function MakeFilterToggle(label, color, x, y)
-	local tgl = MakeSubToggle(popup, label, color)
+	local tip
+	if label == "BoP" then
+		tip = "Allow bound items in this filter."
+	elseif label == "BoE" then
+		tip = "Allow bind-on-equip items in this filter."
+	elseif label == "Unc" then
+		tip = "Allow green-quality items in this filter."
+	elseif label == "Rare" then
+		tip = "Allow blue-quality items in this filter."
+	elseif label == "Epic" then
+		tip = "Allow purple-quality items in this filter."
+	end
+	local tgl = MakeSubToggle(popup, label, color, tip)
 	tgl:SetPoint("TOPLEFT", x, y)
 	tgl:SetWidth(TGL_W)
 	return tgl
@@ -1842,6 +1933,10 @@ local function MakeIlvlEdit(x, y)
 	edit:SetJustifyH("CENTER")
 	edit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
 	edit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
+	AttachSimpleTooltip(box, "iLvl range",
+		"Pick the item level range allowed by this filter.")
+	AttachSimpleTooltip(edit, "iLvl range",
+		"Pick the item level range allowed by this filter.")
 	return edit
 end
 
@@ -3157,14 +3252,13 @@ hint:SetNonSpaceWrap(false)
 hint:SetWidth(POPUP_W - PAD_X * 2 - 74)
 hint:SetText("Pick a list. Text below is pre-selected -- press Ctrl+C to copy.")
 
-local rawToggle = MakeSubToggle(popup, "Raw", C_BLUE)
+local rawToggle = MakeSubToggle(popup, "Raw", C_BLUE,
+	"Export item IDs and raw lines. Use this for account-to-account imports.")
 rawToggle:SetSize(64, 16)
 rawToggle:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -PAD_X, -(TITLE_H + 10))
 rawToggle:SetScript("OnEnter", function(self)
-	GameTooltip:SetOwner(self, "ANCHOR_TOP")
-	GameTooltip:SetText("Raw", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-	GameTooltip:AddLine("Unchecked exports item names. Checked exports item:id lines with name comments for account-to-account import.", C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
-	GameTooltip:Show()
+	ShowSimpleTooltip(self, "Raw",
+		"Turn this on to export item IDs and raw lines. Use this for account-to-account imports.")
 end)
 rawToggle:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
@@ -3520,8 +3614,8 @@ end  -- end of General Report Popup `do` block
 -- ============================================================================
 -- Dedicated readable help surface that mirrors the addon's card style: every
 -- section renders as an icon (left) + option title + body copy + separator.
--- Keep the structure stable: row titles are mage blue, body text is white, and
--- destructive body clauses are marked inline with |cffbf3838...|r.
+-- Keep the structure stable: row titles are bright mage blue, body text is
+-- white, and destructive body clauses are marked inline with |cffbf3838...|r.
 
 function _G.AutoDelete_ShowHelpTopicWindow(titleText, sections)
 	if not _G.AutoDeleteHelpTopicPopup then
@@ -3887,24 +3981,25 @@ local function BuildUI(self)
 	local SUBTGL_INDENT_GEN = CARD_INNER_PAD_X + 14 + 8
 
 	local tglEnable = MakeToggle(card1, "Enable Addon", C_ACCENT,
-		"Turns AutoDelete on or off. When off, nothing is auto-deleted or sold. Auto-Invite and Hide Greedy Spam still work no matter what.")
+		"Turns AutoDelete on. When this is off, it will not sell or delete items. Auto-Invite and Hide Greedy Spam still work.")
 	tglEnable:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglEnable:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglEnable = tglEnable
 
 	local tglAutoAddEquipped = MakeToggle(card1, "Auto-Add Equipped", C_ACCENT,
-		"Adds gear you equip to your Keep list so it won't be sold or deleted by mistake. Shirts and tabards are skipped.")
+		"Adds gear you wear to Keep. Keep items are safe from Sell and Delete. Shirts and tabards are skipped.")
 	tglAutoAddEquipped:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 22))
 	tglAutoAddEquipped:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglAutoAddEquipped = tglAutoAddEquipped
 
 	local tglRepair = MakeToggle(card1, "Auto-Repair", C_ACCENT,
-		"Fixes your gear when you talk to a vendor. Turn on the sub-toggle below to pay from your guild bank first.")
+		"Repairs your gear when you talk to a repair vendor.")
 	tglRepair:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
 	tglRepair:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglRepair = tglRepair
 
-	local tglRepairGuild = MakeSubToggle(card1, "Use Guild Bank money", C_DK_RED)
+	local tglRepairGuild = MakeSubToggle(card1, "Use Guild Bank money", C_DK_RED,
+		"Use guild gold for repairs if you can. If not, your own gold is used.")
 	tglRepairGuild:SetPoint("TOPLEFT", SUBTGL_INDENT_GEN, -(CARD_INNER_PAD_Y + 66))
 	tglRepairGuild:SetWidth(cardW - SUBTGL_INDENT_GEN - CARD_INNER_PAD_X)
 	self._tglRepairGuild = tglRepairGuild
@@ -3948,7 +4043,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Open Panel", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			GameTooltip:AddLine("Opens the Process Bags window. Use the filters to review All, Sell, Delete, DE, Mill, Prospect, Open, or Kept rows before acting.",
+			GameTooltip:AddLine("Opens Process Bags so you can see what AutoDelete will keep, sell, delete, or use.",
 				C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
 			GameTooltip:Show()
 		end)
@@ -4005,25 +4100,9 @@ local function BuildUI(self)
 	local speedDD = MakeDropdown(scanSpeedCard, cardW - CARD_INNER_PAD_X * 2, speedOpts, function(val)
 		local p = GetActiveProfile(db)
 		p.scanInterval = val
-	end)
+	end, "Choose how often AutoDelete checks your bags. Faster checks feel quicker but use a little more CPU.", "Scan Speed")
 	speedDD:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 14))
 	self._speedDD = speedDD
-
-	-- Hover tooltip on the dropdown explaining the trade-off in detail.
-	-- The dropdown's main button is the OnEnter/OnLeave target -- the
-	-- arrow texture and bg both live under it so hovering anywhere on
-	-- the dropdown surfaces the tip. Mirrors the affixFloorRow pattern
-	-- used elsewhere in this file.
-	local SCAN_TIP_TITLE = "Scan Speed"
-	local SCAN_TIP_BODY  = "How often AutoDelete checks your bags for items on the Delete and Sell lists.\n\n|cffffd200Fast (0.5-1 sec):|r items disappear almost instantly. Tiny CPU cost.\n\n|cffffd200Slow (5-30 sec):|r quieter in the background. Short delay before items go.\n\n|cffffd200Very slow (1-5 min):|r runs once in a while. Good if you only want vendor cleanup.\n\nVendor selling always fires right when you open a merchant, no matter this setting."
-	speedDD:EnableMouse(true)
-	speedDD:SetScript("OnEnter", function(s)
-		GameTooltip:SetOwner(s, "ANCHOR_TOP")
-		GameTooltip:SetText(SCAN_TIP_TITLE, C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-		GameTooltip:AddLine(SCAN_TIP_BODY, C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
-		GameTooltip:Show()
-	end)
-	speedDD:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
 	-- In-card description (2 lines, dim, wrapped) summarizing what the
 	-- option controls. Sits below the dropdown so the card visually
@@ -4033,7 +4112,7 @@ local function BuildUI(self)
 	speedHelp:SetPoint("TOPRIGHT", scanSpeedCard, "TOPRIGHT", -CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 42))
 	speedHelp:SetJustifyH("LEFT")
 	speedHelp:SetWordWrap(true)
-	speedHelp:SetText("How often bags are checked against your Delete and Sell lists. Hover for the full trade-off.")
+	speedHelp:SetText("How often bags are checked against your Delete and Sell lists.")
 
 	-- ========================================================================
 	-- HELP TAB: topic buttons, each opening a formatted help popup.
@@ -4071,10 +4150,10 @@ local function BuildUI(self)
 				label = "Affix",
 				title = "Affix",
 				sections = {
-					{ icon = "Interface\\Icons\\Spell_Holy_DivineProtection", title = "Affix Protection", body = "No Auto-Sell protects the checked tiers I-V before Delete or Sell rules. Keep still wins first. Only missing affixes narrows this protection to affixes your account has not learned." },
-					{ icon = "Interface\\Icons\\Spell_Nature_WispSplode", title = "Affix Display", body = "Show affix dot marks affixed bag items by tier. Gold means the account has not learned that affix. Only missing affixes hides learned affixes and shows only gold missing-affix dots." },
-					{ icon = "Interface\\Icons\\INV_Misc_Gem_Amethyst_03", title = "Keep One Affix", body = "Keeps one armor or accessory item for each missing affix and clears extras through the normal cleanup rules. It is a toggle, not a list, and it ignores learned affixes." },
-					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_02", title = "Affix Tools", body = "Audit Lists checks your Delete and Sell lists for affixed items and prints what it finds without changing anything. Update Affix List opens Learned and Unlearned tabs from PE's account-bound affix data." },
+					{ icon = "Interface\\Icons\\Spell_Holy_DivineProtection", title = "Affix Protection", body = "No Auto-Sell protects the checked tiers I-V before Delete or Sell rules. Keep still wins first. Checked tiers are a hard stop for matching affix items." },
+					{ icon = "Interface\\Icons\\Spell_Nature_WispSplode", title = "Affix Display", body = "Show affix dot marks affixed bag items by tier. The selected missing-affix color means the account has not learned that affix. Show/Keep Missing Affix hides learned affixes and shows only missing-affix dots." },
+					{ icon = "Interface\\Icons\\INV_Misc_Gem_Amethyst_03", title = "KeepOne Missing Affix", body = "Protects one gear item for each missing affix from Delete and Sell rules. Duplicate missing-affix gear can still clear through normal cleanup rules. It is a toggle, not a list, and it ignores learned affixes." },
+					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_02", title = "Affix Tools", body = "Refresh List checks your Delete and Sell lists for affixed items and prints what it finds without changing anything. Update Affix List opens Learned and Unlearned tabs from PE's account-bound affix data. Missing Affix Color opens a color picker for affixes your account has not learned." },
 				}
 			},
 			{
@@ -4090,7 +4169,7 @@ local function BuildUI(self)
 				label = "Filters",
 				title = "Filters",
 				sections = {
-					{ icon = "Interface\\Icons\\INV_Broom_01", title = "Auto Actions", body = "Sets Junk, Common, and Greens each to Del or Sell, or leaves them off. |cffbf3838Del deletes matching items on bag scans|r, Sell vendors them. Keep-list and quest items are always safe." },
+					{ icon = "Interface\\Icons\\INV_Broom_01", title = "Auto Actions", body = "Sets Junk, Common, and Greens each to Del or Sell, or leaves them off. |cffbf3838Del deletes matching items on bag scans|r, Sell vendors them. Keep-list and quest items are always safe. If ElvUI is loaded, Junk Del hides ElvUI's junk coin while active." },
 					{ icon = "Interface\\Icons\\INV_Enchant_ShardGlimmering", title = "DE Filters", body = "Controls which items One-Key Disenchant will target, by bind state (BoP, BoE), quality (Unc, Rare, Epic), and the iLvl range. It does not touch your item lists." },
 					{ icon = "Interface\\Icons\\Spell_Shadow_DetectInvisibility", title = "Ignored Items", body = "Manage Ignored opens the list of items you marked Ignore on the Keep-list popup. Ignore only hides an item from Process Bags, it is not protection from cleanup." },
 				}
@@ -4231,22 +4310,25 @@ local function BuildUI(self)
 	-- toggle + 3 sub-toggles. Moved here from the old Goblin Card 2 so the
 	-- Scavenger pet feature lives in the leftmost slot of the Pets tab.
 	local tglScav = MakeToggle(gCard1, "Summon Scavenger", C_ACCENT,
-		"Manages your Greedy Scavenger pet. Brings it back when it gets stuck or after you mount up. Use the sub-toggles below to pick when to summon.")
+		"Summons Greedy Scavenger when your bags need cleanup. Use the choices below to pick when it can happen.")
 	tglScav:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglScav:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglScav = tglScav
 
-	local tglScavAfterSell = MakeSubToggle(gCard1, "After sell", C_DK_RED)
+	local tglScavAfterSell = MakeSubToggle(gCard1, "After sell", C_DK_RED,
+		"Summon Greedy Scavenger after AutoDelete sells items.")
 	tglScavAfterSell:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 20))
 	tglScavAfterSell:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglScavAfterSell = tglScavAfterSell
 
-	local tglScavAfterClose = MakeSubToggle(gCard1, "After vendor close", C_DK_RED)
+	local tglScavAfterClose = MakeSubToggle(gCard1, "After vendor close", C_DK_RED,
+		"Summon Greedy Scavenger after you close a vendor window.")
 	tglScavAfterClose:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 36))
 	tglScavAfterClose:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglScavAfterClose = tglScavAfterClose
 
-	local tglScavOnlyInCombat = MakeSubToggle(gCard1, "Only in Combat", C_DK_RED)
+	local tglScavOnlyInCombat = MakeSubToggle(gCard1, "Only in Combat", C_DK_RED,
+		"Only summon Greedy Scavenger while you are in combat.")
 	tglScavOnlyInCombat:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 52))
 	tglScavOnlyInCombat:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglScavOnlyInCombat = tglScavOnlyInCombat
@@ -4258,7 +4340,7 @@ local function BuildUI(self)
 	-- name truncated on the ~175px card width. Tooltip still names the
 	-- Goblin Merchant explicitly.
 	local tglSummonMerchant = MakeToggle(gCard2, "Summon Merchant", C_ACCENT,
-		"Summons your Goblin Merchant when your bags stay full for 2 seconds. Target the merchant and press your Interact key to open the shop.")
+		"Summons Goblin Merchant when your bags are full. Target it and use Interact to open the shop.")
 	tglSummonMerchant:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglSummonMerchant:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	AddToggleDescription(tglSummonMerchant,
@@ -4273,7 +4355,7 @@ local function BuildUI(self)
 	-- the chat notification only; Goblin Merchant summon triggers at zero
 	-- free slots independently.
 	local tglBagSpaceWarn = MakeToggle(gCard3, "Bag warning", C_ACCENT,
-		"Tells you in chat when your free bag slots drop to the number below. Only warns once until your bags fill up again.")
+		"Shows a chat warning when your free bag slots drop to the number below.")
 	tglBagSpaceWarn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglBagSpaceWarn:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglBagSpaceWarn = tglBagSpaceWarn
@@ -4313,6 +4395,10 @@ local function BuildUI(self)
 		p.bagSpaceWarnThreshold = val
 		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
 	end)
+	AttachSimpleTooltip(thresholdBox, "Free slots",
+		"Pick the free bag slot number that should show the warning.")
+	AttachSimpleTooltip(thresholdEdit, "Free slots",
+		"Pick the free bag slot number that should show the warning.")
 	self._bagSpaceWarnEdit = thresholdEdit
 
 	-- Hide Greedy Spam at the bottom of card 3. Compact toggle, no
@@ -4372,11 +4458,13 @@ local function BuildUI(self)
 		-- Row 1 (y=-24): BoP + BoE bind-state toggles, side by side.
 		-- C_ACCENT (orange) matches the popup's prior convention for these.
 		local BIND_TGL_W = 60
-		local tglDeBoP = MakeSubToggle(tCard2, "BoP", C_ACCENT)
+		local tglDeBoP = MakeSubToggle(tCard2, "BoP", C_ACCENT,
+			"Allow bound items for One-Key Disenchant.")
 		tglDeBoP:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
 		tglDeBoP:SetWidth(BIND_TGL_W)
 
-		local tglDeBoE = MakeSubToggle(tCard2, "BoE", C_ACCENT)
+		local tglDeBoE = MakeSubToggle(tCard2, "BoE", C_ACCENT,
+			"Allow bind-on-equip items for One-Key Disenchant.")
 		tglDeBoE:SetPoint("TOPLEFT", CARD_INNER_PAD_X + BIND_TGL_W + 8, -24)
 		tglDeBoE:SetWidth(BIND_TGL_W)
 
@@ -4384,15 +4472,18 @@ local function BuildUI(self)
 		-- WoW item-quality colors so the checked fill communicates the
 		-- rarity tier at a glance (matches the popup's prior convention).
 		local QUAL_TGL_W = 48
-		local tglDeUnc = MakeSubToggle(tCard2, "Unc", C_Q_UNCOMMON)
+		local tglDeUnc = MakeSubToggle(tCard2, "Unc", C_Q_UNCOMMON,
+			"Allow green-quality items for One-Key Disenchant.")
 		tglDeUnc:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
 		tglDeUnc:SetWidth(QUAL_TGL_W)
 
-		local tglDeRare = MakeSubToggle(tCard2, "Rare", C_Q_RARE)
+		local tglDeRare = MakeSubToggle(tCard2, "Rare", C_Q_RARE,
+			"Allow blue-quality items for One-Key Disenchant.")
 		tglDeRare:SetPoint("TOPLEFT", CARD_INNER_PAD_X + QUAL_TGL_W + 4, -46)
 		tglDeRare:SetWidth(QUAL_TGL_W)
 
-		local tglDeEpic = MakeSubToggle(tCard2, "Epic", C_Q_EPIC)
+		local tglDeEpic = MakeSubToggle(tCard2, "Epic", C_Q_EPIC,
+			"Allow purple-quality items for One-Key Disenchant.")
 		tglDeEpic:SetPoint("TOPLEFT", CARD_INNER_PAD_X + (QUAL_TGL_W + 4) * 2, -46)
 		tglDeEpic:SetWidth(QUAL_TGL_W)
 
@@ -4418,6 +4509,10 @@ local function BuildUI(self)
 			edit:SetJustifyH("CENTER")
 			edit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
 			edit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
+			AttachSimpleTooltip(frame, "iLvl range",
+				"Pick the item level range allowed for One-Key Disenchant.")
+			AttachSimpleTooltip(edit, "iLvl range",
+				"Pick the item level range allowed for One-Key Disenchant.")
 			return edit
 		end
 		local ilvlMinEdit = MakeIlvlBox(CARD_INNER_PAD_X + 28)
@@ -4505,7 +4600,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Manage Ignored Items", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			GameTooltip:AddLine("Opens a window listing every item you have set to Ignore. Click the X next to an item to stop ignoring it.",
+			GameTooltip:AddLine("Shows items you chose to ignore. Use the X there to stop ignoring an item.",
 				C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
 			GameTooltip:Show()
 		end)
@@ -4519,7 +4614,7 @@ local function BuildUI(self)
 	-- ========================================================================
 	-- AFFIX TAB (internal key "affix", v3.20):
 	--   Card 1: Affix Protection    (No Auto-Sell tier checkboxes)
-	--   Card 2: Affix Display       (Show affix dot + Only missing affixes)
+	--   Card 2: Affix Display       (Show affix dot + Show/Keep Missing Affix)
 	--   Card 3: Affix Tools         (Audit Lists + Scan Learned Affixes)
 	-- User feedback 2026-05-23: Cards 1 and 2 were too crowded with both
 	-- toggles AND their action button each, so the two buttons moved to a
@@ -4575,7 +4670,7 @@ local function BuildUI(self)
 	local QSTATE_DEL = {
 		value = "delete",
 		label = "Del",
-		tooltip = "Auto-deletes items of this quality. Click again to turn off. Keep-list items, quest items, shirts, and tabards are safe.",
+		tooltip = "Delete items of this quality during bag scans. Click again to turn it off. Keep and quest items stay safe.",
 		bg     = { C_RED[1], C_RED[2], C_RED[3], 0.85 },
 		border = C_RED,
 		fg     = { 1, 1, 1, 1 },
@@ -4583,7 +4678,7 @@ local function BuildUI(self)
 	local QSTATE_SELL = {
 		value = "sell",
 		label = "Sell",
-		tooltip = "Auto-sells items of this quality at vendors. Click again to turn off. Keep-list items and quest items are safe.",
+		tooltip = "Sell items of this quality when you open a vendor. Click again to turn it off. Keep and quest items stay safe.",
 		bg     = { C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.85 },
 		border = C_BLUE,
 		fg     = { 1, 1, 1, 1 },
@@ -4640,7 +4735,7 @@ local function BuildUI(self)
 		"Junk",
 		"qualityActionJunk",
 		QUALITY_STATES_DEL_SELL,
-		"Gray-quality (poor) items. Quest items, shirts, tabards, and Keep-list items are always safe.",
+		"Gray-quality poor items. Keep, quest items, shirts, and tabards stay safe.",
 		-24)
 	self._pillJunk = pillJunk
 
@@ -4648,7 +4743,7 @@ local function BuildUI(self)
 		"Common",
 		"qualityActionCommon",
 		QUALITY_STATES_DEL_SELL,
-		"White-quality gear only. Reagents, consumables, quest items, and Keep-list items are always safe.",
+		"White-quality gear only. Reagents, consumables, quest items, and Keep items stay safe.",
 		-46)
 	self._pillCommon = pillCommon
 
@@ -4656,7 +4751,7 @@ local function BuildUI(self)
 		"Greens",
 		"qualityActionGreens",
 		QUALITY_STATES_DEL_SELL,
-		"Green-quality (uncommon) gear -- armor, weapons, rings, necks, trinkets, all armor slots. Reagents, consumables, bags, quest items, and Keep-list items are safe.",
+		"Green-quality gear only. Bags, reagents, consumables, quest items, and Keep items stay safe.",
 		-68)
 	self._pillGreens = pillGreens
 	end  -- /Filters Card 1: Auto Actions
@@ -4727,7 +4822,7 @@ local function BuildUI(self)
 		row:SetScript("OnEnter", function(btn)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Tier " .. label, C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			GameTooltip:AddLine("Protects this affix tier before Delete or Sell rules. Only Missing narrows it to unlearned affixes.",
+			GameTooltip:AddLine("Keep all affix items with this tier. This blocks Sell and Delete rules.",
 				C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
 			GameTooltip:Show()
 		end)
@@ -4747,8 +4842,8 @@ local function BuildUI(self)
 	-- alongside Affix Protection so all affix tooling lives together).
 	-- Three tightly-coupled toggles + a diagnostic button:
 	--   Row 1: Show affix dot              (master gate for any dot display)
-	--   Row 2: Only missing affixes        (collection mode, gated by Row 1)
-	--   Row 3: Keep One Affix            (delete extras for same missing affix)
+	--   Row 2: Show/Keep Missing Affix   (collection mode, gated by Row 1)
+	--   Row 3: KeepOne Missing Affix    (protect missing affix items)
 	--
 	-- The Scan button shares the bottom-of-card slot with the Audit Lists
 	-- button on Card 1 (y=-68) so the two diagnostic actions line up
@@ -4765,19 +4860,19 @@ local function BuildUI(self)
 		card3Title:SetText("Affix Display")
 
 		local tglShowAffixDot = MakeToggle(aCard2, "Show affix dot", C_ACCENT,
-			"Puts a small dot on bag items that have a Project Ebonhold affix. Dot color shows the tier (I white, II green, III blue, IV purple, V orange). Gold dot means an affix you haven't learned yet. Works on default bags and ElvUI bags.")
+			"Shows a small dot on gear with a Project Ebonhold affix. The dot color shows the tier. Missing affixes use your chosen color.")
 		tglShowAffixDot:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
 		tglShowAffixDot:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 		self._tglShowAffixDot = tglShowAffixDot
 
-		local tglAffixCollection = MakeToggle(aCard2, "Only missing affixes", C_ACCENT,
-			"Only puts a gold dot on items with affixes you haven't learned yet. Items with affixes you already have stay clean. Also protects unknown affixes from being sold or deleted. Needs Show affix dot turned on.")
+		local tglAffixCollection = MakeToggle(aCard2, "Show/Keep Missing Affix", C_ACCENT,
+			"Only marks affixes you have not learned. It also keeps those items safe from Sell and Delete.")
 		tglAffixCollection:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -46)
 		tglAffixCollection:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 		self._tglAffixCollection = tglAffixCollection
 
-		local tglSingleAffix = MakeToggle(aCard2, "Keep One Affix", C_ACCENT,
-			"For each missing armor affix, keep one matching item and clear extras. Keep list wins. Sell-list extras sell at vendors; other extras delete.")
+		local tglSingleAffix = MakeToggle(aCard2, "KeepOne Missing Affix", C_ACCENT,
+			"Keeps one item for each missing affix. Extra copies can still Sell or Delete if your rules allow it.")
 		tglSingleAffix:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -68)
 		tglSingleAffix:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 		self._tglSingleAffix = tglSingleAffix
@@ -4817,7 +4912,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Refresh List", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			GameTooltip:AddLine("Checks your Delete and Sell lists for items with a Project Ebonhold affix. Prints what it finds in chat. Doesn't change your lists.",
+			GameTooltip:AddLine("Checks your Delete and Sell lists for affix items. It prints a report and does not change your lists.",
 				C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
 			GameTooltip:Show()
 		end)
@@ -4842,7 +4937,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Update Affix List", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			GameTooltip:AddLine("Opens a window with Learned and Unlearned tabs, grouped by tier.",
+			GameTooltip:AddLine("Updates your learned affix data from Project Ebonhold and opens the Learned Affixes window.",
 				C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
 			GameTooltip:Show()
 		end)
@@ -4851,6 +4946,71 @@ local function BuildUI(self)
 			btn._text:SetTextColor(unpack(C_TEXT))
 			GameTooltip:Hide()
 		end)
+
+		local colorLabel = MakeText(aCard3, 10, C_TEXT, "OUTLINE")
+		colorLabel:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -70)
+		colorLabel:SetText("Missing Affix Color")
+
+		local colorBtn = CreateFrame("Button", nil, aCard3)
+		colorBtn:SetSize(24, 18)
+		colorBtn:SetPoint("TOPRIGHT", aCard3, "TOPRIGHT", -CARD_INNER_PAD_X, -68)
+		local swatch = colorBtn:CreateTexture(nil, "ARTWORK")
+		swatch:SetTexture(WHITE8x8)
+		swatch:SetPoint("TOPLEFT", 4, -4)
+		swatch:SetPoint("BOTTOMRIGHT", -4, 4)
+		colorBtn._swatch = swatch
+		local function RefreshMissingAffixColorButtons()
+			local p = GetActiveProfile(db)
+			local color = _G.AutoDelete_GetMissingAffixDotColor
+				and _G.AutoDelete_GetMissingAffixDotColor(p)
+				or { p.missingAffixColorR or 1, p.missingAffixColorG or 0.231, p.missingAffixColorB or 0.255 }
+			ApplyBackdrop(colorBtn, C_BTN_BASE_BG, C_MAGE_BLUE)
+			colorBtn._swatch:SetVertexColor(color[1], color[2], color[3], 1)
+		end
+		local function ApplyMissingAffixColor(r, g, b)
+			local p = GetActiveProfile(db)
+			p.missingAffixColor = "custom"
+			p.missingAffixColorR = r
+			p.missingAffixColorG = g
+			p.missingAffixColorB = b
+			if _G.AutoDelete_RefreshCachedProfile then
+				_G.AutoDelete_RefreshCachedProfile()
+			end
+			if _G.AutoDelete_RefreshAffixDots then
+				_G.AutoDelete_RefreshAffixDots()
+			end
+			RefreshMissingAffixColorButtons()
+		end
+		colorBtn:SetScript("OnClick", function()
+			local p = GetActiveProfile(db)
+			local prevR = p.missingAffixColorR or 1
+			local prevG = p.missingAffixColorG or 0.231
+			local prevB = p.missingAffixColorB or 0.255
+			ColorPickerFrame.func = function()
+				local r, g, b = ColorPickerFrame:GetColorRGB()
+				ApplyMissingAffixColor(r, g, b)
+			end
+			ColorPickerFrame.cancelFunc = function()
+				ApplyMissingAffixColor(prevR, prevG, prevB)
+			end
+			ColorPickerFrame.hasOpacity = false
+			ColorPickerFrame:SetColorRGB(prevR, prevG, prevB)
+			ColorPickerFrame:Hide()
+			ColorPickerFrame:Show()
+		end)
+		colorBtn:SetScript("OnEnter", function(btn)
+			btn:SetBackdropBorderColor(C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
+			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+			GameTooltip:SetText("Missing Affix Color", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
+			GameTooltip:AddLine("Choose the dot color for affixes you have not learned yet.",
+				C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
+			GameTooltip:Show()
+		end)
+		colorBtn:SetScript("OnLeave", function()
+			RefreshMissingAffixColorButtons()
+			GameTooltip:Hide()
+		end)
+		self._refreshMissingAffixColorButtons = RefreshMissingAffixColorButtons
 	end
 
 	-- ========================================================================
@@ -4985,9 +5145,9 @@ local function BuildUI(self)
 		btn:SetScript("OnEnter", function(self)
 			GameTooltip:SetOwner(self, "ANCHOR_TOP")
 			GameTooltip:SetText("Keybind", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			GameTooltip:AddLine("Left-click and press a key (with modifiers) to bind.", C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
-			GameTooltip:AddLine("Right-click to clear.", C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
-			GameTooltip:AddLine("Cannot bind in combat.", 1, 0.4, 0.4, true)
+			GameTooltip:AddLine("Left-click, then press the key you want to use.", C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
+			GameTooltip:AddLine("Right-click to remove the key.", C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
+			GameTooltip:AddLine("You cannot change keys in combat.", 1, 0.4, 0.4, true)
 			GameTooltip:Show()
 		end)
 		btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -5079,7 +5239,7 @@ local function BuildUI(self)
 	local tglOpenEnabled, openKeyRow, openStatus = MakeKeybindRow({
 		label      = "One-Key Open",
 		bindingCmd = "CLICK AutoDeleteOpenButton:LeftButton",
-		tooltip    = "Press one button to open the next clam, coin purse, or egg in your bags. Locked boxes are skipped until you can pick the lock.",
+		tooltip    = "Use one key to open the next clam, coin purse, or egg in your bags. Locked boxes are skipped.",
 	}, -6)
 	self._tglOpenEnabled  = tglOpenEnabled
 	self._openKeyRow      = openKeyRow
@@ -5090,7 +5250,7 @@ local function BuildUI(self)
 	local tglDisenchant, disenchantKeyRow, disenchantStatus = MakeKeybindRow({
 		label      = "One-Key Disenchant",
 		bindingCmd = "CLICK AutoDeleteDisenchantButton:LeftButton",
-		tooltip    = "Press one button to disenchant your next green or higher item. You need the Enchanting profession. Pick which items count on the Filters tab.",
+		tooltip    = "Use one key to disenchant the next allowed item. You need Enchanting. Pick allowed items on the Filters tab.",
 	}, -(6 + (KEYBIND_ROW_H + KEYBIND_ROW_GAP)))
 	self._tglDisenchant         = tglDisenchant
 	self._disenchantKeyRow      = disenchantKeyRow
@@ -5101,7 +5261,7 @@ local function BuildUI(self)
 	local tglMill, millKeyRow, millStatus = MakeKeybindRow({
 		label      = "One-Key Mill",
 		bindingCmd = "CLICK AutoDeleteMillButton:LeftButton",
-		tooltip    = "Press one button to mill the next stack of herbs in your bags. The stack needs at least 5 herbs. You need the Inscription profession.",
+		tooltip    = "Use one key to mill the next herb stack. The stack needs at least 5 herbs. You need Inscription.",
 	}, -(6 + (KEYBIND_ROW_H + KEYBIND_ROW_GAP) * 2))
 	self._tglMill        = tglMill
 	self._millKeyRow     = millKeyRow
@@ -5112,7 +5272,7 @@ local function BuildUI(self)
 	local tglProspect, prospectKeyRow, prospectStatus = MakeKeybindRow({
 		label      = "One-Key Prospect",
 		bindingCmd = "CLICK AutoDeleteProspectButton:LeftButton",
-		tooltip    = "Press one button to prospect the next stack of ore in your bags. The stack needs at least 5 ore. You need the Jewelcrafting profession.",
+		tooltip    = "Use one key to prospect the next ore stack. The stack needs at least 5 ore. You need Jewelcrafting.",
 	}, -(6 + (KEYBIND_ROW_H + KEYBIND_ROW_GAP) * 3))
 	self._tglProspect        = tglProspect
 	self._prospectKeyRow     = prospectKeyRow
@@ -5157,7 +5317,7 @@ local function BuildUI(self)
 
 	-- CARD 1: Auto-Invite master toggle + keyword text input
 	local tglAutoInvite = MakeToggle(aCard1, "Auto-Invite", C_ACCENT,
-		"When someone whispers you one of the keywords below, you invite them to your group. You need to be the leader or a raid assistant.")
+		"Invites a player when they whisper one of your keywords. You must be the leader or a raid assistant.")
 	tglAutoInvite:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglAutoInvite:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglAutoInvite = tglAutoInvite
@@ -5193,6 +5353,10 @@ local function BuildUI(self)
 		-- Snap the text to the trimmed/normalized value
 		s:SetText(GetActiveProfile(db).autoInviteKeywords)
 	end)
+	AttachSimpleTooltip(kwFrame, "Keywords",
+		"Type words that trigger Auto-Invite. Separate each word with a comma.")
+	AttachSimpleTooltip(kwBox, "Keywords",
+		"Type words that trigger Auto-Invite. Separate each word with a comma.")
 	self._kwBox = kwBox
 
 	-- Clear (x) button at the right edge of the keyword frame. Click resets
@@ -5219,7 +5383,7 @@ local function BuildUI(self)
 
 	-- CARD 2: Apply loot rule (main toggle) + dropdown
 	local tglLootRule = MakeToggle(aCard2, "Apply loot rule", C_ACCENT,
-		"After someone is auto-invited, sets the party's loot rule to the one you pick below.")
+		"Sets the party loot rule after AutoDelete invites someone.")
 	tglLootRule:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglLootRule:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglLootRule = tglLootRule
@@ -5234,7 +5398,7 @@ local function BuildUI(self)
 	}
 	local lootDD = MakeDropdown(aCard2, cardW - CARD_INNER_PAD_X * 2, LOOT_RULE_OPTS, function(val)
 		GetActiveProfile(db).autoInviteLootRule = val
-	end)
+	end, "Choose the loot rule AutoDelete should set for your group.", "Loot rule")
 	lootDD:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 30))
 	self._lootDD = lootDD
 
@@ -5243,7 +5407,7 @@ local function BuildUI(self)
 	-- Requester). Invite Requester was removed in v3.17. Now just a single main
 	-- toggle for the Convert behavior.
 	local tglConvertRaid = MakeToggle(aCard3, "Convert to raid when full", C_ACCENT,
-		"When the 6th player joins your party, automatically convert it to a raid group.")
+		"Changes the party to a raid when the party is full.")
 	tglConvertRaid:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglConvertRaid:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglConvertRaid = tglConvertRaid
@@ -5437,6 +5601,7 @@ local function BuildUI(self)
 			self._selectedProfile = val
 		end)
 		profileDD:SetPoint("TOPLEFT", PROF_LEFT_PAD, PROF_DD_Y)
+		profileDD:SetTooltip("Profile", "Choose the character profile you want to copy from, import from, or delete.")
 		self._profileDD = profileDD
 
 		-- RIGHT half / row 1: Copy (green) and Delete (red).
@@ -5526,7 +5691,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Import Raw", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			GameTooltip:AddLine("Paste item:id lines, item links, numeric IDs, or item names and add them to your chosen list.",
+			GameTooltip:AddLine("Paste item lines or item IDs and add them to the list you choose.",
 				C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
 			GameTooltip:Show()
 		end)
@@ -5548,7 +5713,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Export Raw", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			GameTooltip:AddLine("Copy one item list as names, or check Raw in the popup for item:id lines that import cleanly on another account.",
+			GameTooltip:AddLine("Copy one list. Turn on Raw in the popup to copy item IDs for another account.",
 				C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
 			GameTooltip:Show()
 		end)
@@ -5574,7 +5739,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Audit Lists", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			GameTooltip:AddLine("Open a copyable report for duplicate entries, cross-list conflicts, name-only entries, and same-name item ID traps.",
+			GameTooltip:AddLine("Shows duplicate items and list conflicts in a copyable report.",
 				C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
 			GameTooltip:Show()
 		end)
@@ -5596,7 +5761,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Fix Safe", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			GameTooltip:AddLine("Apply only safe mechanical list cleanup: same-list duplicates and item reference normalization. Cross-list and same-name item ID traps stay for review.",
+			GameTooltip:AddLine("Fixes only safe list problems, like duplicate lines and item ID cleanup. Conflicts stay for you to review.",
 				C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
 			GameTooltip:Show()
 		end)
@@ -5902,12 +6067,12 @@ local function BuildUI(self)
 		tglEnable:SetSize(140, 20)
 
 		local tglEpic = MakeToggle(card, "Epic", C_Q_EPIC,
-			"Sell Epic (purple) " .. fields.rarityNoun .. ". Requires the section to be enabled and the item's iLvl to fall inside the range below.")
+			"Sell purple " .. fields.rarityNoun .. " when this section is on and the iLvl is in range.")
 		tglEpic:SetPoint("TOPRIGHT", -15, -12)
 		tglEpic:SetSize(60, 20)
 
 		local tglRare = MakeToggle(card, "Rare", C_Q_RARE,
-			"Sell Rare (blue) " .. fields.rarityNoun .. ". Requires the section to be enabled and the item's iLvl to fall inside the range below.")
+			"Sell blue " .. fields.rarityNoun .. " when this section is on and the iLvl is in range.")
 		tglRare:SetPoint("RIGHT", tglEpic, "LEFT", -16, 0)
 		tglRare:SetSize(60, 20)
 
@@ -5923,7 +6088,8 @@ local function BuildUI(self)
 		-- minus 24 (gaps + "to") = ~254. Each spinner = ~120.
 		local SPINNER_W = 100
 
-		local minFrame = MakeSpinnerInput(card, SPINNER_W, 22, 1, 9999)
+		local minFrame = MakeSpinnerInput(card, SPINNER_W, 22, 1, 9999, nil,
+			"Lowest item level this sell rule can sell.", "Minimum iLvl")
 		minFrame:SetPoint("LEFT", lblIlvl, "RIGHT", 8, 0)
 		local minBox = minFrame.editBox
 
@@ -5931,7 +6097,8 @@ local function BuildUI(self)
 		toLabel:SetPoint("LEFT", minFrame, "RIGHT", 8, 0)
 		toLabel:SetText("to")
 
-		local maxFrame = MakeSpinnerInput(card, SPINNER_W, 22, 1, 9999)
+		local maxFrame = MakeSpinnerInput(card, SPINNER_W, 22, 1, 9999, nil,
+			"Highest item level this sell rule can sell.", "Maximum iLvl")
 		maxFrame:SetPoint("LEFT", toLabel, "RIGHT", 8, 0)
 		local maxBox = maxFrame.editBox
 
@@ -5975,7 +6142,7 @@ local function BuildUI(self)
 
 	-- Card 1: BoE Armor
 	local boeArmor = MakeSellCategoryCard(self, "BoE Armor", yOff, CARD_H, {
-		enableTooltip = "Sells Bind-on-Equip armor and accessories (rings, necks, trinkets) that match the Rare/Epic toggles and the iLvl range below. Weapons go in the BoE Weapons section. Keep-list and quest items are safe.",
+		enableTooltip = "Sell BoE armor and accessories at vendors. Rare, Epic, and iLvl choices below decide what can sell. Weapons use BoE Weapons. Keep and quest items stay safe.",
 		rarityNoun    = "BoE armor (no weapons)",
 	})
 	self._boeArmor = boeArmor
@@ -5983,7 +6150,7 @@ local function BuildUI(self)
 
 	-- Card 2: BoP
 	local bop = MakeSellCategoryCard(self, "BoP", yOff, CARD_H, {
-		enableTooltip = "Sells Bind-on-Pickup gear (any slot, including weapons) that matches the Rare/Epic toggles and the iLvl range below. Keep-list and quest items are safe.",
+		enableTooltip = "Sell bound gear at vendors. Rare, Epic, and iLvl choices below decide what can sell. Keep and quest items stay safe.",
 		rarityNoun    = "BoP gear",
 	})
 	self._bop = bop
@@ -5991,7 +6158,7 @@ local function BuildUI(self)
 
 	-- Card 3: BoE Weapons
 	local boeWeapons = MakeSellCategoryCard(self, "BoE Weapons", yOff, CARD_H, {
-		enableTooltip = "Sells Bind-on-Equip weapons, shields, ranged, thrown, and relics that match the Rare/Epic toggles and the iLvl range below. Wins over BoE Armor when an item fits both. Keep-list and quest items are safe.",
+		enableTooltip = "Sell BoE weapons and weapon-slot items at vendors. Rare, Epic, and iLvl choices below decide what can sell. Keep and quest items stay safe.",
 		rarityNoun    = "BoE weapon-slot items",
 	})
 	self._boeWeapons = boeWeapons
@@ -6218,6 +6385,10 @@ local function BuildUI(self)
 	searchBox:SetScript("OnEditFocusLost", function(s)
 		if (s:GetText() or "") == "" then searchPlaceholder:Show() end
 	end)
+	AttachSimpleTooltip(searchFrame, "Search",
+		"Type part of an item name to filter the list.")
+	AttachSimpleTooltip(searchBox, "Search",
+		"Type part of an item name to filter the list.")
 	self._searchBox = searchBox
 
 	-- Clear (x) button at the right edge of the search frame. Visible only
@@ -6242,7 +6413,8 @@ local function BuildUI(self)
 	self._searchClear = searchClear
 
 	-- Raw toggle
-	local tglRaw = MakeToggle(manageBox, "Raw", C_ACCENT)
+	local tglRaw = MakeToggle(manageBox, "Raw", C_ACCENT,
+		"Show item IDs and raw lines. Use this when copying lists between accounts.")
 	tglRaw:SetSize(LIST_RAW_W, 20)
 	tglRaw:SetPoint("LEFT", searchFrame, "RIGHT", 8, 0)
 	self._tglRaw = tglRaw
@@ -6271,11 +6443,14 @@ local function BuildUI(self)
 		ApplyBackdrop(refreshBtn, C_ROW_HOVER, C_BORDER)
 		refreshText:SetTextColor(unpack(C_TEXT))
 		refreshIcon:SetVertexColor(1, 1, 1, 1)
+		ShowSimpleTooltip(refreshBtn, "Refresh",
+			"Loads missing item names for this list.")
 	end)
 	refreshBtn:SetScript("OnLeave", function()
 		ApplyBackdrop(refreshBtn, C_ROW_ODD, C_BORDER)
 		refreshText:SetTextColor(unpack(C_DIM))
 		refreshIcon:SetVertexColor(0.7, 0.7, 0.7, 1)
+		GameTooltip:Hide()
 	end)
 
 	-- "Item Name" column header above the list (CSS: list-header, h=40, bg #101010)
@@ -7071,7 +7246,7 @@ local function BuildUI(self)
 	end)
 
 	-- Filters tab -> Affix Display: Collection Mode toggle. Mirrors the
-	-- Only missing affixes toggle. On toggle-on we re-pull PE's
+	-- Show/Keep Missing Affix toggle. On toggle-on we re-pull PE's
 	-- learned-affix table (it may have grown since the player last
 	-- reloaded) and force a dot refresh so existing bag slots reflect
 	-- the new owned/missing partition immediately. Accessed through
@@ -7096,15 +7271,17 @@ local function BuildUI(self)
 		-- learned count from PE, not the alias-expanded lookup-key count.
 		if btn._checked then
 			local count = _G.AutoDelete_OwnedAffixCount or 0
-			print("|cffff8000[AutoDelete]|r affix collection mode |cff00ff00ON|r. "
+			local colorLabel = _G.AutoDelete_GetMissingAffixColorLabel
+				and _G.AutoDelete_GetMissingAffixColorLabel(p)
+				or "bright red"
+			print("|cffff8000[AutoDelete]|r Show/Keep Missing Affix |cff00ff00ON|r. "
 				.. count .. " owned affixes mirrored from PE. Dots will now "
-				.. "show ONLY for missing affixes (in gold).")
+				.. "show/keep missing affixes only (in " .. colorLabel .. ").")
 		else
-			print("|cffff8000[AutoDelete]|r affix collection mode |cffff5555OFF|r. "
+			print("|cffff8000[AutoDelete]|r Show/Keep Missing Affix |cffff5555OFF|r. "
 				.. "Dots show on all affixed items, colored by tier.")
 		end
 	end)
-
 	self._tglSingleAffix:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
@@ -7520,6 +7697,7 @@ local function BuildUI(self)
 		speedDD:SetValue((p.scanInterval and p.scanInterval >= 0.5) and p.scanInterval or 0.5)
 		self._tglShowAffixDot:SetChecked(p.showAffixDot ~= false)  -- default true if nil
 		self._tglAffixCollection:SetChecked(p.affixCollectionMode == true)  -- default false if nil
+		if self._refreshMissingAffixColorButtons then self:_refreshMissingAffixColorButtons() end
 		UpdateTabColors()
 
 		-- Also refresh tracking stats if the Tracking tab is currently shown.

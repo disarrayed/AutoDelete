@@ -2,24 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [3.23] - 2026-06-02
 
 ### Added
 
-- **Keep One Affix.** New Affix tab toggle keeps one armor/accessory item for each missing affix and clears extras. Keep list wins, and Sell-list extras are left for the vendor path.
+- **KeepOne Missing Affix.** New Affix tab toggle protects one gear item for each missing affix from Delete and Sell rules. It is a toggle, not a list, and learned affixes are ignored.
 - **KeepStack list.** New per-character list for consumables and other stackable items. Add an item to KeepStack to keep one stack and clear extra stacks.
 
 ### Improved
 
-- **Affix Protection tiers.** Replaced the iLvl floor with Tier I-V protection checkboxes. Checked tiers are protected before Delete or Sell rules, and Only Missing Affixes narrows protection to unlearned affixes.
+- **Affix Protection tiers.** Replaced the iLvl floor with Tier I-V protection checkboxes. Checked tiers are protected before Delete or Sell rules as a hard stop for matching affix items.
+- **Show/Keep Missing Affix.** Renamed the Only Missing Affixes toggle so the label matches that it both shows missing affix dots and protects missing affix items.
 - **Decision History search.** The Decision History window now has a search box for item names, item IDs, affix names, actions, reasons, rules, and bag slots.
+- **ElvUI junk coin sync.** When ElvUI is loaded and Junk is set to Delete, AutoDelete hides ElvUI's junk coin marker and restores the prior ElvUI setting when Junk is no longer Delete.
+- **Missing Affix Color.** The Affix Tools card now lets each character choose the dot color for missing or unlearned affixes. The default is `#ff3b41`.
 - **Popup separation.** Custom popup windows now use a stronger shared edge and raise themselves when opened or dragged so overlapping windows are easier to tell apart.
 - **Popup footer buttons.** Moved the Learned Affixes Refresh action out of the title bar and into the footer button area, matching the Import Raw popup pattern.
 - **List tab help.** Delete, Sell, Keep, KeepOne, and KeepStack tabs now explain what each list does, with clear warnings that KeepOne and KeepStack delete extras instead of protecting the item.
 
 ### Fixed
 
-- **Missing affix hard stop.** When Only Missing Affixes or Keep One Affix is on, an unlearned affix item is protected before Delete or Sell rules, even when no tier checkbox is enabled.
+- **Missing affix hard stop.** When Show/Keep Missing Affix or KeepOne Missing Affix is on, an unlearned affix item is protected before Delete or Sell rules, even when no tier checkbox is enabled.
+- **KeepOne Missing Affix extras.** Duplicate missing-affix items now bypass the missing-affix hard stop and follow normal Sell/Delete cleanup rules while the selected keeper stays protected.
+- **KeepOne Missing Affix weapon duplicates.** Weapon-slot affix items now participate in KeepOne Missing Affix, so duplicate missing weapon affixes can clear through Sell Filters while one copy stays protected.
+- **Affix tier protection priority.** KeepOne Missing Affix duplicate extras no longer bypass checked No Auto-Sell tiers, so a protected Tier I-V affix is kept before cleanup reaches Sell or Delete.
+- **No Auto-Sell tier hard stop.** Show/Keep Missing Affix no longer narrows checked tier protection; a checked tier blocks matching affix items before any cleanup filter can sell or delete them.
+- **Learned affix tier protection.** No Auto-Sell tiers now also recognize known learned-affix item names when the tooltip marker is missing, so checked tiers apply to all affix items.
 - **Raw export imports across accounts.** Export Raw now has a Raw checkbox: unchecked copies plain names, checked copies stable `item:<id>` lines with name comments so Import Raw does not depend on the target account's item-name cache.
 
 ## [3.22] - 2026-06-02
@@ -39,7 +47,7 @@ All notable changes to this project will be documented in this file.
 - **Clickable affix names.** Click an affix in the Learned Affixes window to select that name in a copy-only field for Ctrl+C. The field restores the affix text if typed into; Enter or Escape clears it.
 - **Affix Tools labels.** The Affix tab now names its tools Refresh List and Update Affix List.
 - **Affix shortcut.** `/del affix` now opens the Learned / Unlearned affix list directly.
-- **Slash command cleanup.** Removed `/del collection`; use the Affix tab's Only missing affixes toggle instead.
+- **Slash command cleanup.** Removed `/del collection`; use the Affix tab's Show/Keep Missing Affix toggle instead.
 
 ### Fixed
 
@@ -67,7 +75,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - **Fixed an affix dot bug.** Some affix items could show as a black dot.
-- **Unlearned affixes now show the gold dot.** This works even when "Only missing affixes" is turned off.
+- **Unlearned affixes now show the gold dot.** This works even when Show/Keep Missing Affix is turned off.
 - **Val'anyr now works correctly.** AutoDelete now matches both ways the name can appear.
 
 ### Notes
