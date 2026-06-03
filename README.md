@@ -154,6 +154,7 @@ Feature ideas and patterns from the community.
 - **Performance feedback and Qloot pointer.** **Xurkon** flagged the delete-burst stutter on PE Discord and pointed at Qloot's throttle implementation.
 - **Auto-Sell options for Junk and Common** (Filters tab), suggested by Sanavesa on 5/21/26 at 8:48 AM:
   > thanks for this addon. is it possible to add auto-sell junk/common? currently i see there is auto-delete options
+- **KeepStack**, credited to @lazzat as the inspiration for the KeepStack list name and keep-one-stack cleanup idea. AutoDelete's KeepStack code is an original implementation for this addon.
 
 ---
 

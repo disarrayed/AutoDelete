@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - **KeepOne Missing Affix.** New Affix tab toggle protects one gear item for each missing affix from Delete and Sell rules. It is a toggle, not a list, and learned affixes are ignored.
 - **KeepStack list.** New per-character list for consumables and other stackable items. Add an item to KeepStack to keep one stack and clear extra stacks.
+- **KeepStack credit.** KeepStack is credited to @lazzat as the inspiration for the list name and keep-one-stack cleanup idea. AutoDelete's KeepStack code is an original implementation for this addon.
 
 ### Improved
 
