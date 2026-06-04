@@ -4150,9 +4150,9 @@ local function BuildUI(self)
 				label = "Affix",
 				title = "Affix",
 				sections = {
-					{ icon = "Interface\\Icons\\Spell_Holy_DivineProtection", title = "Affix Protection", body = "No Auto-Sell protects the checked tiers I-V before Delete or Sell rules. Keep still wins first. Checked tiers are a hard stop for matching affix items." },
+					{ icon = "Interface\\Icons\\Spell_Holy_DivineProtection", title = "Affix Protection", body = "No Auto-Sell protects the checked tiers I-V before Delete, Sell, or One-Key Disenchant rules. Keep still wins first. Checked tiers are a hard stop for matching affix items." },
 					{ icon = "Interface\\Icons\\Spell_Nature_WispSplode", title = "Affix Display", body = "Show affix dot marks affixed bag items by tier. The selected missing-affix color means the account has not learned that affix. Show/Keep Missing Affix hides learned affixes and shows only missing-affix dots." },
-					{ icon = "Interface\\Icons\\INV_Misc_Gem_Amethyst_03", title = "KeepOne Missing Affix", body = "Protects one gear item for each missing affix from Delete and Sell rules. Duplicate missing-affix gear can still clear through normal cleanup rules. It is a toggle, not a list, and it ignores learned affixes." },
+					{ icon = "Interface\\Icons\\INV_Misc_Gem_Amethyst_03", title = "KeepOne Missing Affix", body = "Protects one gear item for each missing affix from Delete, Sell, or One-Key Disenchant rules. Duplicate missing-affix gear can still clear through normal cleanup rules. It is a toggle, not a list, and it ignores learned affixes." },
 					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_02", title = "Affix Tools", body = "Refresh List checks your Delete and Sell lists for affixed items and prints what it finds without changing anything. Update Affix List opens Learned and Unlearned tabs from PE's account-bound affix data. Missing Affix Color opens a color picker for affixes your account has not learned." },
 				}
 			},
@@ -4170,7 +4170,7 @@ local function BuildUI(self)
 				title = "Filters",
 				sections = {
 					{ icon = "Interface\\Icons\\INV_Broom_01", title = "Auto Actions", body = "Sets Junk, Common, and Greens each to Del or Sell, or leaves them off. |cffbf3838Del deletes matching items on bag scans|r, Sell vendors them. Keep-list and quest items are always safe. If ElvUI is loaded, Junk Del hides ElvUI's junk coin while active." },
-					{ icon = "Interface\\Icons\\INV_Enchant_ShardGlimmering", title = "DE Filters", body = "Controls which items One-Key Disenchant will target, by bind state (BoP, BoE), quality (Unc, Rare, Epic), and the iLvl range. It does not touch your item lists." },
+					{ icon = "Interface\\Icons\\INV_Enchant_ShardGlimmering", title = "DE Filters", body = "Controls which items One-Key Disenchant will target, by bind state (BoP, BoE), quality (Unc, Rare, Epic), and the iLvl range. Keep, KeepOne, KeepStack, and Affix rules still protect items." },
 					{ icon = "Interface\\Icons\\Spell_Shadow_DetectInvisibility", title = "Ignored Items", body = "Manage Ignored opens the list of items you marked Ignore on the Keep-list popup. Ignore only hides an item from Process Bags, it is not protection from cleanup." },
 				}
 			},
@@ -4776,7 +4776,7 @@ local function BuildUI(self)
 	affixProtHint:SetJustifyH("LEFT")
 	affixProtHint:SetWordWrap(true)
 	affixProtHint:SetNonSpaceWrap(false)
-	affixProtHint:SetText("Checked tiers are protected before Delete or Sell.")
+	affixProtHint:SetText("Checked tiers are protected before Delete, Sell, or One-Key Disenchant.")
 
 	local function MakeAffixTierToggle(label, field, xOff)
 		local row = CreateFrame("Button", nil, aCard1)

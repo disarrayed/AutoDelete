@@ -2,12 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.24] - 2026-06-04
+
+### Fixed
+
+- **Affix dots now match Project Ebonhold affix names more reliably.** Creature affixes such as Undead, Beast, Demon, Dragon, Elemental, Giant, Mechanical, and Machine now match their item suffixes correctly.
+- **Affix data sync now asks Project Ebonhold for the learned-affix list when needed.** AutoDelete still uses Project Ebonhold's parsed affix table, so it does not replace Project Ebonhold's packet handler.
+- **Affix Protection now protects One-Key Disenchant too.** Keep, KeepOne, KeepStack, Show/Keep Missing Affix, KeepOne Missing Affix, and checked Affix Protection tiers now block One-Key Disenchant before it can target the item.
+
 ## [3.23] - 2026-06-02
 
 ### Added
 
 - **KeepOne Missing Affix.** New Affix tab toggle protects one gear item for each missing affix from Delete and Sell rules. It is a toggle, not a list, and learned affixes are ignored.
 - **KeepStack list.** New per-character list for consumables and other stackable items. Add an item to KeepStack to keep one stack and clear extra stacks.
+- **KeepStack credit.** KeepStack is credited to @lazzat as the inspiration for the list name and keep-one-stack cleanup idea. AutoDelete's KeepStack code is an original implementation for this addon.
 
 ### Improved
 

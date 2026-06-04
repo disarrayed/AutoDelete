@@ -65,12 +65,12 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 - Cosmetic slots (shirts, tabards) and quest items are always protected
 
 **Affix Protection** (Affix tab)
-- Tier I-V checkboxes protect matching affix tiers before Delete or Sell rules
+- Tier I-V checkboxes protect matching affix tiers before Delete, Sell, or One-Key Disenchant rules
 - "Refresh List" scans your Delete / Sell lists for items the filter would now save
 - "Update Affix List" opens a scrollable window with Learned and Unlearned tabs, grouped by tier. Click an affix name to select it for Ctrl+C; Enter or Escape clears the copy box.
-- **Show/Keep Missing Affix**: only show the affix dot on items whose affixes you haven't learned yet and protect those missing affixes from Sell/Delete cleanup.
+- **Show/Keep Missing Affix**: only show the affix dot on items whose affixes you haven't learned yet and protect those missing affixes from Delete, Sell, and One-Key Disenchant cleanup.
 - **Missing Affix Color**: choose the dot color for affixes your account has not learned. Defaults to `#ff3b41`.
-- **KeepOne Missing Affix**: protect one gear item for each missing affix from Delete and Sell rules. Duplicate missing-affix gear can still clear through normal cleanup rules. It is a toggle, not a list, and learned affixes are ignored.
+- **KeepOne Missing Affix**: protect one gear item for each missing affix from Delete, Sell, and One-Key Disenchant rules. Duplicate missing-affix gear can still clear through normal cleanup rules. It is a toggle, not a list, and learned affixes are ignored.
 
 **Companion management**
 - Auto-summon Greedy Scavenger and Goblin Merchant
@@ -154,6 +154,7 @@ Feature ideas and patterns from the community.
 - **Performance feedback and Qloot pointer.** **Xurkon** flagged the delete-burst stutter on PE Discord and pointed at Qloot's throttle implementation.
 - **Auto-Sell options for Junk and Common** (Filters tab), suggested by Sanavesa on 5/21/26 at 8:48 AM:
   > thanks for this addon. is it possible to add auto-sell junk/common? currently i see there is auto-delete options
+- **KeepStack**, credited to @lazzat as the inspiration for the KeepStack list name and keep-one-stack cleanup idea. AutoDelete's KeepStack code is an original implementation for this addon.
 
 ---
 

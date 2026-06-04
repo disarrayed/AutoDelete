@@ -2188,6 +2188,22 @@ end
 -- Globals for the row context menu in Options.lua to call.
 _G.AutoDelete_AddItemToList = AddItemToList
 _G.AutoDelete_RemoveItemFromList = RemoveItemFromList
+_G.AutoDelete_RemoveItemFromAllLists = function(itemId)
+	local removed = {}
+	local keys = {
+		{ key = "listText", label = "Delete" },
+		{ key = "sellListText", label = "Sell" },
+		{ key = "whitelistText", label = "Keep" },
+		{ key = "keepOneText", label = "KeepOne" },
+		{ key = "keepStackText", label = "KeepStack" },
+	}
+	for _, itemList in ipairs(keys) do
+		if RemoveItemFromList(itemList.key, itemId) then
+			table.insert(removed, itemList.label)
+		end
+	end
+	return #removed, table.concat(removed, ", ")
+end
 
 -- Global functions for ElvUI buttons - always target the correct list
 _G.AutoDelete_AddToDeleteList = function() HandleItemDrop("listText") end
@@ -3796,6 +3812,7 @@ boeTip:SetClampedToScreen(false)
 -- bump the main chunk past Lua 5.1's 200-local cap.
 _G.AutoDelete_TooltipCache = _G.AutoDelete_TooltipCache or {
 	affix     = {},
+	affixName = {},
 	boe       = {},
 	soulbound = {},
 }
@@ -3812,6 +3829,7 @@ do
 	local _CACHE_VERSION = 6
 	if _G.AutoDelete_TooltipCache._cacheVersion ~= _CACHE_VERSION then
 		_G.AutoDelete_TooltipCache.affix     = {}
+		_G.AutoDelete_TooltipCache.affixName = {}
 		_G.AutoDelete_TooltipCache.soulbound = {}
 		_G.AutoDelete_TooltipCache.boe       = {}
 		_G.AutoDelete_TooltipCache._cacheVersion = _CACHE_VERSION
@@ -3859,6 +3877,8 @@ function AutoDelete_ScanBagItemMarkers(bag, slot, link)
 	-- NumLines == 0 until the tooltip is shown.
 	boeTip:Show()
 	local n = boeTip:NumLines()
+	local nameLine = _G["AutoDelete_BoETipTextLeft1"]
+	local tooltipName = nameLine and nameLine:GetText() or nil
 	local hasBoE, isSoulbound, hasAffixMarker = false, false, false
 	for i = 1, n do
 		local leftFS  = _G["AutoDelete_BoETipTextLeft"  .. i]
@@ -3889,8 +3909,9 @@ function AutoDelete_ScanBagItemMarkers(bag, slot, link)
 	-- Roman numeral on the item NAME. If the marker is hidden/missing,
 	-- fall back to PE's known affix names so learned affixes still obey
 	-- No Auto-Sell tier protection.
-	local affixLevel = false
 	local itemName = GetItemInfo(link)
+	_G.AutoDelete_TooltipCache.affixName[link] = tooltipName or itemName
+	local affixLevel = false
 	if hasAffixMarker then
 		affixLevel = AutoDelete_ExtractAffixLevel(itemName) or 1
 		if _G.AutoDelete_DebugSell then
@@ -4127,11 +4148,11 @@ _G.AutoDelete_OwnedAffixCount = _G.AutoDelete_OwnedAffixCount or 0
 -- affix and draws a "missing" dot on items the player actually
 -- owns.
 --
--- KEEP THIS TABLE IN SYNC with PE's extraction.lua AFFIX_ALIASES.
--- If PE adds/changes an alias, add/change it here too. The table is
--- small and stable (6 entries as of PE 2026-05-20), so mirroring is
--- cheaper than RPC into PE's file-local. Documented in the local
--- AGENTS.md PE-integration table.
+-- KEEP THIS TABLE IN SYNC with PE's extraction.lua AFFIX_ALIASES and
+-- PE creature-family item suffixes. If PE adds/changes an alias, add/change
+-- it here too. Version bump forces the mirrored owned-affix map to rebuild
+-- after /reload because the map itself lives on _G.
+_G.AutoDelete_AffixAliasVersionCurrent = 4
 local AUTODELETE_AFFIX_ALIASES = {
 	["cold"]            = "precision",
 	["enduring flesh"]  = "ironhide",
@@ -4139,6 +4160,29 @@ local AUTODELETE_AFFIX_ALIASES = {
 	["keen strikes"]    = "keen strike",
 	["shield block"]    = "block",
 	["spirit surge"]    = "inner light",
+	["beast"]           = "the beast",
+	["beast bane"]      = "the beast",
+	["beast slayer"]    = "the beast",
+	["dragon"]          = "the dragon",
+	["dragonkin"]       = "the dragon",
+	["dragonkin bane"]  = "the dragon",
+	["dragon slayer"]   = "the dragon",
+	["demon"]           = "the demon",
+	["demon bane"]      = "the demon",
+	["demon slayer"]    = "the demon",
+	["elemental"]       = "the elemental",
+	["elemental bane"]  = "the elemental",
+	["elemental slayer"] = "the elemental",
+	["giant"]           = "the giant",
+	["giant bane"]      = "the giant",
+	["giant slayer"]    = "the giant",
+	["mechanical"]      = "the mechanical",
+	["mechanical bane"] = "the mechanical",
+	["machine"]         = "the machine",
+	["machine slayer"]  = "the machine",
+	["undead"]          = "the undead",
+	["undead bane"]     = "the undead",
+	["undead slayer"]   = "the undead",
 }
 
 -- Rebuild the owned-affixes lookup from PE's data. Cheap; called from
@@ -4186,12 +4230,62 @@ function AutoDelete_RefreshOwnedAffixes()
 	_G.AutoDelete_OwnedAffixes = map
 	_G.AutoDelete_KnownAffixes = known
 	_G.AutoDelete_OwnedAffixCount = count
+	_G.AutoDelete_OwnedAffixAliasVersion = _G.AutoDelete_AffixAliasVersionCurrent
 	if _G.AutoDelete_DebugSell then
 		print(string.format(
 			"|cffff8000[AutoDelete DEBUG]|r owned-affix map rebuilt: %d learned affixes mirrored (alias expansion included).",
 			count))
 	end
 	return count
+end
+
+_G.AutoDelete_EnsureOwnedAffixMirror = function()
+	if not _G.ExtractionService or not _G.ExtractionService.learnedAffixes then
+		return false
+	end
+	if _G.AutoDelete_OwnedAffixAliasVersion ~= _G.AutoDelete_AffixAliasVersionCurrent
+		or not next(_G.AutoDelete_KnownAffixes or {}) then
+		AutoDelete_RefreshOwnedAffixes()
+		return true
+	end
+	return false
+end
+
+_G.AutoDelete_LastPEAffixRequestAt = _G.AutoDelete_LastPEAffixRequestAt or 0
+local PE_AFFIX_REQUEST_THROTTLE_SECONDS = 5
+
+function AutoDelete_RequestPELearnedAffixes(reason, force)
+	local service = _G.ExtractionService
+	if type(service) ~= "table" or type(service.RequestLearnedAffixes) ~= "function" then
+		return false, "unavailable"
+	end
+
+	local affixes = service.learnedAffixes
+	if not force and type(affixes) == "table" and next(affixes) ~= nil then
+		return false, "has-data"
+	end
+
+	local now = GetTime and GetTime() or 0
+	local last = _G.AutoDelete_LastPEAffixRequestAt or 0
+	if not force and last > 0 and now > 0
+		and now - last < PE_AFFIX_REQUEST_THROTTLE_SECONDS then
+		return false, "throttled"
+	end
+
+	_G.AutoDelete_LastPEAffixRequestAt = now
+	local ok, err = pcall(service.RequestLearnedAffixes)
+	if not ok then
+		if _G.AutoDelete_DebugSell then
+			print("|cffff8000[AutoDelete DEBUG]|r PE learned-affix request failed: " .. tostring(err))
+		end
+		return false, "error"
+	end
+
+	if _G.AutoDelete_DebugSell then
+		print("|cffff8000[AutoDelete DEBUG]|r requested PE learned-affix packet"
+			.. (reason and (" (" .. tostring(reason) .. ")") or "") .. ".")
+	end
+	return true, "requested"
 end
 
 -- Auto-refresh hook: install once at PLAYER_LOGIN. PE's packet handler
@@ -4259,7 +4353,15 @@ function AutoDelete_IsAffixOwnedByItemName(itemName)
 	if not _G.ExtractionService or not _G.ExtractionService.learnedAffixes then
 		return nil
 	end
+	_G.AutoDelete_EnsureOwnedAffixMirror()
 	local lower = Normalize(itemName)
+	if _G.AutoDelete_OwnedAffixes[lower] then
+		return true
+	end
+	local directAlias = AUTODELETE_AFFIX_ALIASES[lower]
+	if directAlias and _G.AutoDelete_OwnedAffixes[Normalize(directAlias)] then
+		return true
+	end
 	for affixName in pairs(_G.AutoDelete_OwnedAffixes) do
 		-- Item names follow "<base item> of <affix name>" so the affix
 		-- name appears as a suffix preceded by " of ". Match against the
@@ -4333,6 +4435,11 @@ local function HasAffix(bag, slot)
 		boeTip:SetBagItem(bag, slot)
 		boeTip:Show()
 		local n = boeTip:NumLines()
+		local nameLine = _G["AutoDelete_BoETipTextLeft1"]
+		local tooltipName = nameLine and nameLine:GetText() or nil
+		if link then
+			_G.AutoDelete_TooltipCache.affixName[link] = tooltipName or GetItemInfo(link)
+		end
 		local hasAffixMarker = false
 		local foundLine = nil
 		for i = 1, n do
@@ -4380,6 +4487,28 @@ local function HasAffix(bag, slot)
 	-- free. See AutoDelete_ScanBagItemMarkers for the rationale.
 	local _, _, level = AutoDelete_ScanBagItemMarkers(bag, slot, link)
 	return level
+end
+
+_G.AutoDelete_GetAffixDisplayName = function(link, bag, slot, fallbackName)
+	if link and _G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.affixName then
+		local cachedName = _G.AutoDelete_TooltipCache.affixName[link]
+		if cachedName and cachedName ~= "" then return cachedName end
+	end
+	if link and bag and slot then
+		boeTip:Hide()
+		boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
+		boeTip:ClearLines()
+		boeTip:SetBagItem(bag, slot)
+		boeTip:Show()
+		local nameLine = _G["AutoDelete_BoETipTextLeft1"]
+		local tooltipName = nameLine and nameLine:GetText() or nil
+		boeTip:Hide()
+		if tooltipName and tooltipName ~= "" then
+			_G.AutoDelete_TooltipCache.affixName[link] = tooltipName
+			return tooltipName
+		end
+	end
+	return fallbackName or (link and GetItemInfo(link)) or nil
 end
 
 -- Wrapped in `do ... end` so the two helper locals don't bump the main
@@ -4526,10 +4655,13 @@ local function ScanLearnedAffixes()
 	-- whether PE is loaded.
 	if type(_G.ExtractionService) ~= "table"
 		or type(_G.ExtractionService.learnedAffixes) ~= "table" then
+		local requested = AutoDelete_RequestPELearnedAffixes
+			and AutoDelete_RequestPELearnedAffixes("learned-affixes-scan", false)
 		showFn(ACCENT_OPEN .. "Project Ebonhold not loaded" .. COLOR_CLOSE
 			.. "\n\nNo learned-affix data is available yet. Open the "
 			.. "Extraction UI in-game once to trigger data sync, then click "
-			.. "Scan Learned Affixes again.")
+			.. "Scan Learned Affixes again."
+			.. (requested and "\n\nAutoDelete also requested a fresh sync from Project Ebonhold." or ""))
 		return
 	end
 
@@ -4548,10 +4680,13 @@ local function ScanLearnedAffixes()
 	local function buildRosterText(byTier, total, learned)
 		if total == 0 then
 			if learned then
+				local requested = AutoDelete_RequestPELearnedAffixes
+					and AutoDelete_RequestPELearnedAffixes("learned-affixes-empty", false)
 				return ACCENT_OPEN .. "No learned affixes found" .. COLOR_CLOSE
 					.. "\n\nEither this character has not learned any affixes yet, "
 					.. "or Project Ebonhold has not received the SEND_LEARNED_AFFIXES "
 					.. "packet yet. Try opening the Extraction UI once, then re-scan."
+					.. (requested and "\n\nAutoDelete also requested a fresh sync from Project Ebonhold." or "")
 			end
 			return ACCENT_OPEN .. "No unlearned affixes found" .. COLOR_CLOSE
 				.. "\n\nProject Ebonhold reports every known affix as learned "
@@ -4945,7 +5080,9 @@ _G.AutoDelete_DecideDot = function(link, bag, slot, button)
 	-- what happens to owned affixes: hide them instead of tier-coloring
 	-- them. If PE data is not ready yet, keep the tier color so dots do
 	-- not silently disappear during PE's startup window.
-	local itemName = GetItemInfo(link)
+	local itemName = _G.AutoDelete_GetAffixDisplayName
+		and _G.AutoDelete_GetAffixDisplayName(link, bag, slot, GetItemInfo(link))
+		or GetItemInfo(link)
 	local owned = AutoDelete_IsAffixOwnedByItemName(itemName)
 	if owned == nil then
 		return tier, nil
@@ -4966,10 +5103,18 @@ _G.AutoDelete_GetAffixKeyForItemName = function(itemName)
 	if not itemName or not _G.ExtractionService or not _G.ExtractionService.learnedAffixes then
 		return nil
 	end
-	if not next(_G.AutoDelete_KnownAffixes or {}) and AutoDelete_RefreshOwnedAffixes then
-		AutoDelete_RefreshOwnedAffixes()
-	end
+	_G.AutoDelete_EnsureOwnedAffixMirror()
 	local lower = Normalize(itemName)
+	if _G.AutoDelete_KnownAffixes[lower] then
+		return lower
+	end
+	local directAlias = AUTODELETE_AFFIX_ALIASES[lower]
+	if directAlias then
+		local aliasKey = Normalize(directAlias)
+		if _G.AutoDelete_KnownAffixes[aliasKey] then
+			return aliasKey
+		end
+	end
 	local best = nil
 	for affixName in pairs(_G.AutoDelete_KnownAffixes or {}) do
 		local suffix = " of " .. affixName
@@ -5263,13 +5408,13 @@ _G.AutoDelete_IsMissingAffixHardStop = function(profile, bag, slot, itemLink, si
 	return false, nil
 end
 
--- Combined check used by the delete scanner and the sell loop. Returns true
+-- Combined check used by destructive actions. Returns true
 -- when the item should be protected from destructive rules. Checked tier
--- protection is absolute. Missing-affix hard stop blocks Delete/Sell when
+-- protection is absolute. Missing-affix hard stop blocks destructive actions when
 -- Show/Keep Missing Affix or KeepOne Missing Affix is on; KeepOne Missing Affix extras
 -- bypass only that hard stop, not checked tier protection.
 IsAffixProtected = function(profile, bag, slot, itemLink, action, singleAffixSlot)
-	if action ~= "delete" and action ~= "sell" then return false end
+	if action ~= "delete" and action ~= "sell" and action ~= "disenchant" then return false end
 
 	if _G.AutoDelete_HasAnyAffixTierProtection(profile) then
 		local tier = HasAffix(bag, slot)
@@ -5279,6 +5424,47 @@ IsAffixProtected = function(profile, bag, slot, itemLink, action, singleAffixSlo
 
 	if _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot) then return true end
 	return false
+end
+
+_G.AutoDelete_IsDestructiveRuleProtected = function(profile, bag, slot, itemLink, action, singleAffixSlot, keepIDs, keepNames, keepOneIDs, keepStackIDs)
+	if not profile or not itemLink then return false, nil end
+	local itemId = GetItemIDFromLink(itemLink)
+	local itemName = GetItemInfo(itemLink)
+
+	if not keepIDs or not keepNames then
+		keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	end
+	if _G.AutoDelete_IsWhitelistedFast(keepIDs or {}, keepNames or {}, itemId, itemName) then
+		return true, "keep-blocked"
+	end
+
+	if not keepOneIDs then
+		keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	end
+	if itemId and keepOneIDs and keepOneIDs[itemId] then
+		return true, "keepone-blocked"
+	end
+
+	if not keepStackIDs then
+		keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+	end
+	if itemId and keepStackIDs and keepStackIDs[itemId] then
+		return true, "keepstack-blocked"
+	end
+
+	if singleAffixSlot and not singleAffixSlot.extra then
+		return true, "single-affix-kept"
+	end
+
+	local missingBlocked, missingState = _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot)
+	if missingBlocked then
+		return true, missingState == "unknown" and "missing-affix-unknown" or "missing-affix-blocked"
+	end
+
+	if IsAffixProtected(profile, bag, slot, itemLink, action, singleAffixSlot) then
+		return true, "affix-blocked"
+	end
+	return false, nil
 end
 
 -- Copper → "Xg Ys Zc" string. Defined before functions that use it.
@@ -7579,12 +7765,14 @@ end
 -- panel, etc.) hit this path; the override-aware Find function below uses
 -- AutoDelete_IsDisenchantable_IgnoringKeep + an explicit Keep check so it
 -- can detect the blocked-by-Keep case for the popup.
-local function IsDisenchantable(profile, bag, slot)
+local function IsDisenchantable(profile, bag, slot, singleAffixPlan, keepIDs, keepNames, keepOneIDs, keepStackIDs)
 	if not _G.AutoDelete_IsDisenchantable_IgnoringKeep(profile, bag, slot) then return false end
 	local link = GetContainerItemLink(bag, slot)
-	local id = GetItemIDFromLink(link)
-	local name = GetItemInfo(link)
-	if IsWhitelisted(profile, id, name) then return false end
+	local slotPlan = singleAffixPlan and singleAffixPlan.slots[bag .. ":" .. slot]
+	if _G.AutoDelete_IsDestructiveRuleProtected
+		and _G.AutoDelete_IsDestructiveRuleProtected(profile, bag, slot, link, "disenchant", slotPlan, keepIDs, keepNames, keepOneIDs, keepStackIDs) then
+		return false
+	end
 	return true
 end
 
@@ -7607,10 +7795,14 @@ local function FindDisenchantTarget(profile)
 		_ss.find = (_ss.find or 0) + 1
 	end
 	local _p = AutoDelete_PerfBegin("FindDisenchantTarget")
+	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+	local singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
 	for bag = 0, NUM_BAG_SLOTS do
 		local count = GetContainerNumSlots(bag) or 0
 		for slot = 1, count do
-			if IsDisenchantable(profile, bag, slot) then
+			if IsDisenchantable(profile, bag, slot, singleAffixPlan, keepIDs, keepNames, keepOneIDs, keepStackIDs) then
 				local link = GetContainerItemLink(bag, slot)
 				local name = GetItemInfo(link) or "?"
 				AutoDelete_PerfEnd("FindDisenchantTarget", _p)
@@ -8303,10 +8495,29 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 
 	if not ignored then
 		local isDisenchantable = _G.AutoDelete_IsDisenchantable
+		local isDisenchantableIgnoringKeep = _G.AutoDelete_IsDisenchantable_IgnoringKeep
 		local isMillable       = _G.AutoDelete_IsMillable
 		local isProspectable   = _G.AutoDelete_IsProspectable
 		local isOpenable       = _G.AutoDelete_IsOpenable
-		if isDisenchantable and isDisenchantable(profile, bag, slot) then
+		if isDisenchantableIgnoringKeep and isDisenchantableIgnoringKeep(profile, bag, slot) then
+			local deProtected, deProtectReason = false, nil
+			if _G.AutoDelete_IsDestructiveRuleProtected then
+				deProtected, deProtectReason = _G.AutoDelete_IsDestructiveRuleProtected(
+					profile, bag, slot, link, "disenchant", singleAffixSlot,
+					keepIDs, keepNames, keepOneIDs, keepStackIDs)
+			end
+			if deProtected then
+				local reasonText = (deProtectReason == "keep-blocked" and "Keep list blocked disenchant")
+					or (deProtectReason == "keepone-blocked" and "KeepOne blocked disenchant")
+					or (deProtectReason == "keepstack-blocked" and "KeepStack blocked disenchant")
+					or (deProtectReason == "single-affix-kept" and "KeepOne Missing Affix blocked disenchant")
+					or (deProtectReason == "missing-affix-blocked" and "Missing affix hard stop blocked disenchant")
+					or (deProtectReason == "missing-affix-unknown" and "Missing affix hard stop blocked disenchant (ownership unknown)")
+					or "Affix Protection blocked disenchant"
+				return "kept", reasonText, "One-Key Disenchant", name
+			end
+		end
+		if isDisenchantable and isDisenchantable(profile, bag, slot, singleAffixPlan, keepIDs, keepNames, keepOneIDs, keepStackIDs) then
 			return "disenchant", "Eligible for disenchant", "One-Key Disenchant", name, true
 		elseif isMillable and isMillable(profile, bag, slot) then
 			return "mill", "Eligible for milling", "One-Key Mill", name, true
@@ -8694,6 +8905,36 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 	end
 
 	table.insert(lines, "")
+	table.insert(lines, "Disenchant decision:")
+	if not profile.disenchantEnabled then
+		table.insert(lines, "  Final: keep. One-Key Disenchant is off.")
+	elseif not bag or not slot or not itemLink then
+		table.insert(lines, "  Final: keep. Item must be in a bag slot for One-Key Disenchant.")
+	elseif not _G.AutoDelete_IsDisenchantable_IgnoringKeep
+		or not _G.AutoDelete_IsDisenchantable_IgnoringKeep(profile, bag, slot) then
+		table.insert(lines, "  Final: keep. DE filters do not match this item.")
+	else
+		local deProtected, deProtectReason = false, nil
+		if _G.AutoDelete_IsDestructiveRuleProtected then
+			deProtected, deProtectReason = _G.AutoDelete_IsDestructiveRuleProtected(
+				profile, bag, slot, itemLink, "disenchant", singleAffixSlot,
+				keepIDs, keepNames, keepOneIDs, keepStackIDs)
+		end
+		if deProtected then
+			local deText = (deProtectReason == "keep-blocked" and "Keep list blocks disenchant.")
+				or (deProtectReason == "keepone-blocked" and "KeepOne blocks disenchant.")
+				or (deProtectReason == "keepstack-blocked" and "KeepStack blocks disenchant.")
+				or (deProtectReason == "single-affix-kept" and "KeepOne Missing Affix blocks disenchant.")
+				or (deProtectReason == "missing-affix-blocked" and "Missing affix hard stop blocks disenchant.")
+				or (deProtectReason == "missing-affix-unknown" and "Missing affix hard stop blocks disenchant because ownership is unknown.")
+				or "Affix protection blocks disenchant."
+			table.insert(lines, "  Final: keep. " .. deText)
+		else
+			table.insert(lines, "  Final: disenchant. DE filters matched and no protection rule blocked it.")
+		end
+	end
+
+	table.insert(lines, "")
 	table.insert(lines, "Affix dot:")
 	if not bag or not slot or not itemLink then
 		table.insert(lines, "  Unknown. Item must be in a bag slot to scan tooltip markers.")
@@ -8704,9 +8945,19 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		elseif cachedProfile and cachedProfile.showAffixDot == false then
 			table.insert(lines, "  Hidden. Show affix dot is off.")
 		else
-			local owned = AutoDelete_IsAffixOwnedByItemName(name or itemName)
+			local affixDisplayName = _G.AutoDelete_GetAffixDisplayName
+				and _G.AutoDelete_GetAffixDisplayName(itemLink, bag, slot, itemName)
+				or itemName
+			local owned = AutoDelete_IsAffixOwnedByItemName(affixDisplayName)
+			local affixKey = _G.AutoDelete_GetAffixKeyForItemName
+				and _G.AutoDelete_GetAffixKeyForItemName(affixDisplayName)
+				or nil
 			local dotLevel, dotColor = _G.AutoDelete_DecideDot(itemLink, bag, slot, nil)
 			table.insert(lines, "  Tier: " .. tostring(tier))
+			if affixDisplayName and affixDisplayName ~= itemName then
+				table.insert(lines, "  Tooltip name: " .. tostring(affixDisplayName))
+			end
+			table.insert(lines, "  Affix key: " .. tostring(affixKey or "not matched"))
 			table.insert(lines, "  PE ownership: " .. (owned == nil and "unknown" or (owned and "owned" or "missing")))
 			if not dotLevel then
 				table.insert(lines, "  Dot: hidden because Show/Keep Missing Affix is on and the affix is owned.")
@@ -8867,6 +9118,13 @@ function _G.AutoDelete_ShowItemQuickMenu(data, owner)
 	local name = data.name or (link and GetItemInfo(link)) or (id and GetItemInfo(id))
 	if not id then return end
 	local isProcessRow = data.processAction == true
+	local stackCount
+	if data.bag and data.slot then
+		local _, count = GetContainerItemInfo(data.bag, data.slot)
+		stackCount = count
+	end
+	local maxStack = select(8, GetItemInfo(link or ("item:" .. id)))
+	local isStackable = ((tonumber(maxStack) or 1) > 1) or ((tonumber(stackCount) or 1) > 1)
 	local frame = _G.AutoDelete_QuickMenuFrame
 	if not frame then
 		frame = CreateFrame("Frame", "AutoDeleteQuickMenu", UIParent)
@@ -8917,13 +9175,32 @@ function _G.AutoDelete_ShowItemQuickMenu(data, owner)
 				if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
 			end
 		end },
-		{ label = "KeepStack", func = function()
+		{ label = "Remove", func = function()
+			local removedCount, removedLabels = 0, ""
+			if _G.AutoDelete_RemoveItemFromAllLists then
+				removedCount, removedLabels = _G.AutoDelete_RemoveItemFromAllLists(id)
+			end
+			if removedCount > 0 then
+				if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
+				if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+				if _G.AutoDeleteOptionsPanel and _G.AutoDeleteOptionsPanel.Refresh then
+					_G.AutoDeleteOptionsPanel:Refresh()
+				end
+				print("|cffff8000[AutoDelete]|r Removed " .. (link or name or ("item:" .. id))
+					.. " from all lists (" .. removedLabels .. ").")
+			else
+				print("|cffff8000[AutoDelete]|r " .. (link or name or ("item:" .. id)) .. " is not on any list.")
+			end
+		end },
+	}
+	if isStackable then
+		table.insert(actions, 5, { label = "KeepStack", func = function()
 			if AddItemToList("keepStackText", id) then
 				if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
 				if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
 			end
-		end },
-	}
+		end })
+	end
 	if isProcessRow then
 		actions[#actions + 1] = { label = "Ignore for Process", func = function()
 			SetProcessIgnored(id, true)
@@ -9566,6 +9843,16 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 		RefreshCachedProfile()
 		return
 	end
+	if event == "ADDON_LOADED" and tostring(arg1 or ""):lower() == "projectebonhold" then
+		AfterDelay(0.2, function()
+			if AutoDelete_InstallPEAffixHook then AutoDelete_InstallPEAffixHook() end
+			if AutoDelete_RefreshOwnedAffixes then AutoDelete_RefreshOwnedAffixes() end
+			if AutoDelete_RequestPELearnedAffixes then
+				AutoDelete_RequestPELearnedAffixes("ProjectEbonhold loaded", false)
+			end
+		end)
+		return
+	end
 	-- v3.20 action chat notifier. UNIT_SPELLCAST_SUCCEEDED on 3.3.5a fires
 	-- (unit, spellName, rank, lineID, spellID) -- arg1 is unit, arg2 is
 	-- the spell name. We only care about player casts whose name matches
@@ -9603,6 +9890,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 		-- by PLAYER_LOGIN), the install is a no-op and the SPELLS_CHANGED
 		-- handler will pick up affix updates as a fallback.
 		if AutoDelete_InstallPEAffixHook then AutoDelete_InstallPEAffixHook() end
+		if AutoDelete_RequestPELearnedAffixes then
+			AutoDelete_RequestPELearnedAffixes("PLAYER_LOGIN", false)
+		end
 		if _G.AutoDelete_InstallBagAltRightHook then _G.AutoDelete_InstallBagAltRightHook() end
 
 		-- One-Key Disenchant: create the SecureActionButton once. Name is
