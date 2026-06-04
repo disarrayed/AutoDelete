@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.24.1] - 2026-06-04
+
+### Hot Fix
+
+- **One-Key Disenchant Keep safety.** Keep-listed items ask first again, and only the confirmed item can pass the final one-key target check.
+- **Process Bags fast-click safety.** Disenchant, Mill, Prospect, and Open now wait through the cast or global cooldown after a click, so a fast second click cannot use or equip the targeted item by mistake.
+- **Process Bags button text.** The Process Bags filter buttons and Clear Ignored button no longer draw outlined text.
+- **Process Bags bug reports.** `/del processdebug` opens a copyable per-slot gate report for missing Process Bags items. `/del processdebug clear` wipes the diagnostic caches before a fresh repro.
+- **Disenchant bug reports.** `/del de history` opens recent One-Key Disenchant actions from the current session.
+
 ## [3.24] - 2026-06-04
 
 ### Fixed

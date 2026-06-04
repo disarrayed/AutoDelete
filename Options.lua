@@ -1381,7 +1381,7 @@ for i, def in ipairs(filterDefs) do
 		FILTER_PAD + col * (FILTER_BTN_W + FILTER_GAP),
 		-4 - row * (FILTER_BTN_H + 4))
 	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
-	local txt = MakeText(btn, 10, C_TEXT, "OUTLINE")
+	local txt = MakeText(btn, 10, C_TEXT, "")
 	txt:SetPoint("CENTER")
 	txt:SetWidth(FILTER_BTN_W - 8)
 	txt:SetJustifyH("CENTER")
@@ -1467,20 +1467,14 @@ footerCount:SetTextColor(unpack(C_DIM))
 footerCount:SetPoint("LEFT", footer, "LEFT", 10, 0)
 footerCount:SetText("")  -- populated by RefreshProcessPanel in B.3
 
--- Clear Ignored: canonical MakeActionButton (semantic destructive red).
--- Resets the per-character ignore list, undoing prior right-click-off
--- decisions. Treated as destructive because it loses user choices.
--- Same width and height as the Filters-tab card buttons so footers
--- read uniformly across the addon.
 local clearBtn = MakeActionButton(footer, "Clear Ignored", C_RED, function()
 	if _G.AutoDelete_ClearProcessIgnored then _G.AutoDelete_ClearProcessIgnored() end
 	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
 end, 110, 22)
 clearBtn:SetPoint("RIGHT", footer, "RIGHT", -8, 0)
+if clearBtn._text then clearBtn._text:SetFont(FONT, 10, "") end
 footerCount:SetPoint("RIGHT", clearBtn, "LEFT", -8, 0)
 footerCount:SetJustifyH("LEFT")
--- Tooltip on hover (the MakeActionButton hover styling stays; we just
--- layer the tooltip on top so the user sees the explanation).
 clearBtn:SetScript("OnEnter", function(btn)
 	btn:SetBackdropColor(C_RED[1], C_RED[2], C_RED[3], 0.3)
 	btn:SetBackdropBorderColor(C_RED[1], C_RED[2], C_RED[3], 1)
@@ -1542,6 +1536,14 @@ local rowPool = {}          -- [i] = row frame
 local armed = {}            -- ["disenchant"] = {bag, slot, itemId} or nil
 local lastResults = {}      -- cached ProcessScan result, used by row OnClick
 local lastAllTotal = 0      -- total rows before filter, for footer text
+
+function _G.AutoDelete_ProcessClearArmed(action)
+	if action then
+		armed[action] = nil
+	else
+		for k in pairs(armed) do armed[k] = nil end
+	end
+end
 
 -- Lazy row factory. The first call creates the row; subsequent calls
 -- return the cached frame.
@@ -1660,7 +1662,7 @@ local function GetOrCreateRow(i)
 			return
 		end
 		if _G.AutoDelete_ProcessArm then
-			local ok = _G.AutoDelete_ProcessArm(entry.action, entry.bag, entry.slot)
+			local ok, reason = _G.AutoDelete_ProcessArm(entry.action, entry.bag, entry.slot)
 			if ok then
 				armed[entry.action] = {
 					bag = entry.bag, slot = entry.slot, itemId = entry.itemId
@@ -1668,6 +1670,10 @@ local function GetOrCreateRow(i)
 				if _G.AutoDelete_RefreshProcessPanel then
 					_G.AutoDelete_RefreshProcessPanel()
 				end
+			elseif reason == "locked" then
+				print("|cffff8000[AutoDelete]|r That action is waiting for the current cast or global cooldown.")
+			elseif reason then
+				print("|cffff8000[AutoDelete]|r " .. tostring(reason) .. ".")
 			end
 		end
 	end)

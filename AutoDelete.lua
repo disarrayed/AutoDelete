@@ -1174,6 +1174,190 @@ local function AfterDelay(delaySeconds, fn)
 	timerFrame:SetScript("OnUpdate", PumpTimers)
 end
 
+_G.AutoDelete_OneKeyLockFloorSeconds = 1.5
+_G.AutoDelete_OneKeyLocks = _G.AutoDelete_OneKeyLocks or {}
+_G.AutoDelete_OneKeyPendingTargets = _G.AutoDelete_OneKeyPendingTargets or {}
+
+function _G.AutoDelete_GetOneKeyButton(action)
+	if action == "disenchant" then return _G.AutoDeleteDisenchantButton end
+	if action == "mill" then return _G.AutoDeleteMillButton end
+	if action == "prospect" then return _G.AutoDeleteProspectButton end
+	if action == "open" then return _G.AutoDeleteOpenButton end
+	return nil
+end
+
+function _G.AutoDelete_GetOneKeyLockRemaining(action)
+	local lock = action and _G.AutoDelete_OneKeyLocks[action] or nil
+	if not lock then return 0 end
+	local left = (lock.untilAt or 0) - GetTime()
+	if left <= 0 then return 0 end
+	return left
+end
+
+function _G.AutoDelete_IsOneKeyLocked(action)
+	return (_G.AutoDelete_GetOneKeyLockRemaining(action) or 0) > 0
+end
+
+function _G.AutoDelete_GetOneKeyLastTarget(action)
+	if action == "disenchant" and _G.AutoDelete_GetDisenchantLastTarget then
+		return _G.AutoDelete_GetDisenchantLastTarget()
+	elseif action == "mill" and _G.AutoDelete_GetMillLastTarget then
+		return _G.AutoDelete_GetMillLastTarget()
+	elseif action == "prospect" and _G.AutoDelete_GetProspectLastTarget then
+		return _G.AutoDelete_GetProspectLastTarget()
+	elseif action == "open" and _G.AutoDelete_GetOpenLastTarget then
+		return _G.AutoDelete_GetOpenLastTarget()
+	end
+	return nil
+end
+
+function _G.AutoDelete_SetOneKeyLastTarget(action, target)
+	if action == "disenchant" and _G.AutoDelete_SetDisenchantLastTarget then
+		_G.AutoDelete_SetDisenchantLastTarget(target)
+	elseif action == "mill" and _G.AutoDelete_SetMillLastTarget then
+		_G.AutoDelete_SetMillLastTarget(target)
+	elseif action == "prospect" and _G.AutoDelete_SetProspectLastTarget then
+		_G.AutoDelete_SetProspectLastTarget(target)
+	elseif action == "open" and _G.AutoDelete_SetOpenLastTarget then
+		_G.AutoDelete_SetOpenLastTarget(target)
+	end
+end
+
+function _G.AutoDelete_UpdateOneKeyAction(action)
+	if action == "disenchant" and _G.AutoDelete_UpdateDisenchantButton then
+		_G.AutoDelete_UpdateDisenchantButton()
+	elseif action == "mill" and _G.AutoDelete_UpdateMillButton then
+		_G.AutoDelete_UpdateMillButton()
+	elseif action == "prospect" and _G.AutoDelete_UpdateProspectButton then
+		_G.AutoDelete_UpdateProspectButton()
+	elseif action == "open" and _G.AutoDelete_UpdateOpenButton then
+		_G.AutoDelete_UpdateOpenButton()
+	end
+	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+	local panel = _G.AutoDeleteOptionsPanel
+	if panel and panel.IsShown and panel:IsShown() then
+		if panel._refreshDisenchantStatus then panel:_refreshDisenchantStatus() end
+		if panel._refreshMillStatus then panel:_refreshMillStatus() end
+		if panel._refreshProspectStatus then panel:_refreshProspectStatus() end
+		if panel._refreshOpenStatus then panel:_refreshOpenStatus() end
+		if panel._refreshProcessCount then panel:_refreshProcessCount() end
+	end
+end
+
+function _G.AutoDelete_IsOneKeyTargetAllowed(action, target)
+	if not action or not target or not target.bag or not target.slot then return false end
+	local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
+	if not profile then return false end
+	if action == "disenchant" and _G.AutoDelete_IsDisenchantable then
+		local override = _G.AutoDelete_KeepOverrideTargets and _G.AutoDelete_KeepOverrideTargets.disenchant
+		if target.keepOverride and override and override.bag == target.bag and override.slot == target.slot then
+			local link = GetContainerItemLink(target.bag, target.slot)
+			local id = link and GetItemIDFromLink(link) or nil
+			if id == override.id and _G.AutoDelete_IsDisenchantable_IgnoringKeep then
+				return _G.AutoDelete_IsDisenchantable_IgnoringKeep(profile, target.bag, target.slot)
+			end
+			return false
+		end
+		return _G.AutoDelete_IsDisenchantable(profile, target.bag, target.slot)
+	elseif action == "mill" and _G.AutoDelete_IsMillable then
+		return _G.AutoDelete_IsMillable(profile, target.bag, target.slot)
+	elseif action == "prospect" and _G.AutoDelete_IsProspectable then
+		return _G.AutoDelete_IsProspectable(profile, target.bag, target.slot)
+	elseif action == "open" and _G.AutoDelete_IsOpenable then
+		return _G.AutoDelete_IsOpenable(profile, target.bag, target.slot)
+	end
+	return false
+end
+
+function _G.AutoDelete_ClearOneKeyTarget(action)
+	if not action then return end
+	_G.AutoDelete_SetOneKeyLastTarget(action, nil)
+	local btn = _G.AutoDelete_GetOneKeyButton(action)
+	if btn and btn.SetAttribute and not (InCombatLockdown and InCombatLockdown()) then
+		btn:SetAttribute("macrotext", "")
+	end
+	local panel = _G.AutoDeleteOptionsPanel
+	if panel and panel.IsShown and panel:IsShown() then
+		if action == "disenchant" and panel._refreshDisenchantStatus then panel:_refreshDisenchantStatus() end
+		if action == "mill" and panel._refreshMillStatus then panel:_refreshMillStatus() end
+		if action == "prospect" and panel._refreshProspectStatus then panel:_refreshProspectStatus() end
+		if action == "open" and panel._refreshOpenStatus then panel:_refreshOpenStatus() end
+	end
+	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+end
+
+function _G.AutoDelete_StartOneKeyLock(action, seconds)
+	if not action then return end
+	local btn = _G.AutoDelete_GetOneKeyButton(action)
+	local now = GetTime()
+	local duration = math.max(tonumber(seconds) or 0, _G.AutoDelete_OneKeyLockFloorSeconds or 1.5)
+	local untilAt = now + duration
+	_G.AutoDelete_OneKeyLocks[action] = { untilAt = untilAt }
+	if btn then
+		if not (InCombatLockdown and InCombatLockdown()) then
+			btn:SetAttribute("macrotext", "")
+			if btn.Disable then btn:Disable() end
+		end
+	end
+	if _G.AutoDelete_ProcessClearArmed then _G.AutoDelete_ProcessClearArmed(action) end
+	AfterDelay(duration, function()
+		local lock = _G.AutoDelete_OneKeyLocks[action]
+		if lock and (lock.untilAt or 0) <= GetTime() + 0.01 then
+			_G.AutoDelete_OneKeyLocks[action] = nil
+			local lockedBtn = _G.AutoDelete_GetOneKeyButton(action)
+			if lockedBtn and lockedBtn.Enable then
+				local function enableWhenSafe()
+					if InCombatLockdown and InCombatLockdown() then
+						AfterDelay(0.25, enableWhenSafe)
+						return
+					end
+					lockedBtn:Enable()
+					if _G.AutoDelete_UpdateOneKeyAction then _G.AutoDelete_UpdateOneKeyAction(action) end
+				end
+				enableWhenSafe()
+				return
+			end
+			if _G.AutoDelete_UpdateOneKeyAction then _G.AutoDelete_UpdateOneKeyAction(action) end
+		end
+	end)
+	if _G.AutoDelete_UpdateOneKeyAction then _G.AutoDelete_UpdateOneKeyAction(action) end
+end
+
+function _G.AutoDelete_OnOneKeyPostClick(action)
+	local target = _G.AutoDelete_GetOneKeyLastTarget and _G.AutoDelete_GetOneKeyLastTarget(action)
+	if not target then return end
+	_G.AutoDelete_OneKeyPendingTargets[action] = {
+		target = target,
+		untilAt = GetTime() + 3,
+	}
+	_G.AutoDelete_StartOneKeyLock(action, _G.AutoDelete_OneKeyLockFloorSeconds)
+end
+
+function _G.AutoDelete_OnOneKeySpellStart(spellName)
+	if not spellName then return end
+	local action = nil
+	if _G.AutoDelete_GetCachedDisenchantName and spellName == (_G.AutoDelete_GetCachedDisenchantName() or "Disenchant") then
+		action = "disenchant"
+	elseif _G.AutoDelete_GetCachedMillName and spellName == (_G.AutoDelete_GetCachedMillName() or "Milling") then
+		action = "mill"
+	elseif _G.AutoDelete_GetCachedProspectName and spellName == (_G.AutoDelete_GetCachedProspectName() or "Prospecting") then
+		action = "prospect"
+	end
+	if not action then return end
+	local duration = _G.AutoDelete_OneKeyLockFloorSeconds or 1.5
+	if UnitCastingInfo then
+		local _, _, _, _, startTimeMS, endTimeMS = UnitCastingInfo("player")
+		if startTimeMS and endTimeMS and endTimeMS > startTimeMS then
+			duration = math.max(duration, (endTimeMS - startTimeMS) / 1000)
+		end
+	end
+	local pending = _G.AutoDelete_OneKeyPendingTargets[action]
+	if pending then
+		pending.untilAt = GetTime() + duration + 2
+	end
+	_G.AutoDelete_StartOneKeyLock(action, duration)
+end
+
 -- ============================================================================
 -- Database
 -- ============================================================================
@@ -7136,6 +7320,14 @@ end
 -- is off (one bool check, no scan).
 local function UpdateOpenButton()
 	if not openButton then return end
+	if _G.AutoDelete_IsOneKeyLocked and _G.AutoDelete_IsOneKeyLocked("open") then
+		if InCombatLockdown and InCombatLockdown() then
+			openUpdatePending = true
+			return
+		end
+		ApplyOpenMacrotext(nil, nil)
+		return
+	end
 	local profile = cachedProfile
 	if not profile or not profile.autoOpenEnabled then
 		-- Cheap idempotent short-circuit: if we've already cleared the
@@ -7191,6 +7383,10 @@ local function GetOpenStatus()
 	if not profile or not profile.autoOpenEnabled then
 		return "Disabled", 0.55, 0.55, 0.55
 	end
+	local lockLeft = _G.AutoDelete_GetOneKeyLockRemaining and _G.AutoDelete_GetOneKeyLockRemaining("open") or 0
+	if lockLeft > 0 then
+		return string.format("Waiting %.1fs", lockLeft), 1.0, 0.82, 0.0
+	end
 	if openLastTarget and openLastTarget.link then
 		return "Next: " .. openLastTarget.link, 0.7, 0.85, 1.0
 	end
@@ -7198,6 +7394,7 @@ local function GetOpenStatus()
 end
 
 function _G.AutoDelete_GetOpenLastTarget() return openLastTarget end
+function _G.AutoDelete_SetOpenLastTarget(target) openLastTarget = target end
 
 -- Returns/creates the secure button. Called from PLAYER_LOGIN. Separate
 -- function so the event handler can call this and immediately do an
@@ -7216,6 +7413,9 @@ local function EnsureOpenButton()
 	openButton:SetAttribute("macrotext", "")
 	openButton:HookScript("PreClick", function()
 		if _G.AutoDelete_OnOneKeyPreClick then _G.AutoDelete_OnOneKeyPreClick("open") end
+	end)
+	openButton:HookScript("PostClick", function()
+		if _G.AutoDelete_OnOneKeyPostClick then _G.AutoDelete_OnOneKeyPostClick("open") end
 	end)
 	return openButton
 end
@@ -7346,6 +7546,14 @@ end
 
 local function UpdateMillButton()
 	if not millButton then return end
+	if _G.AutoDelete_IsOneKeyLocked and _G.AutoDelete_IsOneKeyLocked("mill") then
+		if InCombatLockdown and InCombatLockdown() then
+			millUpdatePending = true
+			return
+		end
+		ApplyMillMacrotext(nil, nil)
+		return
+	end
 	local profile = cachedProfile
 	if not profile or not profile.millEnabled or not CharacterCanMill() then
 		-- Cheap idempotent short-circuit (see UpdateOpenButton for rationale).
@@ -7400,6 +7608,10 @@ local function GetMillStatus()
 	if not CharacterCanMill() then
 		return "Requires Inscription", 1.0, 0.3, 0.3
 	end
+	local lockLeft = _G.AutoDelete_GetOneKeyLockRemaining and _G.AutoDelete_GetOneKeyLockRemaining("mill") or 0
+	if lockLeft > 0 then
+		return string.format("Waiting %.1fs", lockLeft), 1.0, 0.82, 0.0
+	end
 	if millLastTarget and millLastTarget.link then
 		return "Next: " .. millLastTarget.link, 0.7, 0.85, 1.0
 	end
@@ -7407,6 +7619,8 @@ local function GetMillStatus()
 end
 
 function _G.AutoDelete_GetMillLastTarget() return millLastTarget end
+function _G.AutoDelete_SetMillLastTarget(target) millLastTarget = target end
+function _G.AutoDelete_GetCachedMillName() return cachedMillName end
 
 local function EnsureMillButton()
 	if millButton then return millButton end
@@ -7418,6 +7632,9 @@ local function EnsureMillButton()
 	millButton:SetAttribute("macrotext", "")
 	millButton:HookScript("PreClick", function()
 		if _G.AutoDelete_OnOneKeyPreClick then _G.AutoDelete_OnOneKeyPreClick("mill") end
+	end)
+	millButton:HookScript("PostClick", function()
+		if _G.AutoDelete_OnOneKeyPostClick then _G.AutoDelete_OnOneKeyPostClick("mill") end
 	end)
 	return millButton
 end
@@ -7532,6 +7749,14 @@ end
 
 local function UpdateProspectButton()
 	if not prospectButton then return end
+	if _G.AutoDelete_IsOneKeyLocked and _G.AutoDelete_IsOneKeyLocked("prospect") then
+		if InCombatLockdown and InCombatLockdown() then
+			prospectUpdatePending = true
+			return
+		end
+		ApplyProspectMacrotext(nil, nil)
+		return
+	end
 	local profile = cachedProfile
 	if not profile or not profile.prospectEnabled or not CharacterCanProspect() then
 		-- Cheap idempotent short-circuit (see UpdateOpenButton for rationale).
@@ -7586,6 +7811,10 @@ local function GetProspectStatus()
 	if not CharacterCanProspect() then
 		return "Requires Jewelcrafting", 1.0, 0.3, 0.3
 	end
+	local lockLeft = _G.AutoDelete_GetOneKeyLockRemaining and _G.AutoDelete_GetOneKeyLockRemaining("prospect") or 0
+	if lockLeft > 0 then
+		return string.format("Waiting %.1fs", lockLeft), 1.0, 0.82, 0.0
+	end
 	if prospectLastTarget and prospectLastTarget.link then
 		return "Next: " .. prospectLastTarget.link, 0.7, 0.85, 1.0
 	end
@@ -7593,6 +7822,8 @@ local function GetProspectStatus()
 end
 
 function _G.AutoDelete_GetProspectLastTarget() return prospectLastTarget end
+function _G.AutoDelete_SetProspectLastTarget(target) prospectLastTarget = target end
+function _G.AutoDelete_GetCachedProspectName() return cachedProspectName end
 
 local function EnsureProspectButton()
 	if prospectButton then return prospectButton end
@@ -7604,6 +7835,9 @@ local function EnsureProspectButton()
 	prospectButton:SetAttribute("macrotext", "")
 	prospectButton:HookScript("PreClick", function()
 		if _G.AutoDelete_OnOneKeyPreClick then _G.AutoDelete_OnOneKeyPreClick("prospect") end
+	end)
+	prospectButton:HookScript("PostClick", function()
+		if _G.AutoDelete_OnOneKeyPostClick then _G.AutoDelete_OnOneKeyPostClick("prospect") end
 	end)
 	return prospectButton
 end
@@ -7841,6 +8075,14 @@ end
 -- bool check, no scan).
 local function UpdateDisenchantButton()
 	if not disenchantButton then return end
+	if _G.AutoDelete_IsOneKeyLocked and _G.AutoDelete_IsOneKeyLocked("disenchant") then
+		if InCombatLockdown and InCombatLockdown() then
+			disenchantUpdatePending = true
+			return
+		end
+		ApplyDisenchantMacrotext(nil, nil)
+		return
+	end
 	local profile = cachedProfile
 	if not profile or not profile.disenchantEnabled or not CharacterCanDisenchant() then
 		-- Cheap idempotent short-circuit (see UpdateOpenButton for rationale).
@@ -7868,13 +8110,22 @@ local function UpdateDisenchantButton()
 		local _oId = _oLink and GetItemIDFromLink(_oLink) or nil
 		if _oId == _od.id then
 			local _oName = GetItemInfo(_oLink)
-			disenchantLastTarget = { bag = _od.bag, slot = _od.slot, link = _oLink, name = _oName }
-			ApplyDisenchantMacrotext(_od.bag, _od.slot)
-			local panel = _G.AutoDeleteOptionsPanel
-			if panel and panel.IsShown and panel:IsShown() and panel._refreshDisenchantStatus then
-				panel:_refreshDisenchantStatus()
+			if _G.AutoDelete_IsDisenchantable_IgnoringKeep
+				and _G.AutoDelete_IsDisenchantable_IgnoringKeep(profile, _od.bag, _od.slot) then
+				disenchantLastTarget = {
+					bag = _od.bag,
+					slot = _od.slot,
+					link = _oLink,
+					name = _oName,
+					keepOverride = true,
+				}
+				ApplyDisenchantMacrotext(_od.bag, _od.slot)
+				local panel = _G.AutoDeleteOptionsPanel
+				if panel and panel.IsShown and panel:IsShown() and panel._refreshDisenchantStatus then
+					panel:_refreshDisenchantStatus()
+				end
+				return
 			end
-			return
 		end
 		_G.AutoDelete_KeepOverrideTargets.disenchant = nil
 	end
@@ -7927,6 +8178,7 @@ end
 -- file-local var so the chat printer can read the most-recently-armed
 -- target without us hoisting those vars to globals.
 function _G.AutoDelete_GetDisenchantLastTarget() return disenchantLastTarget end
+function _G.AutoDelete_SetDisenchantLastTarget(target) disenchantLastTarget = target end
 function _G.AutoDelete_GetCachedDisenchantName() return cachedDisenchantName end
 
 -- (A2) SavedVariables migration. AutoDeleteStatsDB is per-character; we add
@@ -8134,14 +8386,24 @@ end
 
 function _G.AutoDelete_OnOneKeyPreClick(action)
 	local hasTarget = false
+	local target = nil
 	if action == "disenchant" and _G.AutoDelete_GetDisenchantLastTarget then
-		hasTarget = _G.AutoDelete_GetDisenchantLastTarget() ~= nil
+		target = _G.AutoDelete_GetDisenchantLastTarget()
+		hasTarget = target ~= nil
 	elseif action == "mill" and _G.AutoDelete_GetMillLastTarget then
-		hasTarget = _G.AutoDelete_GetMillLastTarget() ~= nil
+		target = _G.AutoDelete_GetMillLastTarget()
+		hasTarget = target ~= nil
 	elseif action == "prospect" and _G.AutoDelete_GetProspectLastTarget then
-		hasTarget = _G.AutoDelete_GetProspectLastTarget() ~= nil
+		target = _G.AutoDelete_GetProspectLastTarget()
+		hasTarget = target ~= nil
 	elseif action == "open" and _G.AutoDelete_GetOpenLastTarget then
-		hasTarget = _G.AutoDelete_GetOpenLastTarget() ~= nil
+		target = _G.AutoDelete_GetOpenLastTarget()
+		hasTarget = target ~= nil
+	end
+	if hasTarget and _G.AutoDelete_IsOneKeyTargetAllowed and not _G.AutoDelete_IsOneKeyTargetAllowed(action, target) then
+		if _G.AutoDelete_ClearOneKeyTarget then _G.AutoDelete_ClearOneKeyTarget(action) end
+		print("|cffff8000[AutoDelete]|r Keep list blocked that one-key target.")
+		hasTarget = false
 	end
 	if hasTarget then return end
 	if _G.AutoDelete_CheckKeepOverrideForAction then
@@ -8205,19 +8467,35 @@ end
 -- Matches the cached localized spell names captured at PLAYER_LOGIN.
 function _G.AutoDelete_OnSpellCastSucceeded(spellName)
 	if not spellName then return end
-	local lastTarget, verb = nil, nil
-	if spellName == (cachedDisenchantName or "Disenchant") then
+	local lastTarget, verb, action = nil, nil, nil
+	if _G.AutoDelete_GetCachedDisenchantName and spellName == (_G.AutoDelete_GetCachedDisenchantName() or "Disenchant") then
 		verb = "Disenchanted"
-		lastTarget = disenchantLastTarget
-	elseif spellName == (cachedMillName or "Milling") then
+		action = "disenchant"
+	elseif _G.AutoDelete_GetCachedMillName and spellName == (_G.AutoDelete_GetCachedMillName() or "Milling") then
 		verb = "Milled"
-		lastTarget = millLastTarget
-	elseif spellName == (cachedProspectName or "Prospecting") then
+		action = "mill"
+	elseif _G.AutoDelete_GetCachedProspectName and spellName == (_G.AutoDelete_GetCachedProspectName() or "Prospecting") then
 		verb = "Prospected"
-		lastTarget = prospectLastTarget
+		action = "prospect"
+	end
+	local pending = action and _G.AutoDelete_OneKeyPendingTargets and _G.AutoDelete_OneKeyPendingTargets[action] or nil
+	if pending and (pending.untilAt or 0) >= GetTime() then
+		lastTarget = pending.target
+	elseif action and _G.AutoDelete_GetOneKeyLastTarget then
+		lastTarget = _G.AutoDelete_GetOneKeyLastTarget(action)
 	end
 	if verb and lastTarget and lastTarget.link then
 		print("|cffff8000[AutoDelete]|r " .. verb .. " " .. lastTarget.link)
+		if _G.AutoDelete_RecordProcessAction then
+			_G.AutoDelete_RecordProcessAction({
+				action = action,
+				verb = verb,
+				link = lastTarget.link,
+				name = lastTarget.name,
+				bag = lastTarget.bag,
+				slot = lastTarget.slot,
+			})
+		end
 		-- Clear any active override now that the action fired. The
 		-- BAG_UPDATE that follows will re-arm the secure button to whatever
 		-- comes next (or nothing if no eligible items remain).
@@ -8227,6 +8505,9 @@ function _G.AutoDelete_OnSpellCastSucceeded(spellName)
 			elseif verb == "Prospected" then _G.AutoDelete_KeepOverrideTargets.prospect  = nil
 			end
 		end
+	end
+	if action and _G.AutoDelete_OneKeyPendingTargets then
+		_G.AutoDelete_OneKeyPendingTargets[action] = nil
 	end
 end
 
@@ -8241,6 +8522,16 @@ function _G.AutoDelete_CheckOpenSlotChange()
 	if nowLink ~= t.link then
 		-- The slot we armed now holds something else (or is empty). Print.
 		print("|cffff8000[AutoDelete]|r Opened " .. t.link)
+		if _G.AutoDelete_RecordProcessAction then
+			_G.AutoDelete_RecordProcessAction({
+				action = "open",
+				verb = "Opened",
+				link = t.link,
+				name = t.name,
+				bag = t.bag,
+				slot = t.slot,
+			})
+		end
 		-- Clear the cached target so we don't re-print on the next bag
 		-- update; UpdateOpenButton will repopulate it on its rescan.
 		openLastTarget = nil
@@ -8259,6 +8550,10 @@ local function GetDisenchantStatus()
 	end
 	if not CharacterCanDisenchant() then
 		return "Requires Enchanting", 1.0, 0.3, 0.3
+	end
+	local lockLeft = _G.AutoDelete_GetOneKeyLockRemaining and _G.AutoDelete_GetOneKeyLockRemaining("disenchant") or 0
+	if lockLeft > 0 then
+		return string.format("Waiting %.1fs", lockLeft), 1.0, 0.82, 0.0
 	end
 	if disenchantLastTarget and disenchantLastTarget.link then
 		return "Next: " .. disenchantLastTarget.link, 0.7, 0.85, 1.0
@@ -8629,6 +8924,9 @@ end
 -- "armed will apply post-combat" message, but we don't queue here).
 local function ProcessArm(action, bag, slot)
 	if InCombatLockdown and InCombatLockdown() then return false end
+	if _G.AutoDelete_IsOneKeyLocked and _G.AutoDelete_IsOneKeyLocked(action) then
+		return false, "locked"
+	end
 	local btnName
 	if     action == "disenchant" then btnName = "AutoDeleteDisenchantButton"
 	elseif action == "mill"       then btnName = "AutoDeleteMillButton"
@@ -8637,23 +8935,66 @@ local function ProcessArm(action, bag, slot)
 	else return false end
 	local btn = _G[btnName]
 	if not btn then return false end
+	local link = (bag and slot) and GetContainerItemLink(bag, slot) or nil
+	local name = link and GetItemInfo(link) or nil
+	if bag and slot then
+		local db = GetDB()
+		local profile = select(1, GetActiveProfile(db))
+		local id = link and GetItemIDFromLink(link) or nil
+		local currentAction, currentReason, _, _, processAction
+		if profile and link then
+			local deleteNames, deleteIDs = BuildWantedSets(profile.listText, "delete-list")
+			local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
+			local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+			local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+			local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+			local ruleCtx = {
+				deleteNames = deleteNames,
+				deleteIDs = deleteIDs,
+				sellNames = sellNames,
+				sellIDs = sellIDs,
+				keepNames = keepNames,
+				keepIDs = keepIDs,
+				keepOneIDs = keepOneIDs,
+				keepStackIDs = keepStackIDs,
+				keepOneSeenUnits = {},
+				singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames),
+			}
+			currentAction, currentReason, _, _, processAction =
+				_G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, IsProcessIgnored(id), ruleCtx)
+		end
+		if currentAction ~= action or not processAction then
+			return false, currentReason or "blocked"
+		end
+	end
 	if bag and slot then
 		btn:SetAttribute("macrotext", "/use " .. bag .. " " .. slot)
 		-- Disenchant / Mill / Prospect need the spell cast first. Detect
 		-- those by name and prepend /cast <spell> so the keypress fires
 		-- the correct two-step.
 		if action == "disenchant" then
-			btn:SetAttribute("macrotext", "/cast " .. GetSpellInfo(13262) ..
+			btn:SetAttribute("macrotext", "/cast " .. (GetSpellInfo(13262) or "Disenchant") ..
 				"\n/use " .. bag .. " " .. slot)
 		elseif action == "mill" then
-			btn:SetAttribute("macrotext", "/cast " .. GetSpellInfo(51005) ..
+			btn:SetAttribute("macrotext", "/cast " .. (GetSpellInfo(51005) or "Milling") ..
 				"\n/use " .. bag .. " " .. slot)
 		elseif action == "prospect" then
-			btn:SetAttribute("macrotext", "/cast " .. GetSpellInfo(31252) ..
+			btn:SetAttribute("macrotext", "/cast " .. (GetSpellInfo(31252) or "Prospecting") ..
 				"\n/use " .. bag .. " " .. slot)
+		end
+		if _G.AutoDelete_SetOneKeyLastTarget then
+			_G.AutoDelete_SetOneKeyLastTarget(action, {
+				bag = bag,
+				slot = slot,
+				link = link,
+				name = name,
+			})
 		end
 	else
 		btn:SetAttribute("macrotext", "")
+		if _G.AutoDelete_SetOneKeyLastTarget then
+			_G.AutoDelete_SetOneKeyLastTarget(action, nil)
+		end
 	end
 	return true
 end
@@ -9111,6 +9452,275 @@ function _G.AutoDelete_ShowDiagnosticReport()
 	end
 end
 
+function _G.AutoDelete_ClearProcessDebugCache()
+	local cache = _G.AutoDelete_TooltipCache
+	if cache then
+		cache.affix = {}
+		cache.affixName = {}
+		cache.soulbound = {}
+		cache.boe = {}
+		cache.locked = {}
+	end
+end
+
+function _G.AutoDelete_GetProcessTooltipLines(bag, slot, maxLines)
+	local lines = {}
+	if not bag or not slot then return lines end
+	boeTip:Hide()
+	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
+	boeTip:ClearLines()
+	boeTip:SetBagItem(bag, slot)
+	boeTip:Show()
+	local n = boeTip:NumLines()
+	local limit = math.min(n, maxLines or 8)
+	for i = 1, limit do
+		local leftFS = _G["AutoDelete_BoETipTextLeft" .. i]
+		local rightFS = _G["AutoDelete_BoETipTextRight" .. i]
+		local leftText = leftFS and leftFS:GetText() or ""
+		local rightText = rightFS and rightFS:GetText() or ""
+		if leftText ~= "" or rightText ~= "" then
+			if rightText ~= "" then
+				table.insert(lines, "    tt" .. i .. ": " .. leftText .. " || " .. rightText)
+			else
+				table.insert(lines, "    tt" .. i .. ": " .. leftText)
+			end
+		end
+	end
+	if n > limit then
+		table.insert(lines, "    tooltip lines truncated: " .. tostring(n - limit))
+	end
+	boeTip:Hide()
+	return lines
+end
+
+function _G.AutoDelete_BuildProcessDebugReport()
+	local db = GetDB()
+	local profile, profileKey, charKey = GetActiveProfile(db)
+	local counts = ProcessScanCounts(profile)
+	local ignoredCount = 0
+	for _ in pairs(GetProcessIgnoredTable()) do ignoredCount = ignoredCount + 1 end
+	local function yes(value) return value and "yes" or "no" end
+	local function cacheCount(t)
+		local n = 0
+		if t then for _ in pairs(t) do n = n + 1 end end
+		return n
+	end
+	local function statusText(fn)
+		if not fn then return "unknown" end
+		local text = fn()
+		return tostring(text)
+	end
+	local version = (GetAddOnMetadata and GetAddOnMetadata("AutoDelete", "Version")) or "Unknown"
+	local lines = {
+		"AutoDelete Process Bags diagnostic",
+		"Version: " .. tostring(version),
+		"Character: " .. tostring(charKey),
+		"Profile: " .. tostring(profileKey),
+		"Enabled: " .. tostring(profile and profile.enabled),
+		"",
+		"One-key settings:",
+		"  Disenchant enabled: " .. tostring(profile and profile.disenchantEnabled) .. "   spell known: " .. yes(CharacterCanDisenchant()),
+		"  Mill enabled: " .. tostring(profile and profile.millEnabled) .. "   spell known: " .. yes(_G.AutoDelete_CanMill and _G.AutoDelete_CanMill()),
+		"  Prospect enabled: " .. tostring(profile and profile.prospectEnabled) .. "   spell known: " .. yes(_G.AutoDelete_CanProspect and _G.AutoDelete_CanProspect()),
+		"  Open enabled: " .. tostring(profile and profile.autoOpenEnabled),
+		"",
+		"One-key status:",
+		"  Disenchant: " .. statusText(_G.AutoDelete_GetDisenchantStatus),
+		"  Mill: " .. statusText(_G.AutoDelete_GetMillStatus),
+		"  Prospect: " .. statusText(_G.AutoDelete_GetProspectStatus),
+		"  Open: " .. statusText(_G.AutoDelete_GetOpenStatus),
+		"",
+		"Process summary:",
+		"  Rows: " .. tostring(counts.total) .. "   copies: " .. tostring(counts.copies or counts.total),
+		"  Delete: " .. tostring(counts.delete) .. "   Sell: " .. tostring(counts.sell) .. "   DE: " .. tostring(counts.disenchant),
+		"  Mill: " .. tostring(counts.mill) .. "   Prospect: " .. tostring(counts.prospect) .. "   Open: " .. tostring(counts.open) .. "   Kept: " .. tostring(counts.kept),
+		"  Ignored item IDs: " .. tostring(ignoredCount),
+		"",
+		"Tooltip cache:",
+		"  BoE: " .. cacheCount(_G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.boe)
+			.. "   Soulbound: " .. cacheCount(_G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.soulbound)
+			.. "   Affix: " .. cacheCount(_G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.affix)
+			.. "   Affix names: " .. cacheCount(_G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.affixName),
+		"",
+		"Bag slots:",
+	}
+	local deleteNames, deleteIDs = BuildWantedSets(profile.listText, "delete-list")
+	local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
+	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+	local singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
+	local ruleCtx = {
+		deleteNames = deleteNames,
+		deleteIDs = deleteIDs,
+		sellNames = sellNames,
+		sellIDs = sellIDs,
+		keepNames = keepNames,
+		keepIDs = keepIDs,
+		keepOneIDs = keepOneIDs,
+		keepStackIDs = keepStackIDs,
+		keepOneSeenUnits = {},
+		singleAffixPlan = singleAffixPlan,
+	}
+	local foundAny = false
+	for bag = 0, NUM_BAG_SLOTS do
+		local slots = GetContainerNumSlots(bag) or 0
+		for slot = 1, slots do
+			local link = GetContainerItemLink(bag, slot)
+			if link then
+				foundAny = true
+				local id = GetItemIDFromLink(link)
+				local info = { GetItemInfo(link) }
+				local name = info[1] or "?"
+				local quality = info[3]
+				local ilvl = info[4]
+				local itemClass = info[6]
+				local itemSubType = info[7]
+				local maxStack = info[8]
+				local equipSlot = info[9]
+				local vendorPrice = info[11]
+				local _, count, locked = GetContainerItemInfo(bag, slot)
+				local ignored = id and IsProcessIgnored(id)
+				local action, reason, sourceRule, _, processAction =
+					_G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignored, ruleCtx)
+				local deRaw = _G.AutoDelete_IsDisenchantable_IgnoringKeep
+					and _G.AutoDelete_IsDisenchantable_IgnoringKeep(profile, bag, slot)
+				local singleAffixSlot = singleAffixPlan and singleAffixPlan.slots[bag .. ":" .. slot]
+				local deProtected, deProtectReason = false, nil
+				if _G.AutoDelete_IsDestructiveRuleProtected then
+					deProtected, deProtectReason = _G.AutoDelete_IsDestructiveRuleProtected(
+						profile, bag, slot, link, "disenchant", singleAffixSlot,
+						keepIDs, keepNames, keepOneIDs, keepStackIDs)
+				end
+				local millRaw = _G.AutoDelete_IsMillable_IgnoringKeep
+					and _G.AutoDelete_IsMillable_IgnoringKeep(profile, bag, slot)
+				local prospectRaw = _G.AutoDelete_IsProspectable_IgnoringKeep
+					and _G.AutoDelete_IsProspectable_IgnoringKeep(profile, bag, slot)
+				local openRaw = _G.AutoDelete_IsOpenable_IgnoringKeep
+					and _G.AutoDelete_IsOpenable_IgnoringKeep(profile, bag, slot)
+				local boe = IsBindOnEquip(bag, slot)
+				local soulbound = IsSoulbound(bag, slot)
+				local affix = ClassifyAffixByLink(link, bag, slot, nil)
+				local missingBlocked, missingState = _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, link, singleAffixSlot)
+				table.insert(lines, string.format(
+					"  b%d s%d item:%s x%s %s",
+					bag, slot, tostring(id), tostring(count or 1), tostring(link or name)
+				))
+				table.insert(lines, string.format(
+					"    facts: quality=%s ilvl=%s class=%s sub=%s equip=%s maxStack=%s vendor=%s slotLocked=%s",
+					tostring(quality), tostring(ilvl), tostring(itemClass), tostring(itemSubType),
+					tostring(equipSlot), tostring(maxStack), tostring(vendorPrice), tostring(locked)
+				))
+				table.insert(lines, string.format(
+					"    tooltip: soulbound=%s boe=%s affixTier=%s missingBlocked=%s missingState=%s",
+					yes(soulbound), yes(boe), tostring(affix), yes(missingBlocked), tostring(missingState)
+				))
+				table.insert(lines, string.format(
+					"    process: action=%s processAction=%s reason=%s source=%s ignored=%s",
+					tostring(action), tostring(processAction), tostring(reason), tostring(sourceRule), yes(ignored)
+				))
+				table.insert(lines, string.format(
+					"    gates: deRaw=%s deProtected=%s deProtectReason=%s millRaw=%s prospectRaw=%s openRaw=%s",
+					yes(deRaw), yes(deProtected), tostring(deProtectReason), yes(millRaw), yes(prospectRaw), yes(openRaw)
+				))
+				for _, ttLine in ipairs(_G.AutoDelete_GetProcessTooltipLines(bag, slot, 6)) do
+					table.insert(lines, ttLine)
+				end
+			end
+		end
+	end
+	if not foundAny then
+		table.insert(lines, "  No bag items found.")
+	end
+	return table.concat(lines, "\n")
+end
+
+function _G.AutoDelete_ShowProcessDebugReport()
+	local text = _G.AutoDelete_BuildProcessDebugReport()
+	if _G.AutoDelete_ShowReportWindow then
+		_G.AutoDelete_ShowReportWindow(text, "Process Bags Diagnostic")
+	else
+		print("|cffff8000[AutoDelete]|r Process Bags diagnostic is ready, but the report window is unavailable.")
+	end
+end
+
+_G.AutoDelete_ProcessActionHistory = _G.AutoDelete_ProcessActionHistory or {
+	cap = 80,
+	entries = {},
+}
+
+function _G.AutoDelete_RecordProcessAction(data)
+	if not data or not data.action then return end
+	local hist = _G.AutoDelete_ProcessActionHistory
+	hist.entries = hist.entries or {}
+	table.insert(hist.entries, 1, {
+		time = GetTime(),
+		action = data.action,
+		verb = data.verb,
+		link = data.link,
+		name = data.name,
+		bag = data.bag,
+		slot = data.slot,
+	})
+	while #hist.entries > (hist.cap or 80) do
+		table.remove(hist.entries)
+	end
+end
+
+function _G.AutoDelete_ClearProcessActionHistory(action)
+	local hist = _G.AutoDelete_ProcessActionHistory
+	hist.entries = hist.entries or {}
+	for i = #hist.entries, 1, -1 do
+		if not action or hist.entries[i].action == action then
+			table.remove(hist.entries, i)
+		end
+	end
+end
+
+function _G.AutoDelete_BuildProcessActionHistoryReport(action)
+	local hist = _G.AutoDelete_ProcessActionHistory or {}
+	local now = GetTime()
+	local title = action == "disenchant" and "AutoDelete Disenchant history"
+		or "AutoDelete Process Bags action history"
+	local lines = {
+		title,
+		"Session only. Clears on reload.",
+		"",
+	}
+	local shown = 0
+	for _, entry in ipairs(hist.entries or {}) do
+		if not action or entry.action == action then
+			shown = shown + 1
+			local item = entry.link or entry.name or "unknown item"
+			local where = (entry.bag and entry.slot) and (" b" .. entry.bag .. " s" .. entry.slot) or ""
+			table.insert(lines, string.format(
+				"%d. %s  %s%s",
+				shown,
+				_G.AutoDelete_FormatDecisionHistoryAgo(entry, now),
+				tostring(entry.verb or entry.action) .. " " .. tostring(item),
+				where
+			))
+		end
+	end
+	if shown == 0 then
+		if action == "disenchant" then
+			table.insert(lines, "No Disenchant actions recorded this session.")
+		else
+			table.insert(lines, "No Process Bags actions recorded this session.")
+		end
+	end
+	return table.concat(lines, "\n")
+end
+
+function _G.AutoDelete_ShowDEHistory()
+	local text = _G.AutoDelete_BuildProcessActionHistoryReport("disenchant")
+	if _G.AutoDelete_ShowReportWindow then
+		_G.AutoDelete_ShowReportWindow(text, "Disenchant History")
+	else
+		print("|cffff8000[AutoDelete]|r Disenchant history is ready, but the report window is unavailable.")
+	end
+end
+
 function _G.AutoDelete_ShowItemQuickMenu(data, owner)
 	if not data then return end
 	local link = data.link or data.itemLink
@@ -9277,6 +9887,7 @@ scanner:RegisterEvent("MERCHANT_CLOSED")
 scanner:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 scanner:RegisterEvent("PLAYER_REGEN_ENABLED")    -- flush deferred disenchant updates
 scanner:RegisterEvent("SPELLS_CHANGED")          -- re-check Disenchant known status
+scanner:RegisterEvent("UNIT_SPELLCAST_START")
 scanner:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED") -- v3.20: chat notify after DE / Mill / Prospect
 
 -- Note on BAG_UPDATE handling: v3.20 briefly tried event bracketing
@@ -9853,6 +10464,12 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 		end)
 		return
 	end
+	if event == "UNIT_SPELLCAST_START" and arg1 == "player" then
+		if _G.AutoDelete_OnOneKeySpellStart then
+			_G.AutoDelete_OnOneKeySpellStart(arg2)
+		end
+		return
+	end
 	-- v3.20 action chat notifier. UNIT_SPELLCAST_SUCCEEDED on 3.3.5a fires
 	-- (unit, spellName, rank, lineID, spellID) -- arg1 is unit, arg2 is
 	-- the spell name. We only care about player casts whose name matches
@@ -9916,6 +10533,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 			disenchantButton:SetAttribute("macrotext", "")
 			disenchantButton:HookScript("PreClick", function()
 				if _G.AutoDelete_OnOneKeyPreClick then _G.AutoDelete_OnOneKeyPreClick("disenchant") end
+			end)
+			disenchantButton:HookScript("PostClick", function()
+				if _G.AutoDelete_OnOneKeyPostClick then _G.AutoDelete_OnOneKeyPostClick("disenchant") end
 			end)
 		end
 		RefreshDisenchantKnown()
@@ -12061,6 +12681,27 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		if _G.AutoDelete_ShowDiagnosticReport then _G.AutoDelete_ShowDiagnosticReport() end
 		return
 	end
+	if arg == "processdebug" then
+		if _G.AutoDelete_ShowProcessDebugReport then _G.AutoDelete_ShowProcessDebugReport() end
+		return
+	end
+	if arg == "processdebug clear" then
+		if _G.AutoDelete_ClearProcessDebugCache then _G.AutoDelete_ClearProcessDebugCache() end
+		if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+		print("|cffff8000[AutoDelete]|r Process Bags diagnostic caches cleared.")
+		return
+	end
+	if arg == "de history" then
+		if _G.AutoDelete_ShowDEHistory then _G.AutoDelete_ShowDEHistory() end
+		return
+	end
+	if arg == "de history clear" then
+		if _G.AutoDelete_ClearProcessActionHistory then
+			_G.AutoDelete_ClearProcessActionHistory("disenchant")
+		end
+		print("|cffff8000[AutoDelete]|r Disenchant history cleared for this session.")
+		return
+	end
 	if arg == "history" then
 		if _G.AutoDelete_ShowDecisionHistory then _G.AutoDelete_ShowDecisionHistory() end
 		return
@@ -12432,6 +13073,8 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		row("/del sell",         "run a sell pass at the open vendor right now")
 		row("/del process",      "toggle the Process Bags window (DE / Mill / Prospect / Open)")
 		row("/del report",       "open a copyable diagnostic report")
+		row("/del processdebug", "open a Process Bags gate-by-gate diagnostic")
+		row("/del de history",   "open recent One-Key Disenchant actions")
 		row("/del history",      "open recent sell / delete / keep decisions")
 		row("/del audit",        "open a copyable item list audit")
 		row("/del setup",        "re-open the first-time setup / welcome popup")

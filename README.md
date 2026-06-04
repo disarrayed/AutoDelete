@@ -99,6 +99,8 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 **Why? and report**
 - Right-click a Process Bags row, then choose **Why?** for a copyable item decision report
 - `/del report` opens a copyable diagnostic summary
+- `/del processdebug` opens a copyable Process Bags gate report for every current bag item
+- `/del de history` opens recent One-Key Disenchant actions from this session
 - `/del history` opens a copyable recent decision log for this session
 - The Help tab has topic buttons with practical how-to guidance for each main area
 
@@ -130,6 +132,8 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 /del setup         Reopen the welcome popup
 /del process       Open the Process Bags inspection window
 /del report        Open a copyable diagnostic report
+/del processdebug  Open a Process Bags gate-by-gate diagnostic
+/del de history    Open recent One-Key Disenchant actions
 /del history       Open searchable recent sell / delete / keep decisions
 /del audit         Open a copyable item-list audit
 /del audit fix     Apply safe list cleanup only
