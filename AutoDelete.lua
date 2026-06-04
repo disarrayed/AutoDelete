@@ -5408,13 +5408,13 @@ _G.AutoDelete_IsMissingAffixHardStop = function(profile, bag, slot, itemLink, si
 	return false, nil
 end
 
--- Combined check used by the delete scanner and the sell loop. Returns true
+-- Combined check used by destructive actions. Returns true
 -- when the item should be protected from destructive rules. Checked tier
--- protection is absolute. Missing-affix hard stop blocks Delete/Sell when
+-- protection is absolute. Missing-affix hard stop blocks destructive actions when
 -- Show/Keep Missing Affix or KeepOne Missing Affix is on; KeepOne Missing Affix extras
 -- bypass only that hard stop, not checked tier protection.
 IsAffixProtected = function(profile, bag, slot, itemLink, action, singleAffixSlot)
-	if action ~= "delete" and action ~= "sell" then return false end
+	if action ~= "delete" and action ~= "sell" and action ~= "disenchant" then return false end
 
 	if _G.AutoDelete_HasAnyAffixTierProtection(profile) then
 		local tier = HasAffix(bag, slot)
@@ -5424,6 +5424,47 @@ IsAffixProtected = function(profile, bag, slot, itemLink, action, singleAffixSlo
 
 	if _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot) then return true end
 	return false
+end
+
+_G.AutoDelete_IsDestructiveRuleProtected = function(profile, bag, slot, itemLink, action, singleAffixSlot, keepIDs, keepNames, keepOneIDs, keepStackIDs)
+	if not profile or not itemLink then return false, nil end
+	local itemId = GetItemIDFromLink(itemLink)
+	local itemName = GetItemInfo(itemLink)
+
+	if not keepIDs or not keepNames then
+		keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	end
+	if _G.AutoDelete_IsWhitelistedFast(keepIDs or {}, keepNames or {}, itemId, itemName) then
+		return true, "keep-blocked"
+	end
+
+	if not keepOneIDs then
+		keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	end
+	if itemId and keepOneIDs and keepOneIDs[itemId] then
+		return true, "keepone-blocked"
+	end
+
+	if not keepStackIDs then
+		keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+	end
+	if itemId and keepStackIDs and keepStackIDs[itemId] then
+		return true, "keepstack-blocked"
+	end
+
+	if singleAffixSlot and not singleAffixSlot.extra then
+		return true, "single-affix-kept"
+	end
+
+	local missingBlocked, missingState = _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot)
+	if missingBlocked then
+		return true, missingState == "unknown" and "missing-affix-unknown" or "missing-affix-blocked"
+	end
+
+	if IsAffixProtected(profile, bag, slot, itemLink, action, singleAffixSlot) then
+		return true, "affix-blocked"
+	end
+	return false, nil
 end
 
 -- Copper → "Xg Ys Zc" string. Defined before functions that use it.
@@ -7724,12 +7765,14 @@ end
 -- panel, etc.) hit this path; the override-aware Find function below uses
 -- AutoDelete_IsDisenchantable_IgnoringKeep + an explicit Keep check so it
 -- can detect the blocked-by-Keep case for the popup.
-local function IsDisenchantable(profile, bag, slot)
+local function IsDisenchantable(profile, bag, slot, singleAffixPlan, keepIDs, keepNames, keepOneIDs, keepStackIDs)
 	if not _G.AutoDelete_IsDisenchantable_IgnoringKeep(profile, bag, slot) then return false end
 	local link = GetContainerItemLink(bag, slot)
-	local id = GetItemIDFromLink(link)
-	local name = GetItemInfo(link)
-	if IsWhitelisted(profile, id, name) then return false end
+	local slotPlan = singleAffixPlan and singleAffixPlan.slots[bag .. ":" .. slot]
+	if _G.AutoDelete_IsDestructiveRuleProtected
+		and _G.AutoDelete_IsDestructiveRuleProtected(profile, bag, slot, link, "disenchant", slotPlan, keepIDs, keepNames, keepOneIDs, keepStackIDs) then
+		return false
+	end
 	return true
 end
 
@@ -7752,10 +7795,14 @@ local function FindDisenchantTarget(profile)
 		_ss.find = (_ss.find or 0) + 1
 	end
 	local _p = AutoDelete_PerfBegin("FindDisenchantTarget")
+	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+	local singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
 	for bag = 0, NUM_BAG_SLOTS do
 		local count = GetContainerNumSlots(bag) or 0
 		for slot = 1, count do
-			if IsDisenchantable(profile, bag, slot) then
+			if IsDisenchantable(profile, bag, slot, singleAffixPlan, keepIDs, keepNames, keepOneIDs, keepStackIDs) then
 				local link = GetContainerItemLink(bag, slot)
 				local name = GetItemInfo(link) or "?"
 				AutoDelete_PerfEnd("FindDisenchantTarget", _p)
@@ -8448,10 +8495,29 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 
 	if not ignored then
 		local isDisenchantable = _G.AutoDelete_IsDisenchantable
+		local isDisenchantableIgnoringKeep = _G.AutoDelete_IsDisenchantable_IgnoringKeep
 		local isMillable       = _G.AutoDelete_IsMillable
 		local isProspectable   = _G.AutoDelete_IsProspectable
 		local isOpenable       = _G.AutoDelete_IsOpenable
-		if isDisenchantable and isDisenchantable(profile, bag, slot) then
+		if isDisenchantableIgnoringKeep and isDisenchantableIgnoringKeep(profile, bag, slot) then
+			local deProtected, deProtectReason = false, nil
+			if _G.AutoDelete_IsDestructiveRuleProtected then
+				deProtected, deProtectReason = _G.AutoDelete_IsDestructiveRuleProtected(
+					profile, bag, slot, link, "disenchant", singleAffixSlot,
+					keepIDs, keepNames, keepOneIDs, keepStackIDs)
+			end
+			if deProtected then
+				local reasonText = (deProtectReason == "keep-blocked" and "Keep list blocked disenchant")
+					or (deProtectReason == "keepone-blocked" and "KeepOne blocked disenchant")
+					or (deProtectReason == "keepstack-blocked" and "KeepStack blocked disenchant")
+					or (deProtectReason == "single-affix-kept" and "KeepOne Missing Affix blocked disenchant")
+					or (deProtectReason == "missing-affix-blocked" and "Missing affix hard stop blocked disenchant")
+					or (deProtectReason == "missing-affix-unknown" and "Missing affix hard stop blocked disenchant (ownership unknown)")
+					or "Affix Protection blocked disenchant"
+				return "kept", reasonText, "One-Key Disenchant", name
+			end
+		end
+		if isDisenchantable and isDisenchantable(profile, bag, slot, singleAffixPlan, keepIDs, keepNames, keepOneIDs, keepStackIDs) then
 			return "disenchant", "Eligible for disenchant", "One-Key Disenchant", name, true
 		elseif isMillable and isMillable(profile, bag, slot) then
 			return "mill", "Eligible for milling", "One-Key Mill", name, true
@@ -8836,6 +8902,36 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		end
 	else
 		table.insert(lines, "  Final: keep. No sell rule matched.")
+	end
+
+	table.insert(lines, "")
+	table.insert(lines, "Disenchant decision:")
+	if not profile.disenchantEnabled then
+		table.insert(lines, "  Final: keep. One-Key Disenchant is off.")
+	elseif not bag or not slot or not itemLink then
+		table.insert(lines, "  Final: keep. Item must be in a bag slot for One-Key Disenchant.")
+	elseif not _G.AutoDelete_IsDisenchantable_IgnoringKeep
+		or not _G.AutoDelete_IsDisenchantable_IgnoringKeep(profile, bag, slot) then
+		table.insert(lines, "  Final: keep. DE filters do not match this item.")
+	else
+		local deProtected, deProtectReason = false, nil
+		if _G.AutoDelete_IsDestructiveRuleProtected then
+			deProtected, deProtectReason = _G.AutoDelete_IsDestructiveRuleProtected(
+				profile, bag, slot, itemLink, "disenchant", singleAffixSlot,
+				keepIDs, keepNames, keepOneIDs, keepStackIDs)
+		end
+		if deProtected then
+			local deText = (deProtectReason == "keep-blocked" and "Keep list blocks disenchant.")
+				or (deProtectReason == "keepone-blocked" and "KeepOne blocks disenchant.")
+				or (deProtectReason == "keepstack-blocked" and "KeepStack blocks disenchant.")
+				or (deProtectReason == "single-affix-kept" and "KeepOne Missing Affix blocks disenchant.")
+				or (deProtectReason == "missing-affix-blocked" and "Missing affix hard stop blocks disenchant.")
+				or (deProtectReason == "missing-affix-unknown" and "Missing affix hard stop blocks disenchant because ownership is unknown.")
+				or "Affix protection blocks disenchant."
+			table.insert(lines, "  Final: keep. " .. deText)
+		else
+			table.insert(lines, "  Final: disenchant. DE filters matched and no protection rule blocked it.")
+		end
 	end
 
 	table.insert(lines, "")
