@@ -5,7 +5,7 @@
 WoW 3.3.5a inventory manager for Project Ebonhold. Mark items to **Delete**, **Sell**, **Keep**, **KeepOne**, or **KeepStack**. Every automatic feature is opt-in.
 
 [![Latest release](https://img.shields.io/github/v/release/disarrayed/AutoDelete.svg?style=for-the-badge&color=ff8000)](https://github.com/disarrayed/AutoDelete/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/disarrayed/AutoDelete/total.svg?label=downloads&style=for-the-badge&color=ff8000)](https://github.com/disarrayed/AutoDelete/releases)
+[![Downloads](https://img.shields.io/github/downloads/disarrayed/AutoDelete/total.svg?label=downloads&style=for-the-badge&color=ff8000&cacheSeconds=3600)](https://github.com/disarrayed/AutoDelete/releases)
 ![Project Ebonhold 3.3.5a](https://img.shields.io/badge/Project%20Ebonhold-3.3.5a-e6cc80.svg?style=for-the-badge)
 
 [**Download**](https://github.com/disarrayed/AutoDelete/releases/latest) · [**Source**](https://github.com/disarrayed/AutoDelete)
