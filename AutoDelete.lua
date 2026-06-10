@@ -39,6 +39,14 @@ local API = {
 	min                  = math.min,
 }
 
+function _G.AutoDelete_RegisterSpecialFrame(globalName)
+	if not globalName or not UISpecialFrames then return end
+	for _, existingName in API.ipairs(UISpecialFrames) do
+		if existingName == globalName then return end
+	end
+	API.tinsert(UISpecialFrames, globalName)
+end
+
 -- ============================================================================
 -- Perf instrumentation (opt-in via /del perf)
 -- ============================================================================
@@ -9760,6 +9768,7 @@ function _G.AutoDelete_ShowItemQuickMenu(data, owner)
 		frame:SetBackdropColor(unpack(C_MENU_BG))
 		frame:SetBackdropBorderColor(unpack(C_MENU_BORDER))
 		frame:Hide()
+		_G.AutoDelete_RegisterSpecialFrame("AutoDeleteQuickMenu")
 		frame._items = {}
 		frame:SetScript("OnHide", function(self) if self._closer then self._closer:Hide() end end)
 
@@ -9989,10 +9998,7 @@ local function ShowWelcomePopup()
 	})
 	f:SetBackdropColor(unpack(C_BG))
 	f:SetBackdropBorderColor(unpack(C_BORDER))
-	-- Deliberately NOT registered in UISpecialFrames. Escape should not close
-	-- this popup; the X button is the only intended way out. This keeps the
-	-- popup visible when the user opens the keybinds panel and presses Esc
-	-- to leave keybinds (otherwise the same Esc keystroke closes our popup).
+	_G.AutoDelete_RegisterSpecialFrame("AutoDelete_WelcomePopup")
 
 	-- Title bar -- dark bg + dark border, matching the main settings panel.
 	local titleBar = CreateFrame("Frame", nil, f)
@@ -12711,6 +12717,7 @@ function _G.AutoDelete_ShowMinimapMenu(anchor)
 	end
 	if not _G.AutoDelete_MinimapMenuFrame then
 		_G.AutoDelete_MinimapMenuFrame = CreateFrame("Frame", "AutoDeleteMinimapMenu", UIParent, "UIDropDownMenuTemplate")
+		_G.AutoDelete_RegisterSpecialFrame("AutoDeleteMinimapMenu")
 	end
 
 	local settingsLabel = "Open Settings"

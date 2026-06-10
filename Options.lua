@@ -72,6 +72,8 @@ local function BringPopupToFront(frame)
 end
 _G.AutoDelete_BringPopupToFront = BringPopupToFront
 
+local RegisterSpecialFrame = _G.AutoDelete_RegisterSpecialFrame
+
 local function ApplyPopupChrome(frame)
 	ApplyBackdrop(frame, C_BG, { 0.26, 0.26, 0.26, 1 })
 	if frame.SetToplevel then frame:SetToplevel(true) end
@@ -1201,7 +1203,7 @@ ApplyBackdrop(frame, C_BG, C_BORDER)
 frame:Hide()
 
 -- ESC to close
-tinsert(UISpecialFrames, "AutoDeleteFrame")
+RegisterSpecialFrame("AutoDeleteFrame")
 
 -- Drag via title bar
 local titleBar = CreateFrame("Frame", nil, frame)
@@ -1286,6 +1288,7 @@ panel:SetMovable(true)
 panel:EnableMouse(true)
 panel:SetClampedToScreen(true)
 panel:Hide()
+RegisterSpecialFrame("AutoDeleteProcessPanel")
 
 -- Visual style matches the main settings panel (dark body, dark gray
 -- border, dark title bar with orange text). Previously this used raw
@@ -2199,7 +2202,7 @@ _G.AutoDelete_ShowLearnedAffixesWindow = ShowLearnedAffixesWindow
 -- Escape-to-close: WoW's stock UISpecialFrames mechanism scans this table on
 -- ESC and Hides any matching named frame. Our popup has a global name set
 -- via CreateFrame's second arg, so just append it once.
-tinsert(UISpecialFrames, "AutoDeleteLearnedAffixesPopup")
+RegisterSpecialFrame("AutoDeleteLearnedAffixesPopup")
 
 end  -- end of Learned Affixes Popup `do` block
 
@@ -2449,7 +2452,7 @@ _G.AutoDelete_ShowIgnoredItemsWindow   = ShowIgnoredItemsWindow
 _G.AutoDelete_ToggleIgnoredItemsWindow = ToggleIgnoredItemsWindow
 _G.AutoDelete_RefreshIgnoredItemsWindow = RefreshIgnoredItems
 
-tinsert(UISpecialFrames, "AutoDeleteIgnoredItemsPopup")
+RegisterSpecialFrame("AutoDeleteIgnoredItemsPopup")
 
 end  -- end of Ignored Items Popup `do` block
 
@@ -2780,7 +2783,7 @@ local function MakeRawPopup(globalName, titleText, w, h)
 	x:SetScript("OnEnter", function() xt:SetTextColor(1, 0.3, 0.3) end)
 	x:SetScript("OnLeave", function() xt:SetTextColor(unpack(C_DIM)) end)
 	x:SetScript("OnClick", function() p:Hide() end)
-	tinsert(UISpecialFrames, globalName)
+	RegisterSpecialFrame(globalName)
 	return p
 end
 
@@ -6359,6 +6362,7 @@ local function BuildUI(self)
 		closer:SetScript("OnClick", function() rowMenu:Hide() end)
 		closer:Hide()
 		rowMenu._closer = closer
+		RegisterSpecialFrame("AutoDelete_RowContextMenu")
 		return rowMenu
 	end
 
@@ -7617,7 +7621,7 @@ local function BuildPopupSkeleton(globalName, title, W, H)
 	ApplyPopupChrome(f)
 	f:Hide()
 	if f.HookScript then f:HookScript("OnShow", BringPopupToFront) end
-	tinsert(UISpecialFrames, globalName)
+	RegisterSpecialFrame(globalName)
 
 	-- Title bar (same style as main window). Explicit frame level so it
 	-- renders above the outer backdrop.
