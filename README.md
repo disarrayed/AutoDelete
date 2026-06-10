@@ -105,6 +105,7 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 - The Help tab has topic buttons with practical how-to guidance for each main area
 
 **Quality of life**
+- Minimap button: left-click opens or closes settings, right-click opens a quick menu for safe panels and reports, and drag moves the button
 - Bags stay open when the vendor closes
 - Auto-repair with optional guild bank fallback
 - Hide Greedy Scavenger spam

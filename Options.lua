@@ -206,9 +206,6 @@ local function MakeToggle(parent, label, color, tooltip, tooltipTitle)
 end
 
 -- Small helper for sub-toggles: smaller box (12x12), 9pt text.
--- Promoted to file scope so the Disenchant Filters popup (built at file load
--- time, before BuildUI runs) can call it. BuildUI's own callers resolve to
--- this same upvalue.
 local function MakeSubToggle(parent, label, color, tooltip, tooltipTitle)
 	local row = CreateFrame("Button", nil, parent)
 	row:SetSize(120, 16)
@@ -1786,267 +1783,13 @@ _G.AutoDelete_RefreshProcessPanel = RefreshProcessPanel
 end  -- end of Process Bags Panel `do` block
 
 -- ============================================================================
--- Disenchant Filters Popup
--- ============================================================================
--- Tiny standalone popup that holds the Disenchant scope filters that don't
--- fit on the Keybinds-tab single-row layout. Opened by clicking the gear
--- button on the One-Key Disenchant row. Same draggable-frame pattern as
--- the Process Bags panel, just smaller (no scrollable list, just a stack
--- of compact controls).
-
-do
-
-local POPUP_W = 240
--- v3.21: bumped from 170 -> 190 to absorb the Quality-label Y shift that
--- fixed the BoP/BoE overlap (was off-by-10 against the toggle row height).
-local POPUP_H = 190
-
--- Visual style mirrors the Process Bags panel and the main settings
--- panel: dark body, dark gray border, dark title bar with orange text,
--- dim close X that turns red on hover. Previously this popup used an
--- orange-filled title bar and an orange border, which read as a
--- different window family from the rest of the addon (same regression
--- the Process Bags panel had pre-2026-04). Audit fix 2026-05-20.
-local popup = CreateFrame("Frame", "AutoDeleteDisenchantFiltersPopup", UIParent)
-popup:SetSize(POPUP_W, POPUP_H)
-popup:SetFrameStrata("DIALOG")
-popup:SetFrameLevel(120)
-popup:SetMovable(true)
-popup:EnableMouse(true)
-popup:SetClampedToScreen(true)
-popup:Hide()
-ApplyPopupChrome(popup)
-
--- Title bar: drag handle + window title. Same canonical look as
--- Process Bags and the main settings panel.
-local titleBar = CreateFrame("Frame", nil, popup)
-titleBar:SetPoint("TOPLEFT", popup, "TOPLEFT", 0, 0)
-titleBar:SetPoint("TOPRIGHT", popup, "TOPRIGHT", 0, 0)
-titleBar:SetHeight(24)
-ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
-titleBar:EnableMouse(true)
-titleBar:RegisterForDrag("LeftButton")
-titleBar:SetScript("OnDragStart", function()
-	BringPopupToFront(popup)
-	popup:StartMoving()
-end)
-titleBar:SetScript("OnDragStop", function() popup:StopMovingOrSizing() end)
-
-local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
-titleText:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
-titleText:SetText("Disenchant Filters")
-
--- Close X in the title bar's right corner. Dim by default, red on
--- hover -- matches the main settings panel and Process Bags exactly.
-local closeX = CreateFrame("Button", nil, titleBar)
-closeX:SetSize(24, 24)
-closeX:SetPoint("TOPRIGHT", titleBar, "TOPRIGHT", 0, 0)
-local closeXText = MakeText(closeX, 14, C_DIM, "OUTLINE")
-closeXText:SetText("x")
-closeXText:SetPoint("CENTER")
-closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.3, 0.3) end)
-closeX:SetScript("OnLeave", function() closeXText:SetTextColor(unpack(C_DIM)) end)
-closeX:SetScript("OnClick", function() popup:Hide() end)
-
--- Body: section labels + 5 inline sub-toggles (BoP / BoE / Unc / Rare /
--- Epic) on two rows + an iLvl row with min/max inputs. All controls
--- mirror the Keybinds-tab inline controls we used to render before this
--- popup existed; the OnClick handlers below dispatch the same way.
---
--- v3.21: section Y values pushed down to eliminate label/toggle overlap.
--- The original layout had QUAL_Y = -56 (label) and TGL_Y_BIND = -46
--- (toggles, height 16, extending to -62), so the Quality label collided
--- with the BoP/BoE row from y=-56 to y=-62. New values give each
--- section a clean 6px gap below the toggles of the section above.
---   Section A (Bind state): label at -30, toggles at -46 (row -46..-62)
---   Section B (Quality):    label at -68, toggles at -84 (row -84..-100)
---   Section C (iLvl range): label at -106, inputs at -124 (row -124..-142)
-local BIND_Y    = -30
-local QUAL_Y    = -68
-local ILVL_Y    = -106
-local LABEL_X   = 12
-
-local function MakeSectionLabel(parent, text, y)
-	local fs = parent:CreateFontString(nil, "OVERLAY")
-	fs:SetFont(FONT, 10, "OUTLINE")
-	fs:SetTextColor(unpack(C_ACCENT))
-	fs:SetPoint("TOPLEFT", LABEL_X, y)
-	fs:SetText(text)
-	return fs
-end
-
-local bindLabel = MakeSectionLabel(popup, "Bind state:", BIND_Y)
-local qualLabel = MakeSectionLabel(popup, "Quality:",    QUAL_Y)
-local ilvlLabel = MakeSectionLabel(popup, "iLvl range:", ILVL_Y)
-
--- Sub-toggles: positioned with a per-toggle width, anchored to the
--- popup at fixed x offsets. Color follows the main-panel convention:
--- binary toggles (BoP/BoE) use C_ACCENT (the standard active-state
--- orange); rarity toggles (Unc/Rare/Epic) use the WoW quality colors
--- (green/blue/purple). Audit fix 2026-05-20 -- the previous build
--- used C_DK_RED (Death Knight class color, only intended for the
--- Auto-Repair "Use Guild Bank money" sub-toggle) for everything,
--- which read as off-design and didn't communicate rarity.
-local TGL_Y_BIND = BIND_Y - 16
-local TGL_Y_QUAL = QUAL_Y - 16
-local TGL_W      = 52
-
-local function MakeFilterToggle(label, color, x, y)
-	local tip
-	if label == "BoP" then
-		tip = "Allow bound items in this filter."
-	elseif label == "BoE" then
-		tip = "Allow bind-on-equip items in this filter."
-	elseif label == "Unc" then
-		tip = "Allow green-quality items in this filter."
-	elseif label == "Rare" then
-		tip = "Allow blue-quality items in this filter."
-	elseif label == "Epic" then
-		tip = "Allow purple-quality items in this filter."
-	end
-	local tgl = MakeSubToggle(popup, label, color, tip)
-	tgl:SetPoint("TOPLEFT", x, y)
-	tgl:SetWidth(TGL_W)
-	return tgl
-end
-
--- Binary bind-state toggles use the standard accent (orange).
-local tglBoP  = MakeFilterToggle("BoP",  C_ACCENT, LABEL_X,             TGL_Y_BIND)
-local tglBoE  = MakeFilterToggle("BoE",  C_ACCENT, LABEL_X + TGL_W,     TGL_Y_BIND)
-
--- Rarity toggles use WoW quality colors so the checked-state fill
--- communicates which rarity each control governs at a glance.
-local tglUnc  = MakeFilterToggle("Unc",  C_Q_UNCOMMON, LABEL_X,             TGL_Y_QUAL)
-local tglRare = MakeFilterToggle("Rare", C_Q_RARE,     LABEL_X + TGL_W,     TGL_Y_QUAL)
-local tglEpic = MakeFilterToggle("Epic", C_Q_EPIC,     LABEL_X + TGL_W * 2, TGL_Y_QUAL)
-
--- iLvl min/max: two small numeric input boxes joined by a dash. Width
--- and offset match the Process Bags panel's iLvl controls for visual
--- consistency.
-local function MakeIlvlEdit(x, y)
-	local box = CreateFrame("Frame", nil, popup)
-	box:SetSize(36, 18)
-	box:SetPoint("TOPLEFT", x, y)
-	ApplyBackdrop(box, C_DROP_BG, C_DROP_BORDER)
-	local edit = CreateFrame("EditBox", nil, box)
-	edit:SetFont(FONT, 10, "OUTLINE")
-	edit:SetTextColor(unpack(C_TEXT))
-	edit:SetAutoFocus(false)
-	edit:SetNumeric(true)
-	edit:SetMaxLetters(4)
-	edit:SetPoint("TOPLEFT", 3, -1)
-	edit:SetPoint("BOTTOMRIGHT", -3, 1)
-	edit:SetJustifyH("CENTER")
-	edit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
-	edit:SetScript("OnEnterPressed", function(s) s:ClearFocus() end)
-	AttachSimpleTooltip(box, "iLvl range",
-		"Pick the item level range allowed by this filter.")
-	AttachSimpleTooltip(edit, "iLvl range",
-		"Pick the item level range allowed by this filter.")
-	return edit
-end
-
-local ilvlMinEdit = MakeIlvlEdit(LABEL_X,      ILVL_Y - 18)
-local ilvlMaxEdit = MakeIlvlEdit(LABEL_X + 48, ILVL_Y - 18)
-
-local ilvlDash = popup:CreateFontString(nil, "OVERLAY")
-ilvlDash:SetFont(FONT, 10, "OUTLINE")
-ilvlDash:SetTextColor(unpack(C_DIM))
-ilvlDash:SetPoint("TOPLEFT", LABEL_X + 38, ILVL_Y - 21)
-ilvlDash:SetText("-")
-
--- Hint text under the iLvl row explaining the 0 = use-default semantics.
-local ilvlHint = popup:CreateFontString(nil, "OVERLAY")
-ilvlHint:SetFont(FONT, 8, "OUTLINE")
-ilvlHint:SetTextColor(unpack(C_DIM))
-ilvlHint:SetPoint("TOPLEFT", LABEL_X + 92, ILVL_Y - 18)
-ilvlHint:SetPoint("TOPRIGHT", popup, "TOPRIGHT", -10, ILVL_Y - 18)
-ilvlHint:SetJustifyH("LEFT")
-ilvlHint:SetWordWrap(true)
-ilvlHint:SetText("0 = use default")
-
--- OnClick handlers. Each writes the profile field, refreshes the cache,
--- and re-arms the disenchant button. Mirrors the per-toggle handler the
--- main panel sets up for other features.
---
--- IMPORTANT: this popup is constructed at FILE LOAD time, outside the
--- BuildUI() closure where `db` is a local. Use GetDB() explicitly here
--- so the handlers don't resolve `db` to a nil global. (Latent bug fixed
--- 2026-05-20: any toggle click previously errored with "attempt to
--- index local 'db' (a nil value)" at GetActiveProfile.)
-local function MakeFilterHandler(field)
-	return function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(GetDB())[field] = btn._checked
-		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
-		if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
-		local panel = _G.AutoDeleteOptionsPanel
-		if panel and panel._refreshDisenchantStatus then panel:_refreshDisenchantStatus() end
-	end
-end
-tglBoP:SetScript("OnClick",  MakeFilterHandler("disenchantBoP"))
-tglBoE:SetScript("OnClick",  MakeFilterHandler("disenchantBoE"))
-tglUnc:SetScript("OnClick",  MakeFilterHandler("disenchantUncommon"))
-tglRare:SetScript("OnClick", MakeFilterHandler("disenchantRare"))
-tglEpic:SetScript("OnClick", MakeFilterHandler("disenchantEpic"))
-
-local function MakeIlvlHandler(field)
-	return function(s)
-		local val = tonumber(s:GetText()) or 0
-		if val < 0 then val = 0 end
-		s:SetText(tostring(val))
-		GetActiveProfile(GetDB())[field] = val
-		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
-		if _G.AutoDelete_UpdateDisenchantButton then _G.AutoDelete_UpdateDisenchantButton() end
-	end
-end
-ilvlMinEdit:SetScript("OnEditFocusLost", MakeIlvlHandler("disenchantIlvlMin"))
-ilvlMaxEdit:SetScript("OnEditFocusLost", MakeIlvlHandler("disenchantIlvlMax"))
-
--- Refresh: reads current profile values into the popup widgets. Called
--- on popup show so the controls always reflect saved state.
-local function RefreshPopup()
-	local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
-	if not profile then return end
-	tglBoP:SetChecked(profile.disenchantBoP)
-	tglBoE:SetChecked(profile.disenchantBoE)
-	tglUnc:SetChecked(profile.disenchantUncommon)
-	tglRare:SetChecked(profile.disenchantRare)
-	tglEpic:SetChecked(profile.disenchantEpic)
-	ilvlMinEdit:SetText(tostring(profile.disenchantIlvlMin or 0))
-	ilvlMaxEdit:SetText(tostring(profile.disenchantIlvlMax or 0))
-end
-
-popup:SetScript("OnShow", function(self)
-	BringPopupToFront(self)
-	-- Anchor centered on first show; user can drag it after.
-	if not self._everShown then
-		self:ClearAllPoints()
-		self:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-		self._everShown = true
-	end
-	RefreshPopup()
-end)
-
-local function ToggleDisenchantFiltersPopup()
-	if popup:IsShown() then popup:Hide() else popup:Show() end
-end
-
-_G.AutoDelete_DisenchantFiltersPopup       = popup
-_G.AutoDelete_ToggleDisenchantFiltersPopup = ToggleDisenchantFiltersPopup
-_G.AutoDelete_RefreshDisenchantFilters     = RefreshPopup
-
-end  -- end of Disenchant Filters Popup `do` block
-
--- ============================================================================
 -- Learned Affixes Popup
 -- ============================================================================
 -- Scrollable read-only window that displays the player's learned and unlearned affixes,
--- populated by the Scan Learned Affixes button on the Affix Display card.
--- Same draggable-frame pattern as the Disenchant Filters popup and the
--- Process Bags panel: dark body, dark gray border, dark title bar with
--- orange text, dim close X that turns red on hover.
+-- populated by the Update Affix List button on the Affix Display card.
+-- Same draggable-frame pattern as the Process Bags panel: dark body,
+-- dark gray border, dark title bar with orange text, dim close X that
+-- turns red on hover.
 --
 -- Body is a ScrollFrame with pooled rows so affix names can be clicked.
 -- Clicking an affix opens a selected copy field because WoW addons cannot
@@ -2078,7 +1821,7 @@ popup:Hide()
 ApplyPopupChrome(popup)
 
 -- Title bar: drag handle + window title + close X. Mirrors the canonical
--- look used by the Disenchant Filters popup and Process Bags panel.
+-- look used by the Process Bags panel.
 local titleBar = CreateFrame("Frame", nil, popup)
 titleBar:SetPoint("TOPLEFT", popup, "TOPLEFT", 0, 0)
 titleBar:SetPoint("TOPRIGHT", popup, "TOPRIGHT", 0, 0)
@@ -4043,7 +3786,7 @@ local function BuildUI(self)
 		launchBtn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -68)
 		launchBtn:SetScript("OnEnter", function(btn)
 			-- Override MakeActionButton's hover so we can layer the tooltip
-			-- on top, same pattern Audit Lists + Scan Learned Affixes use.
+			-- on top, same pattern Refresh List and Update Affix List use.
 			btn:SetBackdropColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.3)
 			btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
 			btn._text:SetTextColor(1, 1, 1)
@@ -4447,11 +4190,9 @@ local function BuildUI(self)
 
 	-- ========================================================================
 	-- Filters Card 2: DE Filters (v3.20).
-	-- Ported inline from the standalone Disenchant Filters popup (which used
-	-- to be opened by a gear button on the Keybinds tab -- both the gear
-	-- button and the popup are gone in v3.20). Same controls, same profile
-	-- fields, same handlers: BoP / BoE bind-state toggles, Unc / Rare / Epic
-	-- quality toggles, iLvl min/max boxes. Wrapped in `do ... end` so the
+	-- Same profile fields and handlers as the One-Key Disenchant rule:
+	-- BoP / BoE bind-state toggles, Unc / Rare / Epic quality toggles,
+	-- and iLvl min/max boxes. Wrapped in `do ... end` so the
 	-- card-internal locals don't bump BuildUI past Lua 5.1's 200-local cap
 	-- (the toggles + edit boxes are stored on self._tglDisenchant* and
 	-- self._editDisenchantIlvl* for Refresh()'s state restore).
@@ -4575,8 +4316,8 @@ local function BuildUI(self)
 	-- Single-button card: opens the Manage Ignored Items popup which lists
 	-- every (action, itemId) pair the user clicked Ignore on via the
 	-- Keep-list override popup. Per-row Unignore button in that popup lets
-	-- them undo the choice. Same y=-68 bottom-of-card slot as the Audit
-	-- Lists / Scan Learned Affixes buttons on the Affix tab for visual
+	-- them undo the choice. Same y=-68 bottom-of-card slot as the Refresh
+	-- List / Update Affix List buttons on the Affix tab for visual
 	-- alignment.
 	-- ========================================================================
 	do
@@ -4621,7 +4362,7 @@ local function BuildUI(self)
 	-- AFFIX TAB (internal key "affix", v3.20):
 	--   Card 1: Affix Protection    (No Auto-Sell tier checkboxes)
 	--   Card 2: Affix Display       (Show affix dot + Show/Keep Missing Affix)
-	--   Card 3: Affix Tools         (Audit Lists + Scan Learned Affixes)
+	--   Card 3: Affix Tools         (Refresh List + Update Affix List)
 	-- User feedback 2026-05-23: Cards 1 and 2 were too crowded with both
 	-- toggles AND their action button each, so the two buttons moved to a
 	-- dedicated Card 3.
@@ -4851,12 +4592,8 @@ local function BuildUI(self)
 	--   Row 2: Show/Keep Missing Affix   (collection mode, gated by Row 1)
 	--   Row 3: KeepOne Missing Affix    (protect missing affix items)
 	--
-	-- The Scan button shares the bottom-of-card slot with the Audit Lists
-	-- button on Card 1 (y=-68) so the two diagnostic actions line up
-	-- visually across the Affix tab.
-	--
 	-- Wrapped in `do ... end` so the card-internal locals (title FS,
-	-- toggle frames, scan button) don't bump BuildUI past Lua 5.1's
+	-- toggle frames, and button wiring) don't bump BuildUI past Lua 5.1's
 	-- 200-local cap. The toggles are exported on self._tglShowAffixDot /
 	-- self._tglAffixCollection -- OnClick handlers and state restoration
 	-- below reach them through `self` so the bare locals can vanish.
@@ -4883,16 +4620,13 @@ local function BuildUI(self)
 		tglSingleAffix:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 		self._tglSingleAffix = tglSingleAffix
 
-		-- (Scan Learned Affixes button moved to Card 3 in v3.20 -- see the
+		-- (Update Affix List button moved to Card 3 in v3.20 -- see the
 		-- Affix Tools card construction below.)
 	end
 
 	-- ========================================================================
 	-- Affix Tab Card 3: Affix Tools (v3.20).
-	-- Hosts the two diagnostic buttons that used to live one-per-card on
-	-- Cards 1 and 2 (Audit Lists, Scan Learned Affixes). Stacking them on
-	-- their own card lets Cards 1 and 2 breathe (the toggles + tier row
-	-- row were sharing a card with a button, which felt cramped).
+	-- Hosts the two diagnostic buttons: Refresh List and Update Affix List.
 	-- C_BLUE for both (transform/report class -- they surface info, don't
 	-- add or remove anything).
 	-- Wrapped in do...end so the two button locals don't bump BuildUI past
@@ -4903,8 +4637,8 @@ local function BuildUI(self)
 		card3Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
 		card3Title:SetText("Affix Tools")
 
-		-- Refresh List button (was Audit Lists on Card 1). Scans the user's Delete + Sell
-		-- lists for items carrying PE's @affix@ tooltip marker; prints a
+		-- Refresh List button. Scans the user's Delete + Sell lists for
+		-- items carrying PE's @affix@ tooltip marker; prints a
 		-- chat summary. Doesn't modify the lists.
 		local auditBtn = MakeActionButton(aCard3, "Refresh List", C_BLUE, function()
 			if _G.AutoDelete_AuditAffixOnLists then
@@ -4928,8 +4662,8 @@ local function BuildUI(self)
 			GameTooltip:Hide()
 		end)
 
-		-- Update Affix List button (was Scan Learned Affixes on Card 2). Refreshes the
-		-- addon's owned-affix mirror from PE and opens the scrollable
+		-- Update Affix List button. Refreshes the addon's owned-affix
+		-- mirror from PE and opens the scrollable
 		-- Learned Affixes window with Learned and Unlearned tabs.
 		local scanBtn = MakeActionButton(aCard3, "Update Affix List", C_BLUE, function()
 			if _G.AutoDelete_ScanLearnedAffixes then
@@ -5164,30 +4898,22 @@ local function BuildUI(self)
 
 	-- Keybinds tab layout: four vertical rows, one per feature. Each row
 	-- is ~22px tall and renders inline as:
-	--   [x] Feature Name  [Key Button]  Status text  [⚙]
-	-- The gear button on the right opens a feature-specific filter popup
-	-- when the feature has filterable options (Disenchant, Open). Mill
-	-- and Prospect have no per-item filters, so their gear button is
-	-- omitted. Total content: 4 rows * 22px + small top pad = ~92px,
-	-- fits inside the standard 100px tab content area.
+	--   [x] Feature Name  [Key Button]  Status text
+	-- Total content: 4 rows * 22px + small top pad = ~92px, which fits
+	-- inside the standard 100px tab content area.
 	local KEYBIND_ROW_H   = 22
 	local KEYBIND_ROW_GAP = 2
 	local KEYBIND_PAD_X   = 8
 	local KEYBIND_TGL_W   = 16              -- the small checkbox-only width
 	local KEYBIND_NAME_W  = 140
 	local KEYBIND_KEY_W   = 110
-	-- Widened from 22 (gear-glyph era) to 56 to fit "Filters" text label.
-	-- The glyph (`*`) was confusing -- it read like a footnote marker. The
-	-- explicit text button is unambiguous and tells the user what the
-	-- button does without needing a hover tooltip.
-	local KEYBIND_GEAR_W  = 56
+	local KEYBIND_STATUS_RIGHT_PAD_W = 56
 	local CONTENT_W_KEYBINDS = genContentW - KEYBIND_PAD_X * 2
 
 	-- Reusable row factory. Each row has the slots described above; the
 	-- caller passes a config table with the feature's labels, binding
-	-- command, and an optional `openFilters` function to wire the gear
-	-- button. Returns { toggle, keyRow, status, gear } so OnClick handlers
-	-- and the panel Refresh path can address each piece.
+	-- command, and tooltip. Returns the pieces the OnClick handlers and
+	-- panel Refresh path need to address.
 	local function MakeKeybindRow(opts, yOffset)
 		local row = CreateFrame("Frame", nil, keybindsPage)
 		row:SetSize(CONTENT_W_KEYBINDS, KEYBIND_ROW_H)
@@ -5218,7 +4944,7 @@ local function BuildUI(self)
 		statusText:SetFont(FONT, 9, "OUTLINE")
 		statusText:SetTextColor(unpack(C_DIM))
 		statusText:SetPoint("LEFT", keyRow, "RIGHT", 6, 0)
-		statusText:SetPoint("RIGHT", row, "RIGHT", -(KEYBIND_GEAR_W + 4), 0)
+		statusText:SetPoint("RIGHT", row, "RIGHT", -(KEYBIND_STATUS_RIGHT_PAD_W + 4), 0)
 		statusText:SetJustifyH("LEFT")
 		statusText:SetWordWrap(false)
 		statusText:SetText("")
@@ -5229,19 +4955,10 @@ local function BuildUI(self)
 		-- "Bind a key" (no key) and "[KEY] [Item]" (key + target) status.
 		row._bindingCmd = opts.bindingCmd
 
-		-- Filters button on the far right; opens the filter popup for this
-		-- v3.20: removed the per-row Filters button. DE Filters now live as
-		-- a card on the Filters tab (and the other three one-key actions
-		-- never had filters), so the Keybinds tab is just keybinding now.
-		-- The unused `openFilters` opts field is silently ignored.
-
 		return tgl, keyRow, statusText
 	end
 
-	-- Row 1: One-Key Open (y=-6). No gear / filter popup -- the only
-	-- option (autoOpenIncludeLocked) defaults to true and the cost of a
-	-- popup for one toggle exceeds the value. If we add more Open options
-	-- later, restore the openFilters callback.
+	-- Row 1: One-Key Open (y=-6).
 	local tglOpenEnabled, openKeyRow, openStatus = MakeKeybindRow({
 		label      = "One-Key Open",
 		bindingCmd = "CLICK AutoDeleteOpenButton:LeftButton",
@@ -5504,7 +5221,7 @@ local function BuildUI(self)
 					OnAccept = function()
 						if _G.AutoDelete_Stats and _G.AutoDelete_Stats.Reset then
 							_G.AutoDelete_Stats.Reset()
-							print("|cffff8000[AutoDelete]|r: Stats reset.")
+							print("|cffff8000[AutoDelete]|r Stats reset.")
 							if self.RefreshTrackingStats then self:RefreshTrackingStats() end
 						end
 					end,
@@ -5614,7 +5331,7 @@ local function BuildUI(self)
 		local copyBtn = MakeActionButton(profilesPage, "Copy", C_GREEN, function()
 			local sel = self._selectedProfile
 			if not sel or sel == "" then
-				print("|cffff8000[AutoDelete]|r: Select a profile first.")
+				print("|cffff8000[AutoDelete]|r Select a profile first.")
 				return
 			end
 			local dlg = StaticPopup_Show("AUTODELETE_PROFILE_COPY", sel,
@@ -5626,7 +5343,7 @@ local function BuildUI(self)
 		local deleteBtn = MakeActionButton(profilesPage, "Delete", C_RED, function()
 			local sel = self._selectedProfile
 			if not sel or sel == "" then
-				print("|cffff8000[AutoDelete]|r: Select a profile first.")
+				print("|cffff8000[AutoDelete]|r Select a profile first.")
 				return
 			end
 			local dlg = StaticPopup_Show("AUTODELETE_PROFILE_DELETE", sel)
@@ -5641,11 +5358,11 @@ local function BuildUI(self)
 		local importBtn = MakeActionButton(profilesPage, "Import Lists", C_GREEN, function()
 			local sel = self._selectedProfile
 			if not sel or sel == "" then
-				print("|cffff8000[AutoDelete]|r: Select a profile first.")
+				print("|cffff8000[AutoDelete]|r Select a profile first.")
 				return
 			end
 			if sel == _G.AutoDelete_Profiles.GetCurrentCharacter() then
-				print("|cffff8000[AutoDelete]|r: Cannot import from your own profile.")
+				print("|cffff8000[AutoDelete]|r Cannot import from your own profile.")
 				return
 			end
 			if not _G.AutoDelete_Profiles or not _G.AutoDelete_Profiles.PreviewImport then
@@ -5657,7 +5374,7 @@ local function BuildUI(self)
 				return
 			end
 			if #preview.additions == 0 and #preview.conflicts == 0 then
-				print("|cffff8000[AutoDelete]|r: Nothing to import. Your lists already match " .. sel .. ".")
+				print("|cffff8000[AutoDelete]|r Nothing to import. Your lists already match " .. sel .. ".")
 				return
 			end
 			if #preview.conflicts == 0 then
@@ -5787,7 +5504,7 @@ local function BuildUI(self)
 					if not source or not _G.AutoDelete_Profiles then return end
 					local ok, reason = _G.AutoDelete_Profiles.CopyFrom(source)
 					if ok then
-						print("|cffff8000[AutoDelete]|r: Copied settings from " .. source .. ".")
+						print("|cffff8000[AutoDelete]|r Copied settings from " .. source .. ".")
 						if _G.AutoDeleteOptionsPanel and _G.AutoDeleteOptionsPanel.Refresh then
 							_G.AutoDeleteOptionsPanel:Refresh()
 						end
@@ -5808,7 +5525,7 @@ local function BuildUI(self)
 					if not target or not _G.AutoDelete_Profiles then return end
 					local ok, reason = _G.AutoDelete_Profiles.DeleteProfile(target)
 					if ok then
-						print("|cffff8000[AutoDelete]|r: Deleted profile " .. target .. ".")
+						print("|cffff8000[AutoDelete]|r Deleted profile " .. target .. ".")
 						if _G.AutoDeleteOptionsPanel and _G.AutoDeleteOptionsPanel.Refresh then
 							_G.AutoDeleteOptionsPanel:Refresh()
 						end
@@ -5828,7 +5545,7 @@ local function BuildUI(self)
 					if not _G.AutoDelete_Profiles then return end
 					local ok = _G.AutoDelete_Profiles.ResetCurrent()
 					if ok then
-						print("|cffff8000[AutoDelete]|r: Current profile reset to defaults.")
+						print("|cffff8000[AutoDelete]|r Current profile reset to defaults.")
 						if _G.AutoDeleteOptionsPanel and _G.AutoDeleteOptionsPanel.Refresh then
 							_G.AutoDeleteOptionsPanel:Refresh()
 						end
@@ -5868,9 +5585,9 @@ local function BuildUI(self)
 					local ok, count = _G.AutoDelete_Profiles.ClearList(target)
 					if ok then
 						if target == "All" then
-							print(string.format("|cffff8000[AutoDelete]|r: Cleared all lists (%d entries removed).", count))
+							print(string.format("|cffff8000[AutoDelete]|r Cleared all lists (%d entries removed).", count))
 						else
-							print(string.format("|cffff8000[AutoDelete]|r: Cleared %s list (%d entries removed).", target, count))
+							print(string.format("|cffff8000[AutoDelete]|r Cleared %s list (%d entries removed).", target, count))
 						end
 						if _G.AutoDeleteOptionsPanel and _G.AutoDeleteOptionsPanel.Refresh then
 							_G.AutoDeleteOptionsPanel:Refresh()
@@ -5892,7 +5609,7 @@ local function BuildUI(self)
 					if not _G.AutoDelete_Profiles then return end
 					local ok, count = _G.AutoDelete_Profiles.ClearList("All")
 					if ok then
-						print(string.format("|cffff8000[AutoDelete]|r: Cleared all lists (%d entries removed).", count))
+						print(string.format("|cffff8000[AutoDelete]|r Cleared all lists (%d entries removed).", count))
 						if _G.AutoDeleteOptionsPanel and _G.AutoDeleteOptionsPanel.Refresh then
 							_G.AutoDeleteOptionsPanel:Refresh()
 						end
@@ -5916,7 +5633,7 @@ local function BuildUI(self)
 					local ok, result = _G.AutoDelete_Profiles.RemoveJunk()
 					if ok then
 						print(string.format(
-							"|cffff8000[AutoDelete]|r: Removed junk (Delete: %d, Sell: %d).",
+							"|cffff8000[AutoDelete]|r Removed junk (Delete: %d, Sell: %d).",
 							result.deleteRemoved or 0, result.sellRemoved or 0))
 						if (result.uncached or 0) > 0 then
 							print(string.format(
@@ -5952,7 +5669,7 @@ local function BuildUI(self)
 					local ok, result = _G.AutoDelete_Profiles.RemovePatternsBySubtype(payload.subtype)
 					if ok then
 						print(string.format(
-							"|cffff8000[AutoDelete]|r: Removed %s (Delete: %d, Sell: %d, Keep: %d).",
+							"|cffff8000[AutoDelete]|r Removed %s (Delete: %d, Sell: %d, Keep: %d).",
 							payload.label or payload.subtype,
 							result.deleteRemoved or 0,
 							result.sellRemoved or 0,
@@ -5985,7 +5702,7 @@ local function BuildUI(self)
 					local ok, result = _G.AutoDelete_Profiles.RemoveSellableFromDelete()
 					if ok then
 						print(string.format(
-							"|cffff8000[AutoDelete]|r: Removed %d sellable item(s) from the Delete list.",
+							"|cffff8000[AutoDelete]|r Removed %d sellable item(s) from the Delete list.",
 							result.removed or 0))
 						if (result.uncached or 0) > 0 then
 							print(string.format(
@@ -7063,8 +6780,7 @@ local function BuildUI(self)
 		end
 	end
 	-- Only the master Enabled toggle lives on the Keybinds-tab row. The
-	-- BoP/BoE/Unc/Rare/Epic/iLvl filters moved into the gear-button popup
-	-- (AutoDeleteDisenchantFiltersPopup) which wires its own handlers.
+	-- BoP/BoE/Unc/Rare/Epic/iLvl filters live on the Filters tab.
 	if self._tglDisenchant then
 		self._tglDisenchant:SetScript("OnClick", MakeDisenchantToggleHandler("disenchantEnabled"))
 	end
@@ -7592,9 +7308,7 @@ local function BuildUI(self)
 		tglAutoAddEquipped:SetChecked(p.autoAddEquipped)
 
 		-- Keybinds tab rows. Only the master toggle and the key-capture
-		-- row live on each feature's row; per-feature filters (BoP/BoE/
-		-- qualities/iLvl for Disenchant; Include-locked-tier for Open)
-		-- live in the gear-button popup, which refreshes itself on Show.
+		-- row live on each feature's row.
 		if self._tglDisenchant     then self._tglDisenchant:SetChecked(p.disenchantEnabled) end
 		if self._disenchantKeyRow  and self._disenchantKeyRow._refresh then self._disenchantKeyRow:_refresh() end
 		if self._refreshDisenchantStatus then self:_refreshDisenchantStatus() end
@@ -7602,14 +7316,6 @@ local function BuildUI(self)
 		if self._tglOpenEnabled then self._tglOpenEnabled:SetChecked(p.autoOpenEnabled) end
 		if self._openKeyRow and self._openKeyRow._refresh then self._openKeyRow:_refresh() end
 		if self._refreshOpenStatus then self:_refreshOpenStatus() end
-
-		-- If the Disenchant filters popup is currently open, refresh its
-		-- contents from the new profile values.
-		if _G.AutoDelete_DisenchantFiltersPopup and
-		   _G.AutoDelete_DisenchantFiltersPopup:IsShown() and
-		   _G.AutoDelete_RefreshDisenchantFilters then
-			_G.AutoDelete_RefreshDisenchantFilters()
-		end
 
 		-- Tools Card 1: Process Bags count summary.
 		if self._refreshProcessCount then self:_refreshProcessCount() end
@@ -7639,9 +7345,7 @@ local function BuildUI(self)
 		end
 		if self._tglSingleAffix then self._tglSingleAffix:SetChecked(p.keepSingleMissingAffix == true) end
 
-		-- Filters tab: DE Filters (Card 2, v3.20 -- ported from the old
-		-- Disenchant Filters popup that opened from a gear button on the
-		-- Keybinds tab). Same profile fields as the popup version.
+		-- Filters tab: DE Filters (Card 2).
 		if self._tglDisenchantBoP      then self._tglDisenchantBoP:SetChecked(p.disenchantBoP)          end
 		if self._tglDisenchantBoE      then self._tglDisenchantBoE:SetChecked(p.disenchantBoE)          end
 		if self._tglDisenchantUnc      then self._tglDisenchantUnc:SetChecked(p.disenchantUncommon)     end
@@ -8122,7 +7826,7 @@ local function SelectRowChoice(row, label)
 	end
 end
 
-_G.AutoDelete_ShowImportConflicts = function(sourceName, preview)
+function _G.AutoDelete_ShowImportConflicts(sourceName, preview)
 	BuildImportConflictsWindow()
 	importSourceName = sourceName
 
@@ -8262,7 +7966,7 @@ local function BuildClearListWindow()
 	cancelBtn:SetPoint("BOTTOMRIGHT", -15, 15)
 end
 
-_G.AutoDelete_ShowClearListPicker = function()
+function _G.AutoDelete_ShowClearListPicker()
 	BuildClearListWindow()
 	clearFrame:Show()
 end
@@ -8356,7 +8060,7 @@ local function BuildRemovePatternsWindow()
 	cancelBtn:SetPoint("BOTTOMRIGHT", -15, 15)
 end
 
-_G.AutoDelete_ShowRemovePatternsPicker = function()
+function _G.AutoDelete_ShowRemovePatternsPicker()
 	BuildRemovePatternsWindow()
 	removePatternsFrame:Show()
 end

@@ -1010,12 +1010,12 @@ function _G.AutoDelete_SetSpikeDebug(on)
 	end
 end
 
-function AutoDelete_PerfBegin(phase)
+function _G.AutoDelete_PerfBegin(phase)
 	if not _G.AutoDelete_PerfEnabled then return nil end
 	return debugprofilestop()
 end
 
-function AutoDelete_PerfEnd(phase, startMs)
+function _G.AutoDelete_PerfEnd(phase, startMs)
 	if not startMs then return end
 	local elapsed = debugprofilestop() - startMs
 	-- v3.20 spike debug: accumulate every instrumented phase's duration
@@ -1041,7 +1041,7 @@ end
 -- DeleteItems/items-deleted, DeleteItems/items-skipped-keep. PerfReport
 -- renders rows with totalMs=0 as "(counter)" so the user can tell them
 -- apart from timer rows at a glance.
-function AutoDelete_PerfCount(phase, n)
+function _G.AutoDelete_PerfCount(phase, n)
 	if not _G.AutoDelete_PerfEnabled then return end
 	n = n or 1
 	local s = _G.AutoDelete_PerfStats[phase]
@@ -1052,7 +1052,7 @@ function AutoDelete_PerfCount(phase, n)
 	s.count = s.count + n
 end
 
-function AutoDelete_PerfReport()
+function _G.AutoDelete_PerfReport()
 	local hasAny = false
 	for _ in pairs(_G.AutoDelete_PerfStats) do hasAny = true; break end
 	if not hasAny then
@@ -1096,12 +1096,12 @@ function AutoDelete_PerfReport()
 	end
 end
 
-function AutoDelete_PerfReset()
+function _G.AutoDelete_PerfReset()
 	_G.AutoDelete_PerfStats = {}
 	print("|cffff8000[AutoDelete PERF]|r stats cleared.")
 end
 
-function AutoDelete_PerfToggle()
+function _G.AutoDelete_PerfToggle()
 	_G.AutoDelete_PerfEnabled = not _G.AutoDelete_PerfEnabled
 	if _G.AutoDelete_PerfEnabled then
 		print("|cffff8000[AutoDelete PERF]|r tracking |cff00ff00ON|r. Loot/delete/sell normally, then /del perf report.")
@@ -2261,7 +2261,7 @@ end
 -- IsWhitelisted (the slow path) is kept for non-hot callers (secure
 -- button candidate selection at /Open/Mill/Prospect/Disenchant) where
 -- the call frequency is one-per-keypress, not one-per-slot-per-tick.
-_G.AutoDelete_IsWhitelistedFast = function(keepIDs, keepNames, itemId, itemName)
+function _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
 	if itemId and keepIDs[itemId] then return true end
 	if itemName and keepNames[Normalize(itemName)] then return true end
 	return false
@@ -2310,7 +2310,7 @@ local function AddItemToList(listKey, itemId)
 	local itemName = GetItemInfo(itemId) or ("Item " .. itemId)
 
 	if HasExactLine(profile[listKey], line) then
-		print("|cffff8000[AutoDelete]|r: " .. itemName .. " is already in the list")
+		print("|cffff8000[AutoDelete]|r " .. itemName .. " is already in the list")
 		return false
 	end
 
@@ -2332,7 +2332,7 @@ local function AddItemToList(listKey, itemId)
 	elseif listKey == "keepOneText" then label = "KeepOne"
 	elseif listKey == "keepStackText" then label = "KeepStack"
 	else label = "delete" end
-	print("|cffff8000[AutoDelete]|r: Added " .. itemName .. " to " .. label .. " list")
+	print("|cffff8000[AutoDelete]|r Added " .. itemName .. " to " .. label .. " list")
 	return true
 end
 
@@ -2372,7 +2372,7 @@ end
 -- Globals for the row context menu in Options.lua to call.
 _G.AutoDelete_AddItemToList = AddItemToList
 _G.AutoDelete_RemoveItemFromList = RemoveItemFromList
-_G.AutoDelete_RemoveItemFromAllLists = function(itemId)
+function _G.AutoDelete_RemoveItemFromAllLists(itemId)
 	local removed = {}
 	local keys = {
 		{ key = "listText", label = "Delete" },
@@ -2390,16 +2390,16 @@ _G.AutoDelete_RemoveItemFromAllLists = function(itemId)
 end
 
 -- Global functions for ElvUI buttons - always target the correct list
-_G.AutoDelete_AddToDeleteList = function() HandleItemDrop("listText") end
-_G.AutoDelete_AddToSellList = function() HandleItemDrop("sellListText") end
-_G.AutoDelete_AddToKeepList = function() HandleItemDrop("whitelistText") end
-_G.AutoDelete_AddToKeepStackList = function() HandleItemDrop("keepStackText") end
+function _G.AutoDelete_AddToDeleteList() HandleItemDrop("listText") end
+function _G.AutoDelete_AddToSellList() HandleItemDrop("sellListText") end
+function _G.AutoDelete_AddToKeepList() HandleItemDrop("whitelistText") end
+function _G.AutoDelete_AddToKeepStackList() HandleItemDrop("keepStackText") end
 
 -- Opens the AutoDelete options panel and switches the Delete/Sell/Keep
 -- list tab to the requested mode. Used by the ElvUI bag buttons so a
 -- right-click on Delete jumps straight to the Delete list, etc.
 -- Accepts: "delete", "sell", "whitelist".
-_G.AutoDelete_OpenPanelToList = function(mode)
+function _G.AutoDelete_OpenPanelToList(mode)
 	local panel = _G.AutoDeleteOptionsPanel
 	if not panel then return end
 	if not panel:IsShown() then panel:Show() end
@@ -2927,7 +2927,7 @@ local function PlanKeepOneSlotAction(totalUnits, slotCount)
 	return "split-delete", maxDeletable
 end
 
-_G.AutoDelete_CountBagUnitsByItemId = function(itemId)
+function _G.AutoDelete_CountBagUnitsByItemId(itemId)
 	if not itemId then return 0 end
 	local total = 0
 	for bag = 0, 4 do
@@ -2941,7 +2941,7 @@ _G.AutoDelete_CountBagUnitsByItemId = function(itemId)
 	return total
 end
 
-_G.AutoDelete_GetKeepStackSlotChoice = function(itemId)
+function _G.AutoDelete_GetKeepStackSlotChoice(itemId)
 	if not itemId then return 0, nil, nil end
 	local stackCount, keepBag, keepSlot, keepCount = 0, nil, nil, -1
 	for bag = 0, 4 do
@@ -3454,7 +3454,7 @@ _G.AutoDelete_QueueMaxTries = _G.AutoDelete_QueueMaxTries or 4
 -- Lives on _G to dodge the 200-local cap. Closure still captures the
 -- file-local upvalues (BuildWantedSets, Normalize, IsCosmeticSlot,
 -- IsAffixProtected) so the helper behaves identically to inline code.
-_G.AutoDelete_ValidateDrainEntry = function(profile, entry, currentLink)
+function _G.AutoDelete_ValidateDrainEntry(profile, entry, currentLink)
 	-- GetItemInfo on a warm cache is near-free; we need name + quality
 	-- + itemClass for quest detection + equipSlot for the auto-rule
 	-- gates that only fire on equippable gear.
@@ -3817,7 +3817,7 @@ end
 --
 -- Returns on the first eligible item found (early break) so the average
 -- cost is well under a full bag scan.
-function AutoDelete_HasPendingDeleteItems(profile)
+function _G.AutoDelete_HasPendingDeleteItems(profile)
 	if not profile then return false end
 	-- Tri-state quality filter: only "delete" mode counts as pending here.
 	-- "sell" items don't block the bag-full Goblin summon -- selling requires
@@ -4043,7 +4043,7 @@ end
 -- Caller must pass a non-nil `link` (used as the cache key). Returns
 -- (hasBoE, isSoulbound, affixLevel-or-false). Debug-mode scans
 -- bypass this function so the per-marker debug prints still work.
-function AutoDelete_ScanBagItemMarkers(bag, slot, link)
+function _G.AutoDelete_ScanBagItemMarkers(bag, slot, link)
 	local _p = AutoDelete_PerfBegin("AutoDelete_ScanBagItemMarkers")
 	-- v3.20 spike debug: count cold tooltip scans (this function is
 	-- the unified entry for affix + soulbound + BoE marker scans).
@@ -4275,7 +4275,7 @@ end
 -- when an affix marker IS present on the item -- currently defaults
 -- to tier 1 so the dot still renders.
 local AFFIX_ROMAN_TO_NUM = { i = 1, ii = 2, iii = 3, iv = 4, v = 5 }
-function AutoDelete_ExtractAffixLevel(itemName)
+function _G.AutoDelete_ExtractAffixLevel(itemName)
 	if not itemName then return nil end
 	-- Lowercase + match a trailing Roman numeral run anchored at end of
 	-- string, preceded by whitespace. The [iv]+ pattern matches any
@@ -4287,7 +4287,7 @@ function AutoDelete_ExtractAffixLevel(itemName)
 	return AFFIX_ROMAN_TO_NUM[roman]
 end
 
-function AutoDelete_ExtractKnownAffixLevel(itemName)
+function _G.AutoDelete_ExtractKnownAffixLevel(itemName)
 	local tier = AutoDelete_ExtractAffixLevel(itemName)
 	if not tier then return nil end
 	if _G.AutoDelete_GetAffixKeyForItemName
@@ -4374,7 +4374,7 @@ local AUTODELETE_AFFIX_ALIASES = {
 -- (auto-hook -- see AutoDelete_InstallPEAffixHook below), and on the
 -- affixCollectionMode toggle. Idempotent. Returns the count of learned
 -- affixes mirrored, useful for a debug print.
-function AutoDelete_RefreshOwnedAffixes()
+function _G.AutoDelete_RefreshOwnedAffixes()
 	local map = {}
 	local known = {}
 	local count = 0
@@ -4423,7 +4423,7 @@ function AutoDelete_RefreshOwnedAffixes()
 	return count
 end
 
-_G.AutoDelete_EnsureOwnedAffixMirror = function()
+function _G.AutoDelete_EnsureOwnedAffixMirror()
 	if not _G.ExtractionService or not _G.ExtractionService.learnedAffixes then
 		return false
 	end
@@ -4438,7 +4438,7 @@ end
 _G.AutoDelete_LastPEAffixRequestAt = _G.AutoDelete_LastPEAffixRequestAt or 0
 local PE_AFFIX_REQUEST_THROTTLE_SECONDS = 5
 
-function AutoDelete_RequestPELearnedAffixes(reason, force)
+function _G.AutoDelete_RequestPELearnedAffixes(reason, force)
 	local service = _G.ExtractionService
 	if type(service) ~= "table" or type(service.RequestLearnedAffixes) ~= "function" then
 		return false, "unavailable"
@@ -4494,7 +4494,7 @@ end
 -- Returns true if the hook installed (PE present + ExtractionUI loaded),
 -- false otherwise. Idempotent -- second call is a no-op.
 _G.AutoDelete_PEAffixHookInstalled = false
-function AutoDelete_InstallPEAffixHook()
+function _G.AutoDelete_InstallPEAffixHook()
 	if _G.AutoDelete_PEAffixHookInstalled then return true end
 	if type(_G.ExtractionUI) ~= "table" then return false end
 	if type(_G.ExtractionUI.OnLearnedAffixesReceived) ~= "function" then
@@ -4529,7 +4529,7 @@ end
 -- Returns nil if PE data hasn't been observed yet (so callers can fall
 -- back to the non-collection-mode path instead of incorrectly hiding
 -- dots before PE has finished initializing).
-function AutoDelete_IsAffixOwnedByItemName(itemName)
+function _G.AutoDelete_IsAffixOwnedByItemName(itemName)
 	if not itemName then return nil end
 	-- nil-vs-empty distinction: if we have no PE data at all, return nil
 	-- ("can't determine"). If we have PE data but the item's affix isn't
@@ -4673,7 +4673,7 @@ local function HasAffix(bag, slot)
 	return level
 end
 
-_G.AutoDelete_GetAffixDisplayName = function(link, bag, slot, fallbackName)
+function _G.AutoDelete_GetAffixDisplayName(link, bag, slot, fallbackName)
 	if link and _G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.affixName then
 		local cachedName = _G.AutoDelete_TooltipCache.affixName[link]
 		if cachedName and cachedName ~= "" then return cachedName end
@@ -4844,7 +4844,7 @@ local function ScanLearnedAffixes()
 		showFn(ACCENT_OPEN .. "Project Ebonhold not loaded" .. COLOR_CLOSE
 			.. "\n\nNo learned-affix data is available yet. Open the "
 			.. "Extraction UI in-game once to trigger data sync, then click "
-			.. "Scan Learned Affixes again."
+			.. "Update Affix List again."
 			.. (requested and "\n\nAutoDelete also requested a fresh sync from Project Ebonhold." or ""))
 		return
 	end
@@ -5031,7 +5031,7 @@ _G.AutoDelete_AFFIX_SCAN_PER_TICK  = 3      -- cold scans per processed tick
 _G.AutoDelete_AFFIX_SCAN_INTERVAL  = 0.05   -- seconds between processed ticks (60 scans/sec budget)
 _G.AutoDelete_nextAffixScanAt      = 0      -- GetTime() of next eligible scan tick
 
-function AutoDelete_QueueAffixScan(link, bag, slot, button)
+function _G.AutoDelete_QueueAffixScan(link, bag, slot, button)
 	if not link or not button then return end
 	-- De-dupe: if the same button is already queued for this link
 	-- (common during ContainerFrame_Update bursts that refire for the
@@ -5055,7 +5055,7 @@ end
 -- Called from scanner:OnUpdate every frame. No-op when the queue is
 -- empty (the common steady-state case). When non-empty, processes up to
 -- AutoDelete_AFFIX_SCAN_PER_TICK entries per AutoDelete_AFFIX_SCAN_INTERVAL window.
-function AutoDelete_ProcessAffixScanQueue(now)
+function _G.AutoDelete_ProcessAffixScanQueue(now)
 	if #AutoDelete_affixScanQueue == 0 then return end
 	if now < AutoDelete_nextAffixScanAt then return end
 	local _p = AutoDelete_PerfBegin("AutoDelete_ProcessAffixScanQueue")
@@ -5156,7 +5156,7 @@ _G.AutoDelete_ElvUIItemLevelYOffset = 1
 -- exist on PE clients.
 local AFFIX_DOT_TEXTURE = "Interface\\AddOns\\AutoDelete\\textures\\dot.tga"
 
-function AutoDelete_SetButtonAffixDot(button, affixLevel, colorOverride)
+function _G.AutoDelete_SetButtonAffixDot(button, affixLevel, colorOverride)
 	if not button then return end
 	-- Respect user preference. When the dot is toggled off, treat every
 	-- slot as "no affix" so any previously-drawn dot/backing gets hidden.
@@ -5249,7 +5249,7 @@ local affixDotVersion = 0
 -- earlier in the file) can call it without a forward-reference dance.
 -- The locals-cap pressure on the main chunk also makes a global cheaper
 -- than a forward-declared file-local.
-_G.AutoDelete_DecideDot = function(link, bag, slot, button)
+function _G.AutoDelete_DecideDot(link, bag, slot, button)
 	if not link then return false, nil end
 	if cachedProfile and cachedProfile.showAffixDot == false then
 		return false, nil
@@ -5283,7 +5283,7 @@ _G.AutoDelete_DecideDot = function(link, bag, slot, button)
 	return tier, _G.AutoDelete_GetMissingAffixDotColor(cachedProfile)
 end
 
-_G.AutoDelete_GetAffixKeyForItemName = function(itemName)
+function _G.AutoDelete_GetAffixKeyForItemName(itemName)
 	if not itemName or not _G.ExtractionService or not _G.ExtractionService.learnedAffixes then
 		return nil
 	end
@@ -5311,12 +5311,12 @@ _G.AutoDelete_GetAffixKeyForItemName = function(itemName)
 	return best
 end
 
-_G.AutoDelete_IsSingleAffixSlot = function(itemClass, equipSlot)
+function _G.AutoDelete_IsSingleAffixSlot(itemClass, equipSlot)
 	if not equipSlot or not GEAR_SLOTS[equipSlot] then return false end
 	return itemClass == "Armor" or itemClass == "Weapon"
 end
 
-_G.AutoDelete_GetMissingAffixKeyForSlot = function(profile, bag, slot, link, itemName, itemClass, equipSlot)
+function _G.AutoDelete_GetMissingAffixKeyForSlot(profile, bag, slot, link, itemName, itemClass, equipSlot)
 	if not profile or profile.keepSingleMissingAffix ~= true then return nil end
 	if not _G.AutoDelete_IsSingleAffixSlot(itemClass, equipSlot) then return nil end
 	if not HasAffix(bag, slot) then return nil end
@@ -5325,7 +5325,7 @@ _G.AutoDelete_GetMissingAffixKeyForSlot = function(profile, bag, slot, link, ite
 	return _G.AutoDelete_GetAffixKeyForItemName(itemName)
 end
 
-_G.AutoDelete_BuildSingleAffixPlan = function(profile, keepIDs, keepNames)
+function _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
 	if not profile or profile.keepSingleMissingAffix ~= true then return nil end
 	local byAffix = {}
 	local slots = {}
@@ -5464,7 +5464,7 @@ end
 -- inline on every BAG_UPDATE and the result was 1 FPS during 100-item
 -- delete bursts. The natural ContainerFrame_Update / B:UpdateSlot
 -- hooks handle live bag changes cheaply via the per-slot caches.
-_G.AutoDelete_RefreshAffixDots = function()
+function _G.AutoDelete_RefreshAffixDots()
 	affixDotVersion = affixDotVersion + 1
 	for i = 1, (NUM_CONTAINER_FRAMES or 12) do
 		local frame = _G["ContainerFrame" .. i]
@@ -5571,7 +5571,7 @@ _G.AutoDelete_AffixTierProtectionFields = {
 	[5] = "protectAffixTier5",
 }
 
-_G.AutoDelete_HasAnyAffixTierProtection = function(profile)
+function _G.AutoDelete_HasAnyAffixTierProtection(profile)
 	if not profile then return false end
 	for _, field in pairs(_G.AutoDelete_AffixTierProtectionFields) do
 		if profile[field] == true then return true end
@@ -5579,7 +5579,7 @@ _G.AutoDelete_HasAnyAffixTierProtection = function(profile)
 	return false
 end
 
-_G.AutoDelete_IsMissingAffixHardStop = function(profile, bag, slot, itemLink, singleAffixSlot)
+function _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot)
 	if not profile or not (profile.affixCollectionMode or profile.keepSingleMissingAffix) then
 		return false, nil
 	end
@@ -5610,7 +5610,7 @@ IsAffixProtected = function(profile, bag, slot, itemLink, action, singleAffixSlo
 	return false
 end
 
-_G.AutoDelete_IsDestructiveRuleProtected = function(profile, bag, slot, itemLink, action, singleAffixSlot, keepIDs, keepNames, keepOneIDs, keepStackIDs)
+function _G.AutoDelete_IsDestructiveRuleProtected(profile, bag, slot, itemLink, action, singleAffixSlot, keepIDs, keepNames, keepOneIDs, keepStackIDs)
 	if not profile or not itemLink then return false, nil end
 	local itemId = GetItemIDFromLink(itemLink)
 	local itemName = GetItemInfo(itemLink)
@@ -5751,7 +5751,7 @@ _G.AutoDelete_GoblinAutoBackoffS = 30
 _G.AutoDelete_GoblinAutoBackoffUntil = 0
 _G.AutoDelete_SummonFailureChatUntil = _G.AutoDelete_SummonFailureChatUntil or {}
 
-_G.AutoDelete_AcquireCompanionSummon = function(owner, duration)
+function _G.AutoDelete_AcquireCompanionSummon(owner, duration)
 	local now = GetTime()
 	local current = _G.AutoDelete_CompanionSummonOwner
 	if current and current ~= owner and now < (_G.AutoDelete_CompanionSummonOwnerUntil or 0) then
@@ -5762,7 +5762,7 @@ _G.AutoDelete_AcquireCompanionSummon = function(owner, duration)
 	return true, owner
 end
 
-_G.AutoDelete_ReleaseCompanionSummon = function(owner)
+function _G.AutoDelete_ReleaseCompanionSummon(owner)
 	if _G.AutoDelete_CompanionSummonOwner == owner then
 		_G.AutoDelete_CompanionSummonOwner = nil
 		_G.AutoDelete_CompanionSummonOwnerUntil = 0
@@ -5775,16 +5775,16 @@ _G.AutoDelete_ReleaseCompanionSummon = function(owner)
 	end
 end
 
-_G.AutoDelete_IsCompanionSummonBusyFor = function(owner)
+function _G.AutoDelete_IsCompanionSummonBusyFor(owner)
 	local current = _G.AutoDelete_CompanionSummonOwner
 	return current and current ~= owner and GetTime() < (_G.AutoDelete_CompanionSummonOwnerUntil or 0)
 end
 
-_G.AutoDelete_GoblinAutoBackoffActive = function()
+function _G.AutoDelete_GoblinAutoBackoffActive()
 	return GetTime() < (_G.AutoDelete_GoblinAutoBackoffUntil or 0)
 end
 
-_G.AutoDelete_ShouldMerchantHavePriority = function(profile)
+function _G.AutoDelete_ShouldMerchantHavePriority(profile)
 	profile = profile or cachedProfile
 	if not profile or not profile.summonMerchantWhenBagsFull then return false end
 	if profile.summonOnlyInCombat and not (UnitAffectingCombat and UnitAffectingCombat("player")) then return false end
@@ -5800,21 +5800,21 @@ end
 -- Central combat gate for every AutoDelete-owned Scavenger summon path.
 -- Delayed timers re-check here so "Only in Combat" cannot leak a summon after
 -- combat ends.
-_G.AutoDelete_ScavengerCombatAllowed = function(profile)
+function _G.AutoDelete_ScavengerCombatAllowed(profile)
 	profile = profile or cachedProfile
 	if not profile or not profile.summonOnlyInCombat then return true end
 	return (UnitAffectingCombat and UnitAffectingCombat("player")) and true or false
 end
 
-_G.AutoDelete_PrintSummonAttempt = function(name, attempt, maxAttempts)
+function _G.AutoDelete_PrintSummonAttempt(name, attempt, maxAttempts)
 	if attempt and attempt > 1 then
 		_G.AutoDelete_LastSuppressedSummonAttempt = tostring(name) .. " " .. tostring(attempt) .. "/" .. tostring(maxAttempts or "?")
 		return
 	end
-	print("|cffff8000[AutoDelete]|r: Trying to summon " .. tostring(name) .. ".")
+	print("|cffff8000[AutoDelete]|r Trying to summon " .. tostring(name) .. ".")
 end
 
-_G.AutoDelete_ShouldPrintSummonFailure = function(key, cooldown)
+function _G.AutoDelete_ShouldPrintSummonFailure(key, cooldown)
 	local now = GetTime()
 	cooldown = cooldown or 30
 	_G.AutoDelete_SummonFailureChatUntil = _G.AutoDelete_SummonFailureChatUntil or {}
@@ -5823,7 +5823,7 @@ _G.AutoDelete_ShouldPrintSummonFailure = function(key, cooldown)
 	return true
 end
 
-_G.AutoDelete_ConfirmScavengerIsOut = function(callAt)
+function _G.AutoDelete_ConfirmScavengerIsOut(callAt)
 	if _G.AutoDelete_SetActiveTrackedPet then
 		_G.AutoDelete_SetActiveTrackedPet("scavenger")
 	end
@@ -5838,7 +5838,7 @@ _G.AutoDelete_ConfirmScavengerIsOut = function(callAt)
 	end
 end
 
-_G.AutoDelete_FinishScavengerFailure = function(reason)
+function _G.AutoDelete_FinishScavengerFailure(reason)
 	_G.AutoDelete_ScavengerLastSummonResult = reason or "failed-after-retries"
 	_G.AutoDelete_ScavengerConfirmPending = false
 	if _G.AutoDelete_ReleaseCompanionSummon then
@@ -5846,12 +5846,12 @@ _G.AutoDelete_FinishScavengerFailure = function(reason)
 	end
 	if _G.AutoDelete_ScavengerLastSummonResult == "failed-after-retries" then
 		if _G.AutoDelete_ShouldPrintSummonFailure("scavenger", 30) then
-			print("|cffff8000[AutoDelete]|r: Greedy Scavenger did not appear after AutoDelete retried. It will try again on the next summon trigger.")
+			print("|cffff8000[AutoDelete]|r Greedy Scavenger did not appear after AutoDelete retried. It will try again on the next summon trigger.")
 		end
 	end
 end
 
-_G.AutoDelete_CallScavengerForConfirm = function(attempt)
+function _G.AutoDelete_CallScavengerForConfirm(attempt)
 	attempt = attempt or 1
 	local ok, owner = _G.AutoDelete_AcquireCompanionSummon("scavenger", 8)
 	if not ok then
@@ -5910,7 +5910,7 @@ _G.AutoDelete_CallScavengerForConfirm = function(attempt)
 	_G.AutoDelete_ConfirmScavengerSummon(lastSummonCallAt.scavenger, attempt)
 end
 
-_G.AutoDelete_ConfirmScavengerSummon = function(callAt, attempt)
+function _G.AutoDelete_ConfirmScavengerSummon(callAt, attempt)
 	attempt = attempt or 1
 	if attempt == 1 and _G.AutoDelete_ScavengerConfirmPending then return end
 	_G.AutoDelete_ScavengerConfirmPending = true
@@ -5967,8 +5967,8 @@ local function SummonGreedyScavenger(force)
 	_G.AutoDelete_CallScavengerForConfirm(1)
 end
 
-_G.AutoDelete_ConfirmGoblinMerchantIsOut = function(callAt)
-	print("|cffff8000[AutoDelete]|r: Goblin Merchant is out. Target it and press your Interact With Target keybind to open the vendor.")
+function _G.AutoDelete_ConfirmGoblinMerchantIsOut(callAt)
+	print("|cffff8000[AutoDelete]|r Goblin Merchant is out. Target it and press your Interact With Target keybind to open the vendor.")
 	if _G.AutoDelete_SetActiveTrackedPet then
 		_G.AutoDelete_SetActiveTrackedPet("merchant")
 	end
@@ -5982,7 +5982,7 @@ _G.AutoDelete_ConfirmGoblinMerchantIsOut = function(callAt)
 	end
 end
 
-_G.AutoDelete_FinishGoblinMerchantFailure = function(reason)
+function _G.AutoDelete_FinishGoblinMerchantFailure(reason)
 	_G.AutoDelete_GoblinLastSummonResult = reason or "failed-after-retries"
 	_G.AutoDelete_GoblinConfirmPending = false
 	_G.AutoDelete_GoblinAutoBackoffUntil = GetTime() + (_G.AutoDelete_GoblinAutoBackoffS or 30)
@@ -5993,11 +5993,11 @@ _G.AutoDelete_FinishGoblinMerchantFailure = function(reason)
 		_G.AutoDelete_RearmGoblinAfterBackoff(_G.AutoDelete_GoblinLastSummonResult)
 	end
 	if _G.AutoDelete_ShouldPrintSummonFailure("goblin", 30) then
-		print("|cffff8000[AutoDelete]|r: Goblin Merchant did not appear after AutoDelete retried. Auto-summon will wait briefly so you can summon it manually. Run |cffffd700/del goblin|r if this keeps happening.")
+		print("|cffff8000[AutoDelete]|r Goblin Merchant did not appear after AutoDelete retried. Auto-summon will wait briefly so you can summon it manually. Run |cffffd700/del goblin|r if this keeps happening.")
 	end
 end
 
-_G.AutoDelete_CallGoblinMerchantForConfirm = function(attempt)
+function _G.AutoDelete_CallGoblinMerchantForConfirm(attempt)
 	local ok, owner = _G.AutoDelete_AcquireCompanionSummon("merchant", 8)
 	if not ok then
 		_G.AutoDelete_GoblinLastSummonResult = "waiting-for-" .. tostring(owner)
@@ -6048,7 +6048,7 @@ end
 -- Summon confirmation retries quietly because CallCompanion can be dropped or
 -- delayed while another companion is despawning. Do not tell the player to act
 -- until AutoDelete has exhausted its own retry attempts.
-_G.AutoDelete_ConfirmGoblinMerchantSummon = function(callAt, attempt)
+function _G.AutoDelete_ConfirmGoblinMerchantSummon(callAt, attempt)
 	attempt = attempt or 1
 	if attempt == 1 and _G.AutoDelete_GoblinConfirmPending then return end
 	_G.AutoDelete_GoblinConfirmPending = true
@@ -6496,16 +6496,16 @@ local function TryAutoRepair()
 		RepairAllItems(1)  -- 1 = use guild bank funds
 		BumpStat("repairs", 1)
 		BumpStat("repairSpend", cost)
-		print("|cffff8000[AutoDelete]|r: Repaired from guild bank (" .. FormatMoney(cost) .. ")")
+		print("|cffff8000[AutoDelete]|r Repaired from guild bank (" .. FormatMoney(cost) .. ")")
 	else
 		-- Fall back to personal gold; skip if the player can't afford it.
 		if GetMoney and GetMoney() >= cost then
 			RepairAllItems()
 			BumpStat("repairs", 1)
 			BumpStat("repairSpend", cost)
-			print("|cffff8000[AutoDelete]|r: Repaired for " .. FormatMoney(cost))
+			print("|cffff8000[AutoDelete]|r Repaired for " .. FormatMoney(cost))
 		else
-			print("|cffff8000[AutoDelete]|r: Not enough gold to repair (need " .. FormatMoney(cost) .. ")")
+			print("|cffff8000[AutoDelete]|r Not enough gold to repair (need " .. FormatMoney(cost) .. ")")
 		end
 	end
 end
@@ -6520,7 +6520,7 @@ local sellDryTicks = 0
 
 local function SellItems(silent)
 	if not MerchantFrame or not MerchantFrame:IsShown() then
-		if not silent then print("|cffff8000[AutoDelete]|r: You must be at a vendor to sell.") end
+		if not silent then print("|cffff8000[AutoDelete]|r You must be at a vendor to sell.") end
 		return
 	end
 	if CursorHasItem() then return end
@@ -6776,7 +6776,7 @@ local function SellItems(silent)
 	else
 		sellDryTicks = sellDryTicks + 1
 		if sellDryTicks >= 2 and sellSessionCount > 0 then
-			print("|cffff8000[AutoDelete]|r: Sold " .. sellSessionCount .. " item(s) for " .. FormatMoney(sellSessionCopper))
+			print("|cffff8000[AutoDelete]|r Sold " .. sellSessionCount .. " item(s) for " .. FormatMoney(sellSessionCopper))
 			sellSessionCount = 0
 			sellSessionCopper = 0
 			sellDryTicks = 0
@@ -6821,6 +6821,12 @@ end
 local function CreateElvUIBagButton()
 	local bagFrame = _G.ElvUI_ContainerFrame
 	if not bagFrame then return end
+	local C_BAG_BUTTON_BG = { 0, 0, 0, 0.6 }
+	local C_BAG_BUTTON_BORDER = { 0.20, 0.20, 0.20, 1 }
+	local C_BAG_BUTTON_BORDER_HOVER = { 0.40, 0.40, 0.40, 1 }
+	local C_TOOLTIP_TITLE = { 0.247, 0.780, 0.922 }
+	local C_TOOLTIP_TEXT = { 1, 1, 1 }
+	local C_TOOLTIP_WARN = { 1, 0.30, 0.30 }
 
 	-- =====================================================
 	-- Delete button (red X) - leftmost in the Delete | Sell | Keep row
@@ -6834,8 +6840,8 @@ local function CreateElvUIBagButton()
 		tile = false, tileSize = 16, edgeSize = 1,
 		insets = { left = 1, right = 1, top = 1, bottom = 1 }
 	})
-	btn:SetBackdropColor(0, 0, 0, 0.6)
-	btn:SetBackdropBorderColor(0.2, 0.2, 0.2, 1)
+	btn:SetBackdropColor(unpack(C_BAG_BUTTON_BG))
+	btn:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER))
 
 	local icon = btn:CreateTexture(nil, "ARTWORK")
 	icon:SetPoint("TOPLEFT", 2, -2)
@@ -6844,16 +6850,16 @@ local function CreateElvUIBagButton()
 
 	btn:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT")
-		GameTooltip:AddLine("AutoDelete", 0.247, 0.780, 0.922)
-		GameTooltip:AddLine("Drop item to add to delete list.", 1, 1, 1)
-		GameTooltip:AddLine("Right-click to open settings.", 1, 1, 1)
+		GameTooltip:AddLine("AutoDelete", unpack(C_TOOLTIP_TITLE))
+		GameTooltip:AddLine("Drop item to add to Delete List.", unpack(C_TOOLTIP_TEXT))
+		GameTooltip:AddLine("Right-click to open settings.", unpack(C_TOOLTIP_TEXT))
 		GameTooltip:Show()
-		btn:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+		btn:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER_HOVER))
 		icon:SetVertexColor(1, 0.2, 0.2)
 	end)
 	btn:SetScript("OnLeave", function()
 		GameTooltip:Hide()
-		btn:SetBackdropBorderColor(0.2, 0.2, 0.2, 1)
+		btn:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER))
 		icon:SetVertexColor(1, 1, 1)
 	end)
 
@@ -6882,8 +6888,8 @@ local function CreateElvUIBagButton()
 		tile = false, tileSize = 16, edgeSize = 1,
 		insets = { left = 1, right = 1, top = 1, bottom = 1 }
 	})
-	sellBtn:SetBackdropColor(0, 0, 0, 0.6)
-	sellBtn:SetBackdropBorderColor(0.2, 0.2, 0.2, 1)
+	sellBtn:SetBackdropColor(unpack(C_BAG_BUTTON_BG))
+	sellBtn:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER))
 
 	local sellIcon = sellBtn:CreateTexture(nil, "ARTWORK")
 	sellIcon:SetPoint("TOPLEFT", 2, -2)
@@ -6893,20 +6899,20 @@ local function CreateElvUIBagButton()
 
 	sellBtn:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT")
-		GameTooltip:AddLine("Sell Items", 0.247, 0.780, 0.922)
-		GameTooltip:AddLine("Click to sell at vendor.", 1, 1, 1)
-		GameTooltip:AddLine("Drop item to add to sell list.", 1, 1, 1)
-		GameTooltip:AddLine("Right-click to open settings.", 1, 1, 1)
+		GameTooltip:AddLine("Sell Items", unpack(C_TOOLTIP_TITLE))
+		GameTooltip:AddLine("Click to sell at vendor.", unpack(C_TOOLTIP_TEXT))
+		GameTooltip:AddLine("Drop item to add to Sell List.", unpack(C_TOOLTIP_TEXT))
+		GameTooltip:AddLine("Right-click to open settings.", unpack(C_TOOLTIP_TEXT))
 		if not MerchantFrame or not MerchantFrame:IsShown() then
-			GameTooltip:AddLine("Not at a vendor.", 1, 0.3, 0.3)
+			GameTooltip:AddLine("Not at a vendor.", unpack(C_TOOLTIP_WARN))
 		end
 		GameTooltip:Show()
-		sellBtn:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+		sellBtn:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER_HOVER))
 		sellIcon:SetVertexColor(1, 1, 0.6)
 	end)
 	sellBtn:SetScript("OnLeave", function()
 		GameTooltip:Hide()
-		sellBtn:SetBackdropBorderColor(0.2, 0.2, 0.2, 1)
+		sellBtn:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER))
 		sellIcon:SetVertexColor(1, 1, 1)
 	end)
 
@@ -6939,8 +6945,8 @@ local function CreateElvUIBagButton()
 		tile = false, tileSize = 16, edgeSize = 1,
 		insets = { left = 1, right = 1, top = 1, bottom = 1 }
 	})
-	keepBtn:SetBackdropColor(0, 0, 0, 0.6)
-	keepBtn:SetBackdropBorderColor(0.2, 0.2, 0.2, 1)
+	keepBtn:SetBackdropColor(unpack(C_BAG_BUTTON_BG))
+	keepBtn:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER))
 
 	local keepIcon = keepBtn:CreateTexture(nil, "ARTWORK")
 	keepIcon:SetPoint("TOPLEFT", 2, -2)
@@ -6950,17 +6956,17 @@ local function CreateElvUIBagButton()
 
 	keepBtn:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT")
-		GameTooltip:AddLine("Keep List", 0.247, 0.780, 0.922)
-		GameTooltip:AddLine("Drop item to add to keep list.", 1, 1, 1)
-		GameTooltip:AddLine("Right-click to open settings.", 1, 1, 1)
-		GameTooltip:AddLine("Items on this list are never auto-sold or auto-deleted.", 1, 1, 1)
+		GameTooltip:AddLine("Keep List", unpack(C_TOOLTIP_TITLE))
+		GameTooltip:AddLine("Drop item to add to Keep List.", unpack(C_TOOLTIP_TEXT))
+		GameTooltip:AddLine("Right-click to open settings.", unpack(C_TOOLTIP_TEXT))
+		GameTooltip:AddLine("Items on this list are never auto-sold or auto-deleted.", unpack(C_TOOLTIP_TEXT))
 		GameTooltip:Show()
-		keepBtn:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+		keepBtn:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER_HOVER))
 		keepIcon:SetVertexColor(0.6, 0.85, 1)
 	end)
 	keepBtn:SetScript("OnLeave", function()
 		GameTooltip:Hide()
-		keepBtn:SetBackdropBorderColor(0.2, 0.2, 0.2, 1)
+		keepBtn:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER))
 		keepIcon:SetVertexColor(1, 1, 1)
 	end)
 
@@ -7048,7 +7054,7 @@ _G.AutoDelete_RefreshCachedProfile = RefreshCachedProfile
 -- Read-only accessor for the cached profile. Used by the Process Bags
 -- panel (Options.lua) to scan bags without re-reading the DB on every
 -- refresh.
-_G.AutoDelete_GetCachedProfile = function() return cachedProfile end
+function _G.AutoDelete_GetCachedProfile() return cachedProfile end
 
 -- ============================================================================
 -- Auto-Add Equipped (settings.autoAddEquipped)
@@ -7114,7 +7120,7 @@ local function SyncEquippedToKeep()
 		end
 	end
 	if added > 0 then
-		print("|cffff8000[AutoDelete]|r: Auto-added " .. added
+		print("|cffff8000[AutoDelete]|r Auto-added " .. added
 			.. " currently equipped item" .. (added == 1 and "" or "s") .. " to Keep.")
 		local panel = _G.AutoDeleteOptionsPanel
 		if panel and panel._built and panel:IsVisible()
@@ -7139,7 +7145,7 @@ local function HandleEquipmentChanged(slot)
 	if not id then return end
 	if AddItemToKeepQuiet(id) then
 		local itemName = GetItemInfo(id) or ("Item " .. id)
-		print("|cffff8000[AutoDelete]|r: Auto-added " .. itemName .. " to Keep.")
+		print("|cffff8000[AutoDelete]|r Auto-added " .. itemName .. " to Keep.")
 		local panel = _G.AutoDeleteOptionsPanel
 		if panel and panel._built and panel:IsVisible()
 			and not (panel._rawBoxHolder and panel._rawBoxHolder:IsShown()) then
@@ -9723,6 +9729,14 @@ end
 
 function _G.AutoDelete_ShowItemQuickMenu(data, owner)
 	if not data then return end
+	local C_MENU_BG = { 5 / 255, 5 / 255, 5 / 255, 1 }
+	local C_MENU_BORDER = { 0.30, 0.30, 0.30, 1 }
+	local C_MENU_ROW = { 11 / 255, 11 / 255, 11 / 255, 1 }
+	local C_MENU_ROW_HOVER = { 20 / 255, 45 / 255, 70 / 255, 1 }
+	local C_MENU_ROW_BORDER = { 0.25, 0.25, 0.25, 1 }
+	local C_MENU_ROW_BORDER_HOVER = { 0.40, 0.40, 0.40, 1 }
+	local C_MENU_TEXT = { 0.85, 0.85, 0.85, 1 }
+	local C_MENU_TEXT_HOVER = { 1, 1, 1, 1 }
 	local link = data.link or data.itemLink
 	local id = data.itemId or GetItemIDFromLink(link)
 	local name = data.name or (link and GetItemInfo(link)) or (id and GetItemInfo(id))
@@ -9743,8 +9757,8 @@ function _G.AutoDelete_ShowItemQuickMenu(data, owner)
 		frame:EnableMouse(true)
 		frame:SetClampedToScreen(true)
 		frame:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
-		frame:SetBackdropColor(0.02, 0.02, 0.02, 1)
-		frame:SetBackdropBorderColor(0.30, 0.30, 0.30, 1)
+		frame:SetBackdropColor(unpack(C_MENU_BG))
+		frame:SetBackdropBorderColor(unpack(C_MENU_BORDER))
 		frame:Hide()
 		frame._items = {}
 		frame:SetScript("OnHide", function(self) if self._closer then self._closer:Hide() end end)
@@ -9841,26 +9855,26 @@ function _G.AutoDelete_ShowItemQuickMenu(data, owner)
 		btn:SetPoint("TOPLEFT", 2, -2 - (i - 1) * rowH)
 		btn:SetFrameLevel(menuLevel + 1)
 		btn:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
-		btn:SetBackdropColor(11 / 255, 11 / 255, 11 / 255, 1)
-		btn:SetBackdropBorderColor(0.25, 0.25, 0.25, 1)
+		btn:SetBackdropColor(unpack(C_MENU_ROW))
+		btn:SetBackdropBorderColor(unpack(C_MENU_ROW_BORDER))
 
 		local txt = btn:CreateFontString(nil, "OVERLAY")
 		txt:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
-		txt:SetTextColor(0.85, 0.85, 0.85, 1)
+		txt:SetTextColor(unpack(C_MENU_TEXT))
 		txt:SetJustifyH("LEFT")
 		txt:SetPoint("LEFT", 8, 0)
 		txt:SetPoint("RIGHT", -8, 0)
 		txt:SetText(action.label)
 
 		btn:SetScript("OnEnter", function()
-			btn:SetBackdropColor(20 / 255, 45 / 255, 70 / 255, 1)
-			btn:SetBackdropBorderColor(0.40, 0.40, 0.40, 1)
-			txt:SetTextColor(1, 1, 1, 1)
+			btn:SetBackdropColor(unpack(C_MENU_ROW_HOVER))
+			btn:SetBackdropBorderColor(unpack(C_MENU_ROW_BORDER_HOVER))
+			txt:SetTextColor(unpack(C_MENU_TEXT_HOVER))
 		end)
 		btn:SetScript("OnLeave", function()
-			btn:SetBackdropColor(11 / 255, 11 / 255, 11 / 255, 1)
-			btn:SetBackdropBorderColor(0.25, 0.25, 0.25, 1)
-			txt:SetTextColor(0.85, 0.85, 0.85, 1)
+			btn:SetBackdropColor(unpack(C_MENU_ROW))
+			btn:SetBackdropBorderColor(unpack(C_MENU_ROW_BORDER))
+			txt:SetTextColor(unpack(C_MENU_TEXT))
 		end)
 		btn:SetScript("OnClick", function()
 			frame:Hide()
@@ -9931,6 +9945,28 @@ local function ShowWelcomePopup()
 	local C_TITLEBAR = { 16/255, 16/255, 16/255, 1 }    -- #101010 title bar bg
 	local C_TITLE    = { 1.00, 0.50, 0.00, 1 }          -- #ff8000 legendary orange
 	local C_DIM      = { 0.45, 0.45, 0.45, 1 }          -- #737373 dim text
+	local C = {
+		TEXT = { 0.85, 0.85, 0.85, 1 },
+		TEXT_BRIGHT = { 0.90, 0.90, 0.90, 1 },
+		TEXT_MUTED = { 0.75, 0.75, 0.75, 1 },
+		TEXT_SUBTLE = { 0.55, 0.55, 0.55, 1 },
+		CLOSE_HOVER = { 1.00, 0.30, 0.30, 1 },
+		BUTTON_BG = { 0.10, 0.10, 0.10, 1 },
+		BUTTON_HOVER = { 0.18, 0.18, 0.18, 1 },
+		BUTTON_BORDER = { 0.30, 0.30, 0.30, 1 },
+		BUTTON_BORDER_HOVER = { 1.00, 0.50, 0.00, 0.85 },
+		CHECK_BG = { 0.10, 0.10, 0.10, 1 },
+		CHECK_BORDER = { 0.40, 0.40, 0.40, 1 },
+		RADIO_ON = { 1.00, 0.50, 0.00, 1 },
+		RADIO_OFF = { 0.25, 0.25, 0.25, 1 },
+		SUCCESS = { 0.20, 0.85, 0.20, 1 },
+		WARNING = { 1.00, 0.82, 0.00, 1 },
+		ERROR = { 1.00, 0.30, 0.30, 1 },
+		DIVIDER = { 0.18, 0.18, 0.18, 1 },
+		WARN_BG = { 0.18, 0.04, 0.04, 1 },
+		WARN_BORDER = { 0.85, 0.15, 0.15, 1 },
+		FOOTER_BG = { 5 / 255, 5 / 255, 5 / 255, 1 },
+	}
 
 	-- Outer frame. Audit fix 2026-05-20: dropped the legendary-orange border
 	-- (and the borderless orange-tint title bar) that made this popup read
@@ -9982,7 +10018,7 @@ local function ShowWelcomePopup()
 	closeText:SetPoint("CENTER", 0, 1)
 	closeText:SetTextColor(unpack(C_DIM))
 	closeText:SetText("x")
-	closeBtn:SetScript("OnEnter", function() closeText:SetTextColor(1, 0.3, 0.3, 1) end)
+	closeBtn:SetScript("OnEnter", function() closeText:SetTextColor(unpack(C.CLOSE_HOVER)) end)
 	closeBtn:SetScript("OnLeave", function() closeText:SetTextColor(unpack(C_DIM)) end)
 	closeBtn:SetScript("OnClick", function() f:Hide() end)
 
@@ -9993,7 +10029,7 @@ local function ShowWelcomePopup()
 	intro:SetPoint("TOPRIGHT", -16, -42)
 	intro:SetJustifyH("LEFT")
 	intro:SetWordWrap(true)
-	intro:SetTextColor(0.9, 0.9, 0.9, 1)
+	intro:SetTextColor(unpack(C.TEXT_BRIGHT))
 	intro:SetText("All AutoDelete settings start |cffff8000OFF|r by default. Open the settings panel after this dialog to enable features and configure your Delete, Sell, Keep, KeepOne, and KeepStack lists.")
 	intro:SetHeight(50)
 
@@ -10001,7 +10037,7 @@ local function ShowWelcomePopup()
 	local macroLabel = f:CreateFontString(nil, "OVERLAY")
 	macroLabel:SetFont(FONT, 12, "OUTLINE")
 	macroLabel:SetPoint("TOPLEFT", 16, -106)
-	macroLabel:SetTextColor(1, 0.82, 0, 1)
+	macroLabel:SetTextColor(unpack(C.WARNING))
 	macroLabel:SetText("Create a Goblin Merchant macro?")
 
 	local macroDesc = f:CreateFontString(nil, "OVERLAY")
@@ -10010,7 +10046,7 @@ local function ShowWelcomePopup()
 	macroDesc:SetPoint("TOPRIGHT", -16, -124)
 	macroDesc:SetJustifyH("LEFT")
 	macroDesc:SetWordWrap(true)
-	macroDesc:SetTextColor(0.75, 0.75, 0.75, 1)
+	macroDesc:SetTextColor(unpack(C.TEXT_MUTED))
 	macroDesc:SetText("Quick way to target your summoned Goblin Merchant. After creation, drag it to a hotbar from |cffffd700/macro|r.")
 	macroDesc:SetHeight(28)
 
@@ -10027,20 +10063,20 @@ local function ShowWelcomePopup()
 		dot:SetTexture(WHITE8)
 		dot:SetSize(10, 10)
 		dot:SetPoint("LEFT", 2, 0)
-		dot:SetVertexColor(0.2, 0.2, 0.2, 1)
+		dot:SetVertexColor(unpack(C.RADIO_OFF))
 
 		local txt = btn:CreateFontString(nil, "OVERLAY")
 		txt:SetFont(FONT, 11)
 		txt:SetPoint("LEFT", 18, 0)
-		txt:SetTextColor(0.85, 0.85, 0.85, 1)
+		txt:SetTextColor(unpack(C.TEXT))
 		txt:SetText(label)
 
 		btn._dot = dot
 		btn._update = function()
 			if getValue() then
-				dot:SetVertexColor(1, 0.5, 0, 1)
+				dot:SetVertexColor(unpack(C.RADIO_ON))
 			else
-				dot:SetVertexColor(0.25, 0.25, 0.25, 1)
+				dot:SetVertexColor(unpack(C.RADIO_OFF))
 			end
 		end
 		btn:SetScript("OnClick", function()
@@ -10066,20 +10102,20 @@ local function ShowWelcomePopup()
 		btn:SetBackdrop({
 			bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 1,
 		})
-		btn:SetBackdropColor(0.10, 0.10, 0.10, 1)
-		btn:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
+		btn:SetBackdropColor(unpack(C.BUTTON_BG))
+		btn:SetBackdropBorderColor(unpack(C.BUTTON_BORDER))
 		local txt = btn:CreateFontString(nil, "OVERLAY")
 		txt:SetFont(FONT, 11, "OUTLINE")
 		txt:SetPoint("CENTER")
-		txt:SetTextColor(0.9, 0.9, 0.9, 1)
+		txt:SetTextColor(unpack(C.TEXT_BRIGHT))
 		txt:SetText(label)
 		btn:SetScript("OnEnter", function(self)
-			self:SetBackdropColor(0.18, 0.18, 0.18, 1)
-			self:SetBackdropBorderColor(1, 0.50, 0, 0.85)
+			self:SetBackdropColor(unpack(C.BUTTON_HOVER))
+			self:SetBackdropBorderColor(unpack(C.BUTTON_BORDER_HOVER))
 		end)
 		btn:SetScript("OnLeave", function(self)
-			self:SetBackdropColor(0.10, 0.10, 0.10, 1)
-			self:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
+			self:SetBackdropColor(unpack(C.BUTTON_BG))
+			self:SetBackdropBorderColor(unpack(C.BUTTON_BORDER))
 		end)
 		return btn, txt
 	end
@@ -10095,7 +10131,7 @@ local function ShowWelcomePopup()
 	macroResult:SetPoint("RIGHT", f, "RIGHT", -16, 0)
 	macroResult:SetJustifyH("LEFT")
 	macroResult:SetWordWrap(true)
-	macroResult:SetTextColor(0.20, 0.85, 0.20, 1)
+	macroResult:SetTextColor(unpack(C.SUCCESS))
 	macroResult:SetText("")
 
 	macroYes:SetScript("OnClick", function()
@@ -10105,7 +10141,7 @@ local function ShowWelcomePopup()
 		local body = "/target Goblin Merchant"
 		local existing = GetMacroIndexByName("AutoDelete-Goblin")
 		if existing and existing > 0 then
-			macroResult:SetTextColor(1, 0.82, 0, 1)
+			macroResult:SetTextColor(unpack(C.WARNING))
 			macroResult:SetText("Macro 'AutoDelete-Goblin' already exists. Open |cffffd700/macro|r and drag it to your action bar.")
 			return
 		end
@@ -10130,10 +10166,10 @@ local function ShowWelcomePopup()
 
 		local ok, idx = pcall(CreateMacro, "AutoDelete-Goblin", iconIdx, body, perChar)
 		if ok and idx and idx > 0 then
-			macroResult:SetTextColor(0.20, 0.85, 0.20, 1)
+			macroResult:SetTextColor(unpack(C.SUCCESS))
 			macroResult:SetText("Created macro 'AutoDelete-Goblin'. Open |cffffd700/macro|r and drag it to your action bar.")
 		else
-			macroResult:SetTextColor(1, 0.30, 0.30, 1)
+			macroResult:SetTextColor(unpack(C.ERROR))
 			local err = (not ok) and tostring(idx) or "unknown"
 			macroResult:SetText("Could not create the macro. Error: " .. err)
 		end
@@ -10143,7 +10179,7 @@ local function ShowWelcomePopup()
 	local kbLabel = f:CreateFontString(nil, "OVERLAY")
 	kbLabel:SetFont(FONT, 12, "OUTLINE")
 	kbLabel:SetPoint("TOPLEFT", 16, -226)
-	kbLabel:SetTextColor(1, 0.82, 0, 1)
+	kbLabel:SetTextColor(unpack(C.WARNING))
 	kbLabel:SetText("Bind Interact With Target?")
 
 	local kbDesc = f:CreateFontString(nil, "OVERLAY")
@@ -10152,7 +10188,7 @@ local function ShowWelcomePopup()
 	kbDesc:SetPoint("TOPRIGHT", -16, -244)
 	kbDesc:SetJustifyH("LEFT")
 	kbDesc:SetWordWrap(true)
-	kbDesc:SetTextColor(0.75, 0.75, 0.75, 1)
+	kbDesc:SetTextColor(unpack(C.TEXT_MUTED))
 	kbDesc:SetText("Once the merchant is targeted, this keybind opens the vendor window. Look under |cffffd700Targeting Functions|r > |cffffd700Interact With Target|r.")
 	kbDesc:SetHeight(32)
 
@@ -10203,13 +10239,13 @@ local function ShowWelcomePopup()
 	divider:SetHeight(1)
 	divider:SetPoint("TOPLEFT", 16, -334)
 	divider:SetPoint("TOPRIGHT", -16, -334)
-	divider:SetVertexColor(0.18, 0.18, 0.18, 1)
+	divider:SetVertexColor(unpack(C.DIVIDER))
 
 	-- Section: How it works (simple explanation of the 3-list system).
 	local hiwLabel = f:CreateFontString(nil, "OVERLAY")
 	hiwLabel:SetFont(FONT, 12, "OUTLINE")
 	hiwLabel:SetPoint("TOPLEFT", 16, -344)
-	hiwLabel:SetTextColor(1, 0.82, 0, 1)
+	hiwLabel:SetTextColor(unpack(C.WARNING))
 	hiwLabel:SetText("How it works")
 
 	local hiwBody = f:CreateFontString(nil, "OVERLAY")
@@ -10218,7 +10254,7 @@ local function ShowWelcomePopup()
 	hiwBody:SetPoint("TOPRIGHT", -16, -362)
 	hiwBody:SetJustifyH("LEFT")
 	hiwBody:SetWordWrap(true)
-	hiwBody:SetTextColor(0.85, 0.85, 0.85, 1)
+	hiwBody:SetTextColor(unpack(C.TEXT))
 	hiwBody:SetText(
 		"AutoDelete uses five item lists. Drop an item onto the icons next to your bag, or open the panel and use the tabs.\n" ..
 		"|cffff5050Delete|r: items are destroyed on next scan.\n" ..
@@ -10256,8 +10292,8 @@ local function ShowWelcomePopup()
 	aaeCheck:SetSize(14, 14)
 	aaeCheck:SetPoint("TOPLEFT", 16, -482)
 	aaeCheck:SetBackdrop({ bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 1 })
-	aaeCheck:SetBackdropColor(0.10, 0.10, 0.10, 1)
-	aaeCheck:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+	aaeCheck:SetBackdropColor(unpack(C.CHECK_BG))
+	aaeCheck:SetBackdropBorderColor(unpack(C.CHECK_BORDER))
 
 	local aaeMark = aaeCheck:CreateTexture(nil, "OVERLAY")
 	aaeMark:SetTexture("Interface\\AddOns\\AutoDelete\\textures\\checkmark.tga")
@@ -10268,7 +10304,7 @@ local function ShowWelcomePopup()
 	local aaeLabel = f:CreateFontString(nil, "OVERLAY")
 	aaeLabel:SetFont(FONT, 11)
 	aaeLabel:SetPoint("LEFT", aaeCheck, "RIGHT", 6, 0)
-	aaeLabel:SetTextColor(0.85, 0.85, 0.85, 1)
+	aaeLabel:SetTextColor(unpack(C.TEXT))
 	aaeLabel:SetText("Auto-Add Equipped Items to Keep")
 
 	local aaeDesc = f:CreateFontString(nil, "OVERLAY")
@@ -10277,7 +10313,7 @@ local function ShowWelcomePopup()
 	aaeDesc:SetPoint("RIGHT", f, "RIGHT", -16, 0)
 	aaeDesc:SetJustifyH("LEFT")
 	aaeDesc:SetWordWrap(true)
-	aaeDesc:SetTextColor(0.55, 0.55, 0.55, 1)
+	aaeDesc:SetTextColor(unpack(C.TEXT_SUBTLE))
 	aaeDesc:SetText("Adds your currently equipped items to Keep, plus anything you equip later. Recommended.")
 
 	-- Click handler writes to profile and (if enabling) runs the sync.
@@ -10321,8 +10357,8 @@ local function ShowWelcomePopup()
 	warnFrame:SetBackdrop({
 		bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 2,
 	})
-	warnFrame:SetBackdropColor(0.18, 0.04, 0.04, 1)
-	warnFrame:SetBackdropBorderColor(0.85, 0.15, 0.15, 1)
+	warnFrame:SetBackdropColor(unpack(C.WARN_BG))
+	warnFrame:SetBackdropBorderColor(unpack(C.WARN_BORDER))
 
 	local warnText = warnFrame:CreateFontString(nil, "OVERLAY")
 	warnText:SetFont(FONT, 12, "OUTLINE")
@@ -10331,7 +10367,7 @@ local function ShowWelcomePopup()
 	warnText:SetJustifyH("CENTER")
 	warnText:SetJustifyV("MIDDLE")
 	warnText:SetWordWrap(true)
-	warnText:SetTextColor(1, 0.30, 0.30, 1)
+	warnText:SetTextColor(unpack(C.ERROR))
 	warnText:SetText("FAIR WARNING\nTo prevent valuable items from being sold or deleted, ADD THEM TO YOUR KEEP LIST BEFORE YOU TURN AUTODELETE ON.")
 
 	-- Footer bar: darker strip with a divider line on top, separating the
@@ -10344,14 +10380,14 @@ local function ShowWelcomePopup()
 	footerBar:SetPoint("BOTTOMRIGHT", -1, 1)
 	footerBar:SetHeight(FOOTER_H)
 	footerBar:SetBackdrop({ bgFile = WHITE8 })
-	footerBar:SetBackdropColor(0.02, 0.02, 0.02, 1)
+	footerBar:SetBackdropColor(unpack(C.FOOTER_BG))
 
 	local footerDivider = f:CreateTexture(nil, "ARTWORK")
 	footerDivider:SetTexture(WHITE8)
 	footerDivider:SetHeight(1)
 	footerDivider:SetPoint("BOTTOMLEFT", 1, FOOTER_H + 1)
 	footerDivider:SetPoint("BOTTOMRIGHT", -1, FOOTER_H + 1)
-	footerDivider:SetVertexColor(0.18, 0.18, 0.18, 1)
+	footerDivider:SetVertexColor(unpack(C.DIVIDER))
 
 	-- Don't-show-again checkbox (left side of footer bar). Parented to
 	-- footerBar so it draws on top of the footer's backdrop - children of
@@ -10361,8 +10397,8 @@ local function ShowWelcomePopup()
 	dsCheck:SetSize(14, 14)
 	dsCheck:SetPoint("LEFT", footerBar, "LEFT", 16, 0)
 	dsCheck:SetBackdrop({ bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 1 })
-	dsCheck:SetBackdropColor(0.10, 0.10, 0.10, 1)
-	dsCheck:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+	dsCheck:SetBackdropColor(unpack(C.CHECK_BG))
+	dsCheck:SetBackdropBorderColor(unpack(C.CHECK_BORDER))
 
 	local dsCheckMark = dsCheck:CreateTexture(nil, "OVERLAY")
 	dsCheckMark:SetTexture("Interface\\AddOns\\AutoDelete\\textures\\checkmark.tga")
@@ -10373,7 +10409,7 @@ local function ShowWelcomePopup()
 	local dsLabel = footerBar:CreateFontString(nil, "OVERLAY")
 	dsLabel:SetFont(FONT, 11)
 	dsLabel:SetPoint("LEFT", dsCheck, "RIGHT", 6, 0)
-	dsLabel:SetTextColor(0.85, 0.85, 0.85, 1)
+	dsLabel:SetTextColor(unpack(C.TEXT))
 	dsLabel:SetText("Don't show this again")
 
 	dsCheck:SetScript("OnClick", function()
@@ -10511,6 +10547,7 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 			AutoDelete_RequestPELearnedAffixes("PLAYER_LOGIN", false)
 		end
 		if _G.AutoDelete_InstallBagAltRightHook then _G.AutoDelete_InstallBagAltRightHook() end
+		if _G.AutoDelete_CreateMinimapButton then _G.AutoDelete_CreateMinimapButton() end
 
 		-- One-Key Disenchant: create the SecureActionButton once. Name is
 		-- referenced by the panel's key-capture row as the CLICK target
@@ -10782,7 +10819,7 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 		end)
 		local hadSellSession = sellSessionCount > 0
 		if hadSellSession then
-			print("|cffff8000[AutoDelete]|r: Sold " .. sellSessionCount .. " item(s) for " .. FormatMoney(sellSessionCopper))
+			print("|cffff8000[AutoDelete]|r Sold " .. sellSessionCount .. " item(s) for " .. FormatMoney(sellSessionCopper))
 			sellSessionCount = 0
 			sellSessionCopper = 0
 			sellDryTicks = 0
@@ -11120,7 +11157,7 @@ local bagsFullSince       = nil    -- GetTime() when bags first became near-full
 -- "main function has more than 200 local variables" compile error.
 _G.AutoDelete_BagsFullQueueAtStart = _G.AutoDelete_BagsFullQueueAtStart or nil
 
-_G.AutoDelete_RearmGoblinAfterBackoff = function(reason)
+function _G.AutoDelete_RearmGoblinAfterBackoff(reason)
 	bagsFullArmed = true
 	bagsFullSince = nil
 	_G.AutoDelete_BagsFullQueueAtStart = nil
@@ -11257,7 +11294,7 @@ local function AnyScavSubToggleOn(p)
 	return (p.summonAfterSell or p.summonAfterClose) and true or false
 end
 
-_G.AutoDelete_IsAnyOtherCompanionUp = function(currentName)
+function _G.AutoDelete_IsAnyOtherCompanionUp(currentName)
 	local n = GetNumCompanions("CRITTER")
 	for i = 1, n do
 		local _, cName, _, _, summoned = GetCompanionInfo("CRITTER", i)
@@ -11271,7 +11308,7 @@ _G.AutoDelete_IsAnyOtherCompanionUp = function(currentName)
 	return false
 end
 
-_G.AutoDelete_HandleTrackedCompanionGone = function(p, combatOk, now, allowSwapSuppression)
+function _G.AutoDelete_HandleTrackedCompanionGone(p, combatOk, now, allowSwapSuppression)
 	if activeTracked == "scavenger" then
 		local _, isUp = FindCompanionById(SCAVENGER_CREATURE_ID, "greedy scavenger")
 		if isUp then return end
@@ -11592,27 +11629,27 @@ end)
 
 -- Exposed so SummonGreedyScavenger / SummonGoblinMerchant can mark the
 -- active tracked pet without tight coupling. Set via the helpers below.
-_G.AutoDelete_SetActiveTrackedPet = function(which)
+function _G.AutoDelete_SetActiveTrackedPet(which)
 	activeTracked = which
 end
 
 -- Read-only accessor used by /del pos debug command.
-_G.AutoDelete_GetActiveTrackedPet = function() return activeTracked end
+function _G.AutoDelete_GetActiveTrackedPet() return activeTracked end
 
 -- Exposed so the Summon helpers can record the moment of summon. Used by
 -- the user-dismiss-vs-leash classifier: if the pet goes "not summoned"
 -- within USER_DISMISS_WINDOW of this timestamp, treat as user dismiss.
-_G.AutoDelete_RecordSummonAt = function(t)
+function _G.AutoDelete_RecordSummonAt(t)
 	lastSummonAt = t or GetTime()
 end
 
 -- Exposed so the GreedyChatFilter can record the scavenger's "alive and
 -- looting" timestamp without forward-referencing the local variable.
-_G.AutoDelete_RecordScavLootChat = function(t)
+function _G.AutoDelete_RecordScavLootChat(t)
 	lastScavLootChatAt = t or GetTime()
 end
 
-_G.AutoDelete_GetScavLootChatAt = function() return lastScavLootChatAt end
+function _G.AutoDelete_GetScavLootChatAt() return lastScavLootChatAt end
 
 -- ============================================================================
 -- Reactive companion event handler
@@ -12639,6 +12676,169 @@ ChatEdit_InsertLink = function(link)
 	return _G.AutoDelete_Original_ChatEdit_InsertLink(link)
 end
 
+function _G.AutoDelete_ShowOptionsPanel()
+	local panel = _G.AutoDeleteOptionsPanel
+	if not panel then
+		print("|cffff8000[AutoDelete]|r Settings panel is not ready yet. Try again in a moment.")
+		return
+	end
+	panel:Show()
+end
+
+function _G.AutoDelete_ToggleOptionsPanel()
+	local panel = _G.AutoDeleteOptionsPanel
+	if not panel then
+		print("|cffff8000[AutoDelete]|r Settings panel is not ready yet. Try again in a moment.")
+		return
+	end
+	if panel:IsShown() then
+		panel:Hide()
+	else
+		panel:Show()
+	end
+end
+
+function _G.AutoDelete_RunSlashCommand(command)
+	if SlashCmdList and SlashCmdList["AUTODELETE"] then
+		SlashCmdList["AUTODELETE"](command or "")
+	end
+end
+
+function _G.AutoDelete_ShowMinimapMenu(anchor)
+	if not EasyMenu then
+		print("|cffff8000[AutoDelete]|r Minimap menu is not available on this client.")
+		return
+	end
+	if not _G.AutoDelete_MinimapMenuFrame then
+		_G.AutoDelete_MinimapMenuFrame = CreateFrame("Frame", "AutoDeleteMinimapMenu", UIParent, "UIDropDownMenuTemplate")
+	end
+
+	local settingsLabel = "Open Settings"
+	local panel = _G.AutoDeleteOptionsPanel
+	if panel and panel.IsShown and panel:IsShown() then settingsLabel = "Close Settings" end
+
+	local function run(command)
+		return function() _G.AutoDelete_RunSlashCommand(command) end
+	end
+
+	local menu = {
+		{ text = "AutoDelete", isTitle = true, notCheckable = true },
+		{ text = settingsLabel, notCheckable = true, func = function() _G.AutoDelete_ToggleOptionsPanel() end },
+		{ text = "Process Bags", notCheckable = true, func = run("process") },
+		{ text = "Affix List", notCheckable = true, func = run("affix") },
+		{ text = "Decision History", notCheckable = true, func = run("history") },
+		{ text = "List Audit", notCheckable = true, func = run("audit") },
+		{ text = "Settings Report", notCheckable = true, func = run("report") },
+		{
+			text = "Diagnostics",
+			hasArrow = true,
+			notCheckable = true,
+			menuList = {
+				{ text = "Process Debug", notCheckable = true, func = run("processdebug") },
+				{ text = "Disenchant History", notCheckable = true, func = run("de history") },
+				{ text = "Goblin Report", notCheckable = true, func = run("goblin") },
+				{ text = "Scavenger Report", notCheckable = true, func = run("scav") },
+			},
+		},
+	}
+
+	EasyMenu(menu, _G.AutoDelete_MinimapMenuFrame, anchor or "cursor", 0, 0, "MENU", 2)
+end
+
+function _G.AutoDelete_SetMinimapButtonPosition(angle)
+	if not _G.AutoDelete_MinimapButton or not Minimap then return end
+	_G.AutoDeleteDB = _G.AutoDeleteDB or {}
+	angle = tonumber(angle) or tonumber(_G.AutoDeleteDB.minimapAngle) or 225
+	_G.AutoDeleteDB.minimapAngle = angle
+
+	local radius = 80
+	local radians = math.rad(angle)
+	_G.AutoDelete_MinimapButton:ClearAllPoints()
+	_G.AutoDelete_MinimapButton:SetPoint(
+		"CENTER",
+		Minimap,
+		"CENTER",
+		math.cos(radians) * radius,
+		math.sin(radians) * radius
+	)
+end
+
+function _G.AutoDelete_UpdateMinimapButtonDrag()
+	if not _G.AutoDelete_MinimapButton or not Minimap then return end
+	local minX, minY = Minimap:GetCenter()
+	local curX, curY = GetCursorPosition()
+	local scale = Minimap:GetEffectiveScale() or 1
+	if not minX or not minY or not curX or not curY or scale == 0 then return end
+
+	curX = curX / scale
+	curY = curY / scale
+	local atan2 = math.atan2 or math.atan
+	local angle = math.deg(atan2(curY - minY, curX - minX))
+	_G.AutoDelete_SetMinimapButtonPosition(angle)
+end
+
+function _G.AutoDelete_CreateMinimapButton()
+	if _G.AutoDelete_MinimapButton or not Minimap then return end
+
+	local button = CreateFrame("Button", "AutoDeleteMinimapButton", Minimap)
+	button:SetSize(31, 31)
+	button:SetFrameStrata("MEDIUM")
+	button:SetFrameLevel(8)
+	button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	button:RegisterForDrag("LeftButton")
+
+	local icon = button:CreateTexture(nil, "BACKGROUND")
+	icon:SetSize(20, 20)
+	icon:SetPoint("CENTER", 0, 0)
+	icon:SetTexture("Interface\\Icons\\INV_Misc_Bag_10_Black")
+	icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+	local border = button:CreateTexture(nil, "OVERLAY")
+	border:SetSize(54, 54)
+	border:SetPoint("CENTER", 0, 0)
+	border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+
+	local highlight = button:CreateTexture(nil, "HIGHLIGHT")
+	highlight:SetSize(31, 31)
+	highlight:SetPoint("CENTER", 0, 0)
+	highlight:SetTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+	highlight:SetBlendMode("ADD")
+
+	button:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+		GameTooltip:AddLine("AutoDelete", 1, 0.5, 0)
+		GameTooltip:AddLine("Left-click: open/close settings", 0.85, 0.85, 0.85)
+		GameTooltip:AddLine("Right-click: quick menu", 0.85, 0.85, 0.85)
+		GameTooltip:AddLine("Drag: move button", 0.6, 0.6, 0.6)
+		GameTooltip:Show()
+	end)
+	button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	button:SetScript("OnClick", function(self, mouseButton)
+		if self._justDragged then
+			return
+		end
+		if mouseButton == "RightButton" then
+			_G.AutoDelete_ShowMinimapMenu(self)
+		else
+			_G.AutoDelete_ToggleOptionsPanel()
+		end
+	end)
+	button:SetScript("OnDragStart", function(self)
+		self:SetScript("OnUpdate", _G.AutoDelete_UpdateMinimapButtonDrag)
+	end)
+	button:SetScript("OnDragStop", function(self)
+		self:SetScript("OnUpdate", nil)
+		_G.AutoDelete_UpdateMinimapButtonDrag()
+		self._justDragged = true
+		AfterDelay(0.05, function()
+			if self then self._justDragged = nil end
+		end)
+	end)
+
+	_G.AutoDelete_MinimapButton = button
+	_G.AutoDelete_SetMinimapButtonPosition((_G.AutoDeleteDB and _G.AutoDeleteDB.minimapAngle) or 225)
+end
+
 SLASH_AUTODELETE1 = "/del"
 SLASH_AUTODELETE2 = "/autodelete"
 SlashCmdList["AUTODELETE"] = function(msg)
@@ -13092,8 +13292,5 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		print("|cffff8000           |r let it run for a few seconds, then |cff00ff00/del perf report|r.")
 		return
 	end
-	local panel = _G.AutoDeleteOptionsPanel
-	if panel then
-		if panel:IsShown() then panel:Hide() else panel:Show() end
-	end
+	_G.AutoDelete_ToggleOptionsPanel()
 end
