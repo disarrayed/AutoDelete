@@ -12781,30 +12781,30 @@ function _G.AutoDelete_CreateMinimapButton()
 	if _G.AutoDelete_MinimapButton or not Minimap then return end
 
 	local button = CreateFrame("Button", "AutoDeleteMinimapButton", Minimap)
-	button:SetSize(31, 31)
+	button:SetSize(30, 30)
 	button:SetFrameStrata("MEDIUM")
 	button:SetFrameLevel(8)
 	button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 	button:RegisterForDrag("LeftButton")
+	button:SetBackdrop({
+		bgFile = "Interface\\Buttons\\WHITE8x8",
+		edgeFile = "Interface\\Buttons\\WHITE8x8",
+		edgeSize = 1,
+	})
+	button:SetBackdropColor(5/255, 5/255, 5/255, 1)
+	button:SetBackdropBorderColor(1, 0.5, 0, 1)
 
-	local icon = button:CreateTexture(nil, "BACKGROUND")
-	icon:SetSize(20, 20)
-	icon:SetPoint("CENTER", 0, 0)
-	icon:SetTexture("Interface\\Icons\\INV_Misc_Bag_10_Black")
-	icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-
-	local border = button:CreateTexture(nil, "OVERLAY")
-	border:SetSize(54, 54)
-	border:SetPoint("CENTER", 0, 0)
-	border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
-
-	local highlight = button:CreateTexture(nil, "HIGHLIGHT")
-	highlight:SetSize(31, 31)
-	highlight:SetPoint("CENTER", 0, 0)
-	highlight:SetTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
-	highlight:SetBlendMode("ADD")
+	local label = button:CreateFontString(nil, "OVERLAY")
+	label:SetFont("Fonts\\FRIZQT__.TTF", 13, "OUTLINE")
+	label:SetText("AD")
+	label:SetTextColor(1, 0.5, 0, 1)
+	label:SetPoint("CENTER", 0, 0)
+	button._label = label
 
 	button:SetScript("OnEnter", function(self)
+		self:SetBackdropColor(16/255, 16/255, 16/255, 1)
+		self:SetBackdropBorderColor(1, 0.65, 0.15, 1)
+		if self._label then self._label:SetTextColor(1, 0.65, 0.15, 1) end
 		GameTooltip:SetOwner(self, "ANCHOR_LEFT")
 		GameTooltip:AddLine("AutoDelete", 1, 0.5, 0)
 		GameTooltip:AddLine("Left-click: open/close settings", 0.85, 0.85, 0.85)
@@ -12812,7 +12812,12 @@ function _G.AutoDelete_CreateMinimapButton()
 		GameTooltip:AddLine("Drag: move button", 0.6, 0.6, 0.6)
 		GameTooltip:Show()
 	end)
-	button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	button:SetScript("OnLeave", function(self)
+		self:SetBackdropColor(5/255, 5/255, 5/255, 1)
+		self:SetBackdropBorderColor(1, 0.5, 0, 1)
+		if self._label then self._label:SetTextColor(1, 0.5, 0, 1) end
+		GameTooltip:Hide()
+	end)
 	button:SetScript("OnClick", function(self, mouseButton)
 		if self._justDragged then
 			return
