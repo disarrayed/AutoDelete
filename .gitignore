@@ -7,3 +7,5 @@ Thumbs.db
 *.lua.bak
 .luacheckcache/
 luacheck.txt
+.busted
+spec/
