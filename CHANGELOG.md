@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.25] - 2026-06-10
+
+### Added
+
+- **Minimap button.** AutoDelete now has a square AD minimap button in the addon's black and orange colors. Left-click opens or closes settings, right-click opens a safe quick menu for common panels and reports, and dragging moves the button around the minimap.
+
+### Fixed
+
+- **Escape closes AutoDelete windows.** Process Bags and other AutoDelete windows, popups, and quick menus now close with Escape.
+- **Minimap icon clarity.** The minimap button no longer uses a bag icon or Blizzard's round tracking border, so it reads as AutoDelete instead of a bag.
+
 ## [3.24.1] - 2026-06-04
 
 ### Hot Fix
