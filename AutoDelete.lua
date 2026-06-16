@@ -4083,7 +4083,7 @@ _G.AutoDelete_TooltipCache = _G.AutoDelete_TooltipCache or {
 -- so we drop the affected sub-cache here when the version doesn't
 -- match. Bump _CACHE_VERSION whenever parsing semantics change.
 do
-	local _CACHE_VERSION = 7
+	local _CACHE_VERSION = 8
 	if _G.AutoDelete_TooltipCache._cacheVersion ~= _CACHE_VERSION then
 		_G.AutoDelete_TooltipCache.affix     = {}
 		_G.AutoDelete_TooltipCache.affixName = {}
@@ -4097,7 +4097,12 @@ end
 function _G.AutoDelete_GetRecipeKnowledgeState(bag, slot, link)
 	if not bag or not slot or not link then return "uncertain" end
 	local cache = _G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.recipeKnown
-	if cache and cache[link] then return cache[link] end
+	if _G.AutoDelete_GetRecipeKnowledgeCacheHit then
+		local cachedState = _G.AutoDelete_GetRecipeKnowledgeCacheHit(cache, link)
+		if cachedState then return cachedState end
+	elseif cache and cache[link] == "known" then
+		return "known"
+	end
 
 	local knownToken = ITEM_SPELL_KNOWN
 	if type(knownToken) ~= "string" or knownToken == "" then
@@ -4123,7 +4128,15 @@ function _G.AutoDelete_GetRecipeKnowledgeState(bag, slot, link)
 	local state = _G.AutoDelete_DetectRecipeKnowledgeFromTooltipLines(lines, knownToken)
 	recipeTip:Hide()
 
-	if cache then cache[link] = state end
+	if _G.AutoDelete_RememberRecipeKnowledgeState then
+		_G.AutoDelete_RememberRecipeKnowledgeState(cache, link, state)
+	elseif cache then
+		if state == "known" then
+			cache[link] = "known"
+		else
+			cache[link] = nil
+		end
+	end
 	return state
 end
 

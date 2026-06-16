@@ -63,6 +63,21 @@ function _G.AutoDelete_DetectRecipeKnowledgeFromTooltipLines(lines, knownToken)
 	return "unknown"
 end
 
+function _G.AutoDelete_GetRecipeKnowledgeCacheHit(cache, link)
+	if not cache or not link then return nil end
+	if cache[link] == "known" then return "known" end
+	return nil
+end
+
+function _G.AutoDelete_RememberRecipeKnowledgeState(cache, link, state)
+	if not cache or not link then return end
+	if state == "known" then
+		cache[link] = "known"
+	else
+		cache[link] = nil
+	end
+end
+
 function _G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, link, itemClass, itemSubType, itemQuality, isQuestItem, onExplicitSell)
 	if not profile or profile.knownRecipeSellEnabled ~= true then return nil end
 	if not _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType) then return nil end

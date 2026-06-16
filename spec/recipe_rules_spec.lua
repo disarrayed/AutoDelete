@@ -4,6 +4,9 @@ local function reloadRules()
 	_G.AutoDelete_IsRecipeLikeItem = nil
 	_G.AutoDelete_IsKnownRecipeQualityEnabled = nil
 	_G.AutoDelete_GetRecipeQualityLabel = nil
+	_G.AutoDelete_DetectRecipeKnowledgeFromTooltipLines = nil
+	_G.AutoDelete_GetRecipeKnowledgeCacheHit = nil
+	_G.AutoDelete_RememberRecipeKnowledgeState = nil
 	_G.AutoDelete_GetKnownRecipeSellDecision = nil
 	_G.AutoDelete_IsRecipeDeleteProtected = nil
 	dofile("RecipeRules.lua")
@@ -64,6 +67,23 @@ describe("Sell Known Recipes rules", function()
 			"Requires Cooking (300)",
 		}))
 		assert.are.equal("uncertain", _G.AutoDelete_DetectRecipeKnowledgeFromTooltipLines({}))
+	end)
+
+	it("does not cache unknown recipe knowledge by link so duplicate recipes can be rescanned", function()
+		local cache = {}
+		local link = "item:12345"
+
+		_G.AutoDelete_RememberRecipeKnowledgeState(cache, link, "unknown")
+		assert.is_nil(_G.AutoDelete_GetRecipeKnowledgeCacheHit(cache, link))
+		assert.is_nil(cache[link])
+
+		_G.AutoDelete_RememberRecipeKnowledgeState(cache, link, "uncertain")
+		assert.is_nil(_G.AutoDelete_GetRecipeKnowledgeCacheHit(cache, link))
+		assert.is_nil(cache[link])
+
+		_G.AutoDelete_RememberRecipeKnowledgeState(cache, link, "known")
+		assert.are.equal("known", _G.AutoDelete_GetRecipeKnowledgeCacheHit(cache, link))
+		assert.are.equal("known", cache[link])
 	end)
 
 	it("sells a known recipe only when the quality toggle allows it", function()
