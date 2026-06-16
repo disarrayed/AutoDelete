@@ -50,7 +50,9 @@ Quest items are protected from every auto-rule, regardless of list state.
 
 **Sell rules**
 
-Three independent categories, each with its own iLvl range and Rare/Epic toggles.
+Four independent categories.
+- Sell Known Recipes (only recipes whose tooltip says Already known; unknown or unreadable recipes stay kept from automatic sell rules while this rule is on)
+- Recipe decisions appear in **Why?**, `/del history`, `/del report`, and `/del processdebug` with knowledge state and quality-toggle status
 - BoE Armor (bind-on-equip gear)
 - BoP (bind-on-pickup gear)
 - BoE Weapons (bind-on-equip weapon-slot items, priority over BoE Armor)
@@ -99,7 +101,7 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 - `/del report` opens a copyable diagnostic summary
 - `/del processdebug` opens a copyable Process Bags gate report for every current bag item
 - `/del de history` opens recent One-Key Disenchant actions from this session
-- `/del history` opens a copyable recent decision log for this session
+- `/del history` opens a copyable recent decision log for this session, including recipe sales and recipe protection
 - The Help tab has topic buttons with practical how-to guidance for each main area
 
 **Quality of life**
@@ -133,7 +135,7 @@ Three independent categories, each with its own iLvl range and Rare/Epic toggles
 /del report        Open a copyable diagnostic report
 /del processdebug  Open a Process Bags gate-by-gate diagnostic
 /del de history    Open recent One-Key Disenchant actions
-/del history       Open searchable recent sell / delete / keep decisions
+/del history       Open searchable recent sell / delete / keep decisions, including recipes
 /del audit         Open a copyable item-list audit
 /del audit fix     Apply safe list cleanup only
 /del affix         Open the Learned / Unlearned affix list
@@ -158,6 +160,7 @@ Feature ideas and patterns from the community.
 - **Auto-Sell options for Junk and Common** (Filters tab), suggested by Sanavesa on 5/21/26 at 8:48 AM:
   > thanks for this addon. is it possible to add auto-sell junk/common? currently i see there is auto-delete options
 - **KeepStack**, credited to @lazzat as the inspiration for the KeepStack list name and keep-one-stack cleanup idea. AutoDelete's KeepStack code is an original implementation for this addon.
+- **Sell Known Recipes**, suggested by @Lazzat: auto-sell already-known recipes while keeping unknown recipes safe from automatic sell rules, with white/green/blue/purple filters.
 
 ---
 

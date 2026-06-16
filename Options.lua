@@ -135,7 +135,7 @@ local function AttachSimpleTooltip(frame, title, body, warning)
 end
 
 -- PEADAR-style toggle: 16x16 box + 8x8 indicator
-local function MakeToggle(parent, label, color, tooltip, tooltipTitle)
+local function MakeToggle(parent, label, color, tooltip, tooltipTitle, indicatorColor)
 	local row = CreateFrame("Button", nil, parent)
 	row:SetSize(290, 20)
 
@@ -162,6 +162,7 @@ local function MakeToggle(parent, label, color, tooltip, tooltipTitle)
 
 	row._checked = false
 	local activeColor = color or C_ACCENT
+	local activeIndicatorColor = indicatorColor or { 1, 1, 1, 1 }
 
 	local function UpdateVisual()
 		if row._checked then
@@ -173,6 +174,7 @@ local function MakeToggle(parent, label, color, tooltip, tooltipTitle)
 				1,
 			}
 			ApplyBackdrop(box, activeColor, lighter)
+			indicator:SetVertexColor(unpack(activeIndicatorColor))
 			indicator:Show()
 		else
 			-- Unchecked: dark box, medium-gray border, no glyph.
@@ -208,7 +210,7 @@ local function MakeToggle(parent, label, color, tooltip, tooltipTitle)
 end
 
 -- Small helper for sub-toggles: smaller box (12x12), 9pt text.
-local function MakeSubToggle(parent, label, color, tooltip, tooltipTitle)
+local function MakeSubToggle(parent, label, color, tooltip, tooltipTitle, indicatorColor)
 	local row = CreateFrame("Button", nil, parent)
 	row:SetSize(120, 16)
 
@@ -235,6 +237,7 @@ local function MakeSubToggle(parent, label, color, tooltip, tooltipTitle)
 
 	row._checked = false
 	local activeColor = color or C_ACCENT
+	local activeIndicatorColor = indicatorColor or { 1, 1, 1, 1 }
 
 	local function UpdateVisual()
 		if row._checked then
@@ -245,6 +248,7 @@ local function MakeSubToggle(parent, label, color, tooltip, tooltipTitle)
 				1,
 			}
 			ApplyBackdrop(box, activeColor, lighter)
+			indicator:SetVertexColor(unpack(activeIndicatorColor))
 			indicator:Show()
 			text:SetTextColor(unpack(C_TEXT))
 		else
@@ -913,6 +917,11 @@ local DEFAULT_PROFILE = {
 	boeWeaponsIlvlMax = 199,
 	boeWeaponsRare    = false,
 	boeWeaponsEpic    = false,
+	knownRecipeSellEnabled  = false,
+	knownRecipeSellCommon   = true,
+	knownRecipeSellUncommon = true,
+	knownRecipeSellRare     = false,
+	knownRecipeSellEpic     = false,
 	protectAffixFromSell = false, -- legacy migration source
 	affixIlvlMin         = 0,     -- legacy; no longer used
 	protectAffixTier1    = false,
@@ -3522,7 +3531,7 @@ local function BuildUI(self)
 	-- ========================================================================
 	-- Settings frame layout: four titled bordered sections, top to bottom:
 	--   1. Tabbed Settings (General / Goblin / AutoInv / Tracking / Profiles)
-	--   2. Sell rules - three category cards (BoE Armor / BoP / BoE Weapons)
+	--   2. Sell rules - note banner + recipe section + three category cards
 	--   3. Scan Options - Delete / Sell / Keep list-mode tabs
 	--   4. Search & Manage - search row + active list view
 	-- The Auto-Delete Junk / Common and Auto-Sell Greens toggles live INSIDE
@@ -3886,6 +3895,7 @@ local function BuildUI(self)
 					{ icon = "Interface\\Icons\\Ability_Repair", title = "Auto-Repair", body = "Repairs your gear whenever you talk to a vendor. Turn on Use Guild Bank money below it to pay from the guild bank first when you can." },
 					{ icon = "Interface\\Icons\\INV_Misc_Bag_10_Black", title = "Process Bags", body = "Open Panel opens the Process Bags window, a separate list of every bag item ready for One-Key Disenchant, Mill, Prospect, or Open. The card also shows a live count." },
 					{ icon = "Interface\\Icons\\INV_Misc_PocketWatch_01", title = "Scan Speed", body = "How often your bags are checked against the Delete and Sell lists. Fast clears matches almost instantly, slow is quieter in the background. Vendor selling always runs when a merchant opens." },
+					{ icon = "Interface\\Icons\\INV_Scroll_06", title = "Recipe Safety", body = "Sell Known Recipes lives on the Sell Filters tab. When enabled, recipe-like items are checked with their bag tooltip; only Already known recipes whose quality toggle is on can auto-sell." },
 				}
 			},
 			{
@@ -3966,6 +3976,7 @@ local function BuildUI(self)
 				label = "Sell Filters",
 				title = "Sell Filters",
 				sections = {
+					{ icon = "Interface\\Icons\\INV_Scroll_06", title = "Sell Known Recipes", body = "Sells recipes only when their tooltip says Already known. Unknown or unreadable recipes stay kept from automatic sell rules while this rule is on. Why?, /del history, /del report, and /del processdebug show the recipe knowledge state used." },
 					{ icon = "Interface\\Icons\\INV_Chest_Chain", title = "BoE Armor", body = "Sells Bind-on-Equip armor and accessories that match the Rare and Epic toggles and the iLvl range on the card. Weapons belong to BoE Weapons. Keep-list and quest items stay safe." },
 					{ icon = "Interface\\Icons\\INV_Helmet_06", title = "BoP", body = "Sells Bind-on-Pickup gear in any slot, including weapons, that matches the Rare and Epic toggles and the iLvl range. Keep-list and quest items stay safe." },
 					{ icon = "Interface\\Icons\\INV_Sword_27", title = "BoE Weapons", body = "Sells Bind-on-Equip weapons, shields, ranged, thrown, and relics in range. It wins over BoE Armor when an item could fit both. Use Why? if a sale surprises you." },
@@ -4000,7 +4011,7 @@ local function BuildUI(self)
 					{ icon = "Interface\\Icons\\Ability_Hunter_MasterMarksman", title = "Left-click a row", body = "Left-click a row to arm that item as the next target for its matching keybind. Read the row once more before you press the key." },
 					{ icon = "Interface\\Icons\\Trade_Engineering", title = "Right-click a row", body = "Right-click a row to open Keep, Sell, |cffbf3838Delete|r, Ignore for Process, and Why?. This menu only appears inside the Process Bags list." },
 					{ icon = "Interface\\Icons\\INV_Misc_Blindfold_01", title = "Ignore for Process", body = "Stops an item from showing in Process Bags on this character. It is not protection: use Keep if the item needs to be safe from cleanup rules." },
-					{ icon = "Interface\\Icons\\INV_Misc_QuestionMark", title = "Why?", body = "Explains why an item is kept, sold, deleted, dotted, or skipped. The report shows list membership, item facts, affix protection, and any matched process action." },
+					{ icon = "Interface\\Icons\\INV_Misc_QuestionMark", title = "Why?", body = "Explains why an item is kept, sold, deleted, dotted, or skipped. The report shows list membership, item facts, recipe knowledge, affix protection, and any matched process action." },
 				}
 			},
 		}
@@ -5760,9 +5771,9 @@ local function BuildUI(self)
 	-- ========================================================================
 	-- SECTION 2: Sell rules - category cards
 	--
-	-- Three independent category cards (BoE Armor, BoP, BoE Weapons), each
-	-- with: enable toggle + Rare/Epic toggles on the header row, iLvl
-	-- min/max range on the second row.
+	-- Four independent category controls: Sell Known Recipes first, then BoE Armor,
+	-- BoP, and BoE Weapons. Gear cards have Rare/Epic toggles and iLvl range;
+	-- Sell Known Recipes has white/green/blue/purple quality toggles.
 	--
 	-- The Auto-Delete Junk / Auto-Delete Common / Auto-Sell Greens toggles
 	-- live on the General tab (card 2 of the General page), NOT here. They
@@ -5773,10 +5784,11 @@ local function BuildUI(self)
 	-- Summary (highest first):
 	--   1. Keep list  (always wins)
 	--   2. Sell list  (explicit user intent)
-	--   3. Auto-Sell Greens (only Greens; Junk and Common are deleted, not sold)
-	--   4. BoE Weapons section
-	--   5. BoP section
-	--   6. BoE Armor section (excludes weapon-slot items, which are step 4)
+	--   3. Sell Known Recipes (only tooltip-confirmed Already known recipes)
+	--   4. Auto-Sell Greens (only Greens; Junk and Common are deleted, not sold)
+	--   5. BoE Weapons section
+	--   6. BoP section
+	--   7. BoE Armor section (excludes weapon-slot items, which are step 5)
 	-- ========================================================================
 
 	-- Helper: build a category card. Returns a table of widgets so the
@@ -5838,12 +5850,14 @@ local function BuildUI(self)
 		}
 	end
 
-	-- Card height: row1 (20) + 8 gap + row2 (22) + 14 padding = ~64
-	local CARD_H = 64
+	-- Fixed-frame budget at the real 840px frame height:
+	--   yOff -202 - note 30 - recipe section 44 - gear cards 234 - List Mode 72 = -582
+	--   Search & Manage = 840 - 28 - 582 - 8 = 222px, above the 220px minimum.
+	local CARD_H = 56
+	local RECIPE_CARD_H = 22
 
-	-- Info banner above the three category cards. Single row of explanatory
-	-- text so users understand at a glance that these are sell filters that
-	-- run at vendors (not delete rules, not auto-actions on loot).
+	-- Info banner above the category cards. Keep this as a note; controls
+	-- belong in normal sell sections below.
 	local BANNER_H = 24
 	local banner = CreateFrame("Frame", nil, self)
 	banner:SetPoint("TOPLEFT", self, "TOPLEFT", 15, yOff)
@@ -5851,20 +5865,51 @@ local function BuildUI(self)
 	banner:SetHeight(BANNER_H)
 	-- v3.21 §6.3: ApplyBackdrop helper. Black to match the panel + mage blue accent border.
 	ApplyBackdrop(banner, C_BG, C_HOVER)
-	local bannerIcon = banner:CreateFontString(nil, "OVERLAY")
-	bannerIcon:SetFont(FONT, 12, "OUTLINE")
-	bannerIcon:SetPoint("LEFT", banner, "LEFT", 8, 0)
-	bannerIcon:SetTextColor(unpack(C_HOVER))
-	bannerIcon:SetText("i")
-	local bannerText = banner:CreateFontString(nil, "OVERLAY")
-	bannerText:SetFont(FONT, 10, "OUTLINE")
-	bannerText:SetPoint("LEFT", bannerIcon, "RIGHT", 8, 0)
-	bannerText:SetPoint("RIGHT", banner, "RIGHT", -8, 0)
-	bannerText:SetJustifyH("LEFT")
-	bannerText:SetWordWrap(false)
-	bannerText:SetTextColor(unpack(C_TEXT))
-	bannerText:SetText("Sell filters: rules below run at vendors. Items matching are auto-sold for gold.")
+	banner.icon = banner:CreateFontString(nil, "OVERLAY")
+	banner.icon:SetFont(FONT, 12, "OUTLINE")
+	banner.icon:SetPoint("LEFT", banner, "LEFT", 8, 0)
+	banner.icon:SetTextColor(unpack(C_HOVER))
+	banner.icon:SetText("i")
+	banner.text = banner:CreateFontString(nil, "OVERLAY")
+	banner.text:SetFont(FONT, 10, "OUTLINE")
+	banner.text:SetPoint("LEFT", banner.icon, "RIGHT", 8, 0)
+	banner.text:SetPoint("RIGHT", banner, "RIGHT", -8, 0)
+	banner.text:SetJustifyH("LEFT")
+	banner.text:SetWordWrap(false)
+	banner.text:SetTextColor(unpack(C_TEXT))
+	banner.text:SetText("Sell filters: rules below run at vendors. Items matching are auto-sold for gold.")
 	yOff = yOff - BANNER_H - SECTION_GAP
+
+	self._knownRecipes = {
+		card = MakeSection(self, "Sell Known Recipes", yOff, RECIPE_CARD_H),
+	}
+	self._knownRecipes.enable = MakeToggle(self._knownRecipes.card, "Sell Known Recipes", C_ACCENT,
+		"Sell recipes at vendors only when their tooltip says Already known. Unknown or unreadable recipes stay kept from automatic sell rules while this rule is on.")
+	self._knownRecipes.enable:SetPoint("LEFT", self._knownRecipes.card, "LEFT", 15, 0)
+	self._knownRecipes.enable:SetSize(190, 20)
+
+	self._knownRecipes.epic = MakeToggle(self._knownRecipes.card, "Purple", C_Q_EPIC,
+		"Allow purple already-known recipes to sell when Sell Known Recipes is on.")
+	self._knownRecipes.epic:SetPoint("RIGHT", self._knownRecipes.card, "RIGHT", -15, 0)
+	self._knownRecipes.epic:SetSize(60, 20)
+
+	self._knownRecipes.rare = MakeToggle(self._knownRecipes.card, "Blue", C_Q_RARE,
+		"Allow blue already-known recipes to sell when Sell Known Recipes is on.")
+	self._knownRecipes.rare:SetPoint("RIGHT", self._knownRecipes.epic, "LEFT", -16, 0)
+	self._knownRecipes.rare:SetSize(60, 20)
+
+	self._knownRecipes.uncommon = MakeToggle(self._knownRecipes.card, "Green", C_Q_UNCOMMON,
+		"Allow green already-known recipes to sell when Sell Known Recipes is on.")
+	self._knownRecipes.uncommon:SetPoint("RIGHT", self._knownRecipes.rare, "LEFT", -16, 0)
+	self._knownRecipes.uncommon:SetSize(64, 20)
+
+	self._knownRecipes.common = MakeToggle(self._knownRecipes.card, "White", C_Q_COMMON,
+		"Allow white already-known recipes to sell when Sell Known Recipes is on.",
+		nil,
+		C_ACCENT)
+	self._knownRecipes.common:SetPoint("RIGHT", self._knownRecipes.uncommon, "LEFT", -16, 0)
+	self._knownRecipes.common:SetSize(64, 20)
+	yOff = yOff - 16 - RECIPE_CARD_H - SECTION_GAP
 
 	-- Card 1: BoE Armor
 	local boeArmor = MakeSellCategoryCard(self, "BoE Armor", yOff, CARD_H, {
@@ -6701,6 +6746,22 @@ local function BuildUI(self)
 		"boeWeaponsEnabled", "boeWeaponsRare", "boeWeaponsEpic",
 		"boeWeaponsIlvlMin", "boeWeaponsIlvlMax")
 
+	local function WireKnownRecipeToggle(widget, field)
+		widget:SetScript("OnClick", function(btn)
+			btn._checked = not btn._checked
+			btn:SetChecked(btn._checked)
+			GetActiveProfile(db)[field] = btn._checked
+			if _G.AutoDelete_RefreshCachedProfile then
+				_G.AutoDelete_RefreshCachedProfile()
+			end
+		end)
+	end
+	WireKnownRecipeToggle(self._knownRecipes.enable, "knownRecipeSellEnabled")
+	WireKnownRecipeToggle(self._knownRecipes.common, "knownRecipeSellCommon")
+	WireKnownRecipeToggle(self._knownRecipes.uncommon, "knownRecipeSellUncommon")
+	WireKnownRecipeToggle(self._knownRecipes.rare, "knownRecipeSellRare")
+	WireKnownRecipeToggle(self._knownRecipes.epic, "knownRecipeSellEpic")
+
 	tglScav:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
@@ -7382,6 +7443,13 @@ local function BuildUI(self)
 		boeWeapons.epic:SetChecked(p.boeWeaponsEpic)
 		boeWeapons.minBox:SetText(tostring(p.boeWeaponsIlvlMin or 1))
 		boeWeapons.maxBox:SetText(tostring(p.boeWeaponsIlvlMax or 199))
+
+		-- Sell Known Recipes row
+		self._knownRecipes.enable:SetChecked(p.knownRecipeSellEnabled == true)
+		self._knownRecipes.common:SetChecked(p.knownRecipeSellCommon == true)
+		self._knownRecipes.uncommon:SetChecked(p.knownRecipeSellUncommon == true)
+		self._knownRecipes.rare:SetChecked(p.knownRecipeSellRare == true)
+		self._knownRecipes.epic:SetChecked(p.knownRecipeSellEpic == true)
 
 		-- Filters tab: Quality Filters (Card 1, moved from General tab)
 		-- Quality Filters card now uses cycle pills, not checkboxes.
