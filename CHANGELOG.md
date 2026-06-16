@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [3.26.1] - 2026-06-16
+
+### Hot Fix
+
+- **Duplicate known recipes now sell after learning one copy.** Sell Known Recipes no longer keeps a stale unknown result for matching recipe links, so the remaining copy can be rescanned and sold once it is known.
+
 ## [3.26] - 2026-06-15
 
 ### Added
