@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+## [3.26] - 2026-06-15
+
+### Added
+
+- **Sell Known Recipes filter.** New Sell tab rule vendors recipes only when their tooltip says Already known. Unknown or unreadable recipes stay kept from automatic sell rules while the rule is on, and white/green/blue/purple toggles control which known recipe qualities can sell.
+- **Recipe diagnostics.** Why?, Decision History, Settings Report, and Process Bags Diagnostic now show recipe knowledge state and recipe quality-toggle status so sold/protected recipes are explainable.
+
 ## [3.25] - 2026-06-10
 
 ### Added

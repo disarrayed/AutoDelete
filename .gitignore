@@ -8,4 +8,3 @@ Thumbs.db
 .luacheckcache/
 luacheck.txt
 .busted
-spec/

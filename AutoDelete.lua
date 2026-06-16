@@ -1591,6 +1591,17 @@ local DEFAULT_PROFILE = {
 	boeWeaponsRare    = false,
 	boeWeaponsEpic    = false,
 
+	-- Sell Known Recipes: vendor-only cleanup for Project Ebonhold recipe items.
+	-- When enabled, a recipe is sold only if its bag tooltip positively says
+	-- ITEM_SPELL_KNOWN. Recipe-like items are kept out of automatic delete
+	-- rules while this feature is on; explicit Delete/KeepOne/KeepStack lists
+	-- still behave as user intent.
+	knownRecipeSellEnabled  = false,
+	knownRecipeSellCommon   = true,
+	knownRecipeSellUncommon = true,
+	knownRecipeSellRare     = false,
+	knownRecipeSellEpic     = false,
+
 	-- ============================================================
 	-- Companion management (Goblin tab)
 	-- ============================================================
@@ -1997,6 +2008,12 @@ function _G.AutoDelete_RecordDecision(data)
 	local reason = data.reason or "No reason recorded"
 	local source = data.sourceRule or data.source or "Unknown rule"
 	local affixName = data.affixName or data.affixKey
+	local recipeLike = data.recipeLike == true
+	local recipeState = data.recipeState
+	local recipeQuality = data.recipeQuality
+	local recipeQualityLabel = data.recipeQualityLabel
+		or (recipeQuality ~= nil and _G.AutoDelete_GetRecipeQualityLabel and _G.AutoDelete_GetRecipeQualityLabel(recipeQuality))
+	local recipeQualityEnabled = data.recipeQualityEnabled
 	if not affixName and _G.AutoDelete_GetAffixKeyForItemName then
 		affixName = _G.AutoDelete_GetAffixKeyForItemName(itemName)
 	end
@@ -2006,6 +2023,10 @@ function _G.AutoDelete_RecordDecision(data)
 		tostring(reason),
 		tostring(source),
 		tostring(affixName or ""),
+		tostring(recipeLike),
+		tostring(recipeState or ""),
+		tostring(recipeQualityLabel or ""),
+		tostring(recipeQualityEnabled),
 	}, "|")
 	local first = hist.entries[1]
 	if first and hist.lastKey == key and (now - (hist.lastAt or 0)) < 10 then
@@ -2022,6 +2043,11 @@ function _G.AutoDelete_RecordDecision(data)
 		reason = reason,
 		sourceRule = source,
 		affixName = affixName,
+		recipeLike = recipeLike,
+		recipeState = recipeState,
+		recipeQuality = recipeQuality,
+		recipeQualityLabel = recipeQualityLabel,
+		recipeQualityEnabled = recipeQualityEnabled,
 		bag = data.bag,
 		slot = data.slot,
 		repeatCount = 1,
@@ -2068,6 +2094,10 @@ function _G.AutoDelete_BuildDecisionHistoryReport(searchText)
 			entry.reason,
 			entry.sourceRule,
 			entry.affixName,
+			entry.recipeLike and "recipe" or nil,
+			entry.recipeState,
+			entry.recipeQualityLabel,
+			entry.recipeQualityEnabled ~= nil and ("recipe quality " .. (entry.recipeQualityEnabled and "enabled" or "disabled")) or nil,
 			entry.bag and entry.slot and (tostring(entry.bag) .. "." .. tostring(entry.slot)) or nil,
 		}
 		for _, value in ipairs(fields) do
@@ -2095,7 +2125,7 @@ function _G.AutoDelete_BuildDecisionHistoryReport(searchText)
 	if #entries == 0 then
 		table.insert(lines, "No decisions recorded this session.")
 		table.insert(lines, "")
-		table.insert(lines, "This log records actual deletes, actual sells, and matching rules blocked by Keep or Affix Protection.")
+		table.insert(lines, "This log records actual deletes, actual sells, recipe sales/protection, and matching rules blocked by Keep or Affix Protection.")
 		return table.concat(lines, "\n")
 	end
 	for i, entry in ipairs(filtered) do
@@ -2103,6 +2133,12 @@ function _G.AutoDelete_BuildDecisionHistoryReport(searchText)
 		table.insert(lines, "   Item: " .. tostring(entry.itemName) .. (entry.itemId and (" (item:" .. entry.itemId .. ")") or ""))
 		if entry.affixName then
 			table.insert(lines, "   Affix: " .. tostring(entry.affixName))
+		end
+		if entry.recipeLike then
+			table.insert(lines, "   Recipe: yes"
+				.. (entry.recipeState and ("; knowledge=" .. tostring(entry.recipeState)) or "")
+				.. (entry.recipeQualityLabel and ("; quality=" .. tostring(entry.recipeQualityLabel)) or "")
+				.. (entry.recipeQualityEnabled ~= nil and ("; quality toggle=" .. (entry.recipeQualityEnabled and "on" or "off")) or ""))
 		end
 		table.insert(lines, "   Final action: " .. tostring(entry.action))
 		table.insert(lines, "   Reason: " .. tostring(entry.reason))
@@ -2122,7 +2158,7 @@ function _G.AutoDelete_ShowDecisionHistory()
 	local text = _G.AutoDelete_BuildDecisionHistoryReport()
 	if _G.AutoDelete_ShowReportWindow then
 		_G.AutoDelete_ShowReportWindow(text, "Decision History", {
-			searchPlaceholder = "Search item, affix, rule...",
+			searchPlaceholder = "Search item, recipe, affix, rule...",
 			searchBuilder = function(query)
 				return _G.AutoDelete_BuildDecisionHistoryReport(query)
 			end,
@@ -3132,7 +3168,7 @@ local function DeleteItems()
 				-- normally protected from auto-rules - but the Delete list is
 				-- explicit user intent and overrides quest protection. Auto
 				-- rules (autoGray, autoDeleteCommon) still respect it.
-				local itemName, _, itemQuality, _, _, itemClass = GetItemInfo(itemLink)
+				local itemName, _, itemQuality, _, _, itemClass, itemSubType = GetItemInfo(itemLink)
 				local isQuestItem = (itemClass == "Quest")
 				local itemId = GetItemIDFromLink(itemLink)
 				local shouldDelete = false
@@ -3298,7 +3334,9 @@ local function DeleteItems()
 						missingAffixBlocked, missingAffixState = _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot)
 					end
 					local affixBlocked = (not keepBlocked) and (missingAffixBlocked or IsAffixProtected(profile, bag, slot, itemLink, "delete", singleAffixSlot))
-					if not keepBlocked and not affixBlocked then
+					local recipeDeleteBlocked = (not keepBlocked) and (not affixBlocked)
+						and _G.AutoDelete_IsRecipeDeleteProtected(profile, itemClass, itemSubType, deleteSourceRule)
+					if not keepBlocked and not affixBlocked and not recipeDeleteBlocked then
 						if _G.AutoDelete_DebugSell then
 							local reason = (deleteSourceRule == "KeepOne" and "KeepOne")
 								or (deleteSourceRule == "KeepStack" and "KeepStack")
@@ -3366,6 +3404,29 @@ local function DeleteItems()
 						if _G.AutoDelete_DebugSell then
 							print(string.format(
 								"|cffff8000[AutoDelete DEBUG]|r delete BLOCKED by Keep list: %s (id=%s)",
+								tostring(itemName), tostring(itemId)
+							))
+						end
+					elseif recipeDeleteBlocked then
+						AutoDelete_PerfCount("DeleteItems/items-skipped-recipe", 1)
+						if _G.AutoDelete_RecordDecision then
+							_G.AutoDelete_RecordDecision({
+								itemName = itemName,
+								itemId = itemId,
+								action = "kept",
+								reason = "Sell Known Recipes blocked delete",
+								sourceRule = deleteSourceRule or "Delete scanner",
+								recipeLike = true,
+								recipeState = _G.AutoDelete_GetRecipeKnowledgeState(bag, slot, itemLink),
+								recipeQuality = itemQuality,
+								recipeQualityEnabled = _G.AutoDelete_IsKnownRecipeQualityEnabled(profile, itemQuality),
+								bag = bag,
+								slot = slot,
+							})
+						end
+						if _G.AutoDelete_DebugSell then
+							print(string.format(
+								"|cffff8000[AutoDelete DEBUG]|r delete BLOCKED by Sell Known Recipes: %s (id=%s)",
 								tostring(itemName), tostring(itemId)
 							))
 						end
@@ -3979,6 +4040,9 @@ boeTipOwner:Hide()  -- never visible; just an owner anchor
 local boeTip = CreateFrame("GameTooltip", "AutoDelete_BoETip", UIParent, "GameTooltipTemplate")
 boeTip:SetClampedToScreen(false)
 
+_G.AutoDelete_RecipeTip = CreateFrame("GameTooltip", "AutoDelete_RecipeTip", UIParent, "GameTooltipTemplate")
+_G.AutoDelete_RecipeTip:SetClampedToScreen(false)
+
 -- ============================================================================
 -- Tooltip-result cache (Phase D)
 -- ============================================================================
@@ -4006,6 +4070,7 @@ _G.AutoDelete_TooltipCache = _G.AutoDelete_TooltipCache or {
 	affix     = {},
 	affixName = {},
 	boe       = {},
+	recipeKnown = {},
 	soulbound = {},
 }
 -- Versioned cache invalidation. When the parsing logic (esp.
@@ -4018,14 +4083,48 @@ _G.AutoDelete_TooltipCache = _G.AutoDelete_TooltipCache or {
 -- so we drop the affected sub-cache here when the version doesn't
 -- match. Bump _CACHE_VERSION whenever parsing semantics change.
 do
-	local _CACHE_VERSION = 6
+	local _CACHE_VERSION = 7
 	if _G.AutoDelete_TooltipCache._cacheVersion ~= _CACHE_VERSION then
 		_G.AutoDelete_TooltipCache.affix     = {}
 		_G.AutoDelete_TooltipCache.affixName = {}
 		_G.AutoDelete_TooltipCache.soulbound = {}
 		_G.AutoDelete_TooltipCache.boe       = {}
+		_G.AutoDelete_TooltipCache.recipeKnown = {}
 		_G.AutoDelete_TooltipCache._cacheVersion = _CACHE_VERSION
 	end
+end
+
+function _G.AutoDelete_GetRecipeKnowledgeState(bag, slot, link)
+	if not bag or not slot or not link then return "uncertain" end
+	local cache = _G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.recipeKnown
+	if cache and cache[link] then return cache[link] end
+
+	local knownToken = ITEM_SPELL_KNOWN
+	if type(knownToken) ~= "string" or knownToken == "" then
+		knownToken = "Already known"
+	end
+
+	local recipeTip = _G.AutoDelete_RecipeTip
+	recipeTip:Hide()
+	recipeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
+	recipeTip:ClearLines()
+	recipeTip:SetBagItem(bag, slot)
+	recipeTip:Show()
+	local n = recipeTip:NumLines()
+	local lines = {}
+	for i = 1, n do
+		local leftFS  = _G["AutoDelete_RecipeTipTextLeft"  .. i]
+		local rightFS = _G["AutoDelete_RecipeTipTextRight" .. i]
+		local leftTxt  = leftFS  and leftFS:GetText()  or nil
+		local rightTxt = rightFS and rightFS:GetText() or nil
+		if leftTxt then lines[#lines + 1] = leftTxt end
+		if rightTxt then lines[#lines + 1] = rightTxt end
+	end
+	local state = _G.AutoDelete_DetectRecipeKnowledgeFromTooltipLines(lines, knownToken)
+	recipeTip:Hide()
+
+	if cache then cache[link] = state end
+	return state
 end
 
 -- Combined-marker tooltip scan. Walks the bag-slot tooltip ONCE and
@@ -6564,7 +6663,7 @@ local function SellItems(silent)
 				-- equipSlot so that books, glyphs, consumables, and other
 				-- miscellaneous items with unexpected equipSlot values can
 				-- never be caught by the quality-based auto-sell rules.
-				local name, _, itemQuality, ilvl, _, itemClass, _, _, equipSlot, _, vendorPrice = GetItemInfo(itemLink)
+				local name, _, itemQuality, ilvl, _, itemClass, itemSubType, _, equipSlot, _, vendorPrice = GetItemInfo(itemLink)
 
 				-- Quest items are normally protected from auto-rules, but
 				-- the explicit Sell list overrides quest protection (user
@@ -6595,16 +6694,19 @@ local function SellItems(silent)
 					-- Priority order (highest first):
 					--   1. Keep list  - always wins, skips everything below
 					--   2. Sell list  - explicit user intent (overrides quest protection)
-					--   3. Greens     - auto-sell, gear only, skips quest items
-					--   4. BoE Weapons - Rare/Epic, iLvl gated, skips quest items
-					--   5. BoP         - Rare/Epic, iLvl gated, skips quest items
-					--   6. BoE Armor   - Rare/Epic, iLvl gated, skips quest items
+					--   3. Sell Known Recipes protection/sell - tooltip-confirmed only
+					--   4. Greens     - auto-sell, gear only, skips quest items
+					--   5. BoE Weapons - Rare/Epic, iLvl gated, skips quest items
+					--   6. BoP         - Rare/Epic, iLvl gated, skips quest items
+					--   7. BoE Armor   - Rare/Epic, iLvl gated, skips quest items
 					-- An item can only match one rule per scan.
 					-- ============================================================
 
 					local shouldSell = false
-					local sellReason = nil   -- "list" | "greens" | "boeArmor" | "bop" | "boeWeapons"
+					local sellReason = nil   -- "list" | "knownRecipe" | "greens" | "boeArmor" | "bop" | "boeWeapons"
 					local itemId = GetItemIDFromLink(itemLink)
+					local onSellList = (itemId and sellIDs[itemId]) or (name and sellNames[Normalize(name)])
+					local recipeAction, recipeReason, recipeRule, recipeState, recipeQualityEnabled = nil, nil, nil, nil, nil
 
 					-- Step 1: Keep list short-circuits the whole chain.
 					-- Step 1b: Affix Protection also short-circuits before any sell rule.
@@ -6615,16 +6717,56 @@ local function SellItems(silent)
 
 					if not isOnKeepList and not isAffixProtected then
 
-						-- Step 2: Explicit Sell list entry.
-						if itemId and sellIDs[itemId] then
-							shouldSell = true; sellReason = "list"
-						elseif name and sellNames[Normalize(name)] then
-							shouldSell = true; sellReason = "list"
+						recipeAction, recipeReason, recipeRule, recipeState, recipeQualityEnabled =
+							_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, itemLink, itemClass, itemSubType, itemQuality, isQuestItem, onSellList)
+
+						if recipeAction == "sell" then
+							shouldSell = true
+							sellReason = recipeReason
+						elseif recipeAction == "protect" then
+							local blockedSourceRule = nil
+							if onSellList then
+								blockedSourceRule = "Sell list"
+							elseif not isQuestItem and itemQuality == 0 and profile.qualityActionJunk == "sell" then
+								blockedSourceRule = "Auto Actions: Junk sell"
+							elseif not isQuestItem and itemQuality == 1 and isGearItem and profile.qualityActionCommon == "sell" then
+								blockedSourceRule = "Auto Actions: Common gear sell"
+							elseif not isQuestItem and itemQuality == 2 and isGearItem and profile.qualityActionGreens == "sell" then
+								blockedSourceRule = "Auto Actions: Green gear sell"
+							end
+							if _G.AutoDelete_RecordDecision and blockedSourceRule then
+								_G.AutoDelete_RecordDecision({
+									itemName = name,
+									itemId = itemId,
+									action = "kept",
+									reason = recipeReason,
+									sourceRule = blockedSourceRule,
+									recipeLike = true,
+									recipeState = recipeState,
+									recipeQuality = itemQuality,
+									recipeQualityEnabled = recipeQualityEnabled,
+									bag = bag,
+									slot = slot,
+								})
+							end
+							if _G.AutoDelete_DebugSell then
+								print(string.format(
+									"|cffff8000[AutoDelete DEBUG]|r recipe PROTECTED: %s (id=%s) | state=%s | quality=%s | qualityToggle=%s | source=%s | reason=%s",
+									tostring(name), tostring(itemId), tostring(recipeState),
+									tostring(_G.AutoDelete_GetRecipeQualityLabel(itemQuality)),
+									tostring(recipeQualityEnabled), tostring(blockedSourceRule), tostring(recipeReason)
+								))
+							end
+						else
+							-- Step 2: Explicit Sell list entry.
+							if onSellList then
+								shouldSell = true; sellReason = "list"
+							end
 						end
 
 						-- Steps 3-6 only run for non-quest items. A quest
 						-- item only sells if Step 2 matched it explicitly.
-						if not shouldSell and not isQuestItem then
+						if recipeAction ~= "protect" and not shouldSell and not isQuestItem then
 
 							-- Step 3: Tri-state quality filters (Junk / Common /
 							-- Greens). When a quality is set to "sell", items
@@ -6695,9 +6837,7 @@ local function SellItems(silent)
 						end  -- close: if not shouldSell and not isQuestItem
 					elseif _G.AutoDelete_RecordDecision then
 						local blockedSourceRule = nil
-						if itemId and sellIDs[itemId] then
-							blockedSourceRule = "Sell list"
-						elseif name and sellNames[Normalize(name)] then
+						if onSellList then
 							blockedSourceRule = "Sell list"
 						elseif not isQuestItem and itemQuality == 0 and profile.qualityActionJunk == "sell" then
 							blockedSourceRule = "Auto Actions: Junk sell"
@@ -6729,8 +6869,7 @@ local function SellItems(silent)
 						if _G.AutoDelete_DebugSell then
 							local idStr = itemId and tostring(itemId) or "nil"
 							local boeStr = "?"
-							if sellReason ~= "list" and sellReason ~= "greens" then
-								-- isBoE was already computed in the rule chain above
+							if sellReason == "boeWeapons" or sellReason == "boeArmor" or sellReason == "bop" then
 								boeStr = (sellReason == "bop") and "BoP" or "BoE"
 							end
 							print(string.format(
@@ -6740,6 +6879,15 @@ local function SellItems(silent)
 								tostring(equipSlot), tostring(itemClass),
 								tostring(isGearItem), tostring(isWeaponSlot), boeStr
 							))
+							if _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType) then
+								print(string.format(
+									"|cffff8000[AutoDelete DEBUG]|r recipe SOLD: %s (id=%s) | state=%s | quality=%s | qualityToggle=%s | source=%s",
+									tostring(name), idStr, tostring(recipeState),
+									tostring(_G.AutoDelete_GetRecipeQualityLabel(itemQuality)),
+									tostring(recipeQualityEnabled),
+									tostring((sellReason == "knownRecipe" and "Sell Known Recipes") or sellReason)
+								))
+							end
 						end
 						-- Flag this call so the UseContainerItem hook skips
 						-- (we record the BumpStat directly below).
@@ -6761,6 +6909,7 @@ local function SellItems(silent)
 								action = "sold",
 								reason = "Vendor sale executed",
 								sourceRule = (sellReason == "list" and "Sell list")
+									or (sellReason == "knownRecipe" and "Sell Filters: Sell Known Recipes")
 									or (sellReason == "junk" and "Auto Actions: Junk sell")
 									or (sellReason == "common" and "Auto Actions: Common gear sell")
 									or (sellReason == "greens" and "Auto Actions: Green gear sell")
@@ -6768,6 +6917,10 @@ local function SellItems(silent)
 									or (sellReason == "bop" and "Sell Filters: BoP")
 									or (sellReason == "boeArmor" and "Sell Filters: BoE Armor")
 									or tostring(sellReason),
+								recipeLike = _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType),
+								recipeState = recipeState,
+								recipeQuality = itemQuality,
+								recipeQualityEnabled = recipeQualityEnabled,
 								bag = bag,
 								slot = slot,
 							})
@@ -8638,7 +8791,7 @@ local function ClearProcessIgnored()
 end
 
 function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignored, ruleCtx)
-	local name, _, itemQuality, ilvl, _, itemClass, _, _, equipSlot, _, vendorPrice = GetItemInfo(link)
+	local name, _, itemQuality, ilvl, _, itemClass, itemSubType, _, equipSlot, _, vendorPrice = GetItemInfo(link)
 	local isQuestItem = (itemClass == "Quest")
 	local isDeleteGearItem = equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG"
 	local isSellGearItem = false
@@ -8749,16 +8902,25 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 			return "kept", missingAffixReason .. " blocked delete", deleteRule, name
 		elseif IsAffixProtected(profile, bag, slot, link, "delete", singleAffixSlot) then
 			return "kept", "Affix Protection blocked delete", deleteRule, name
+		elseif _G.AutoDelete_IsRecipeDeleteProtected(profile, itemClass, itemSubType, deleteRule) then
+			return "kept", "Sell Known Recipes blocked delete", deleteRule, name
 		else
 			return "delete", "Would delete", deleteRule, name
 		end
 	end
 
 	local sellRule = nil
+	local recipeProtectReason = nil
+	local recipeProtectRule = nil
 	if vendorPrice and vendorPrice > 0 then
-		if id and sellIDs[id] then
-			sellRule = "Sell list"
-		elseif name and sellNames[Normalize(name)] then
+		local recipeAction, recipeReason, recipeRule =
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, link, itemClass, itemSubType, itemQuality, isQuestItem, onSell)
+		if recipeAction == "sell" then
+			sellRule = recipeRule
+		elseif recipeAction == "protect" then
+			recipeProtectReason = recipeReason
+			recipeProtectRule = recipeRule
+		elseif onSell then
 			sellRule = "Sell list"
 		elseif not isQuestItem and itemQuality == 0 and profile.qualityActionJunk == "sell" then
 			sellRule = "Auto Actions: Junk sell"
@@ -8789,6 +8951,9 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 				sellRule = "Sell Filters: BoE Armor"
 			end
 		end
+	end
+	if recipeProtectReason then
+		return "kept", recipeProtectReason, recipeProtectRule, name
 	end
 	if sellRule then
 		if onKeep then
@@ -9117,18 +9282,26 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 	table.insert(lines, "  Cursor busy: " .. ((CursorHasItem and CursorHasItem()) and "yes - delete queue waits" or "no"))
 	table.insert(lines, "  Delete queue: " .. tostring(#((_G.AutoDelete_DeleteQueue or {}).items or {})) .. " pending")
 
-	local name, quality, ilvl, itemClass, maxStack, equipSlot, vendorPrice = nil, nil, nil, nil, nil, nil, nil
+	local name, quality, ilvl, itemClass, itemSubType, maxStack, equipSlot, vendorPrice = nil, nil, nil, nil, nil, nil, nil, nil
 	if itemLink then
 		local info = { GetItemInfo(itemLink) }
 		name = info[1]
 		quality = info[3]
 		ilvl = info[4]
 		itemClass = info[6]
+		itemSubType = info[7]
 		maxStack = info[8]
 		equipSlot = info[9]
 		vendorPrice = info[11]
 	end
 	local isQuestItem = (itemClass == "Quest")
+	local isRecipeLike = _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType)
+	local recipeKnowledgeState = nil
+	local recipeQualityEnabled = nil
+	if profile.knownRecipeSellEnabled and isRecipeLike and bag and slot and itemLink then
+		recipeKnowledgeState = _G.AutoDelete_GetRecipeKnowledgeState(bag, slot, itemLink)
+		recipeQualityEnabled = _G.AutoDelete_IsKnownRecipeQualityEnabled(profile, quality)
+	end
 	local isDeleteGearItem = equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG"
 	local isSellGearItem = false
 	local isWeaponSlot = false
@@ -9160,11 +9333,26 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 	table.insert(lines, "  Quality: " .. tostring(quality))
 	table.insert(lines, "  iLvl: " .. tostring(ilvl))
 	table.insert(lines, "  Class: " .. tostring(itemClass))
+	table.insert(lines, "  Subtype: " .. tostring(itemSubType))
+	table.insert(lines, "  Recipe-like: " .. tostring(isRecipeLike))
+	if recipeKnowledgeState then
+		table.insert(lines, "  Recipe knowledge: " .. tostring(recipeKnowledgeState))
+	end
 	table.insert(lines, "  Equip slot: " .. tostring(equipSlot))
 	table.insert(lines, "  Sell gear slot: " .. tostring(isSellGearItem))
 	table.insert(lines, "  Weapon slot: " .. tostring(isWeaponSlot))
 	table.insert(lines, "  Max stack: " .. tostring(maxStack))
 	table.insert(lines, "  Vendor price: " .. tostring(vendorPrice))
+	if isRecipeLike then
+		table.insert(lines, "")
+		table.insert(lines, "Recipe diagnostics:")
+		table.insert(lines, "  Sell Known Recipes: " .. (profile.knownRecipeSellEnabled and "on" or "off"))
+		table.insert(lines, "  Knowledge state: " .. tostring(recipeKnowledgeState or "not scanned"))
+		table.insert(lines, "  Quality toggle: " .. tostring(_G.AutoDelete_GetRecipeQualityLabel(quality))
+			.. (recipeQualityEnabled == nil and " (not checked)" or (recipeQualityEnabled and " on" or " off")))
+		table.insert(lines, "  Explicit Sell list: " .. (onSell and "yes - sells before recipe protection" or "no"))
+		table.insert(lines, "  Explicit Delete list: " .. (onDelete and "yes - deletes before automatic recipe protection" or "no"))
+	end
 
 	table.insert(lines, "")
 	table.insert(lines, "Delete decision:")
@@ -9202,6 +9390,8 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		table.insert(lines, "  Final: keep. Affix protection blocks delete.")
 	elseif onDelete then
 		table.insert(lines, "  Final: delete. Explicit Delete list entry matches.")
+	elseif _G.AutoDelete_IsRecipeDeleteProtected(profile, itemClass, itemSubType, "auto") then
+		table.insert(lines, "  Final: keep. Sell Known Recipes keeps recipe items out of automatic delete rules.")
 	elseif isQuestItem then
 		table.insert(lines, "  Final: keep. Quest item blocks auto-delete.")
 	elseif quality == 0 and profile.qualityActionJunk == "delete" and not isCosmetic then
@@ -9224,6 +9414,16 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		table.insert(lines, "  Final: keep. " .. missingAffixWhyText .. " blocks sell.")
 	elseif bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "sell", singleAffixSlot) then
 		table.insert(lines, "  Final: keep. Affix protection blocks sell.")
+	elseif profile.knownRecipeSellEnabled and isRecipeLike then
+		local recipeAction, recipeReason, recipeRule =
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, itemLink, itemClass, itemSubType, quality, isQuestItem, onSell)
+		if recipeAction == "sell" and recipeRule == "Sell list" then
+			table.insert(lines, "  Final: sell at vendor. Explicit Sell list entry matches.")
+		elseif recipeAction == "sell" then
+			table.insert(lines, "  Final: sell at vendor. Sell Known Recipes rule matched.")
+		else
+			table.insert(lines, "  Final: keep. " .. tostring(recipeReason) .. ".")
+		end
 	elseif onSell then
 		table.insert(lines, "  Final: sell at vendor. Explicit Sell list entry matches.")
 	elseif isQuestItem then
@@ -9397,6 +9597,11 @@ function _G.AutoDelete_BuildDiagnosticReport()
 		end
 		return n
 	end
+	local function CountTable(t)
+		local n = 0
+		if t then for _ in pairs(t) do n = n + 1 end end
+		return n
+	end
 	local ignored = 0
 	for _ in pairs(GetProcessIgnoredTable()) do ignored = ignored + 1 end
 	local owned = 0
@@ -9423,6 +9628,14 @@ function _G.AutoDelete_BuildDiagnosticReport()
 		"  ElvUI junk coin hidden: " .. tostring(_G.AutoDelete_ElvUIJunkIconState and _G.AutoDelete_ElvUIJunkIconState.active or false),
 		"  Common: " .. tostring(profile.qualityActionCommon),
 		"  Greens: " .. tostring(profile.qualityActionGreens),
+		"",
+		"Recipe filters:",
+		"  Sell Known Recipes: " .. tostring(profile.knownRecipeSellEnabled),
+		"  White: " .. tostring(profile.knownRecipeSellCommon)
+			.. "   Green: " .. tostring(profile.knownRecipeSellUncommon)
+			.. "   Blue: " .. tostring(profile.knownRecipeSellRare)
+			.. "   Purple: " .. tostring(profile.knownRecipeSellEpic),
+		"  Tooltip cache entries: " .. CountTable(_G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.recipeKnown),
 		"",
 		"Affix:",
 		"  Show dot: " .. tostring(profile.showAffixDot),
@@ -9554,7 +9767,8 @@ function _G.AutoDelete_BuildProcessDebugReport()
 		"  BoE: " .. cacheCount(_G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.boe)
 			.. "   Soulbound: " .. cacheCount(_G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.soulbound)
 			.. "   Affix: " .. cacheCount(_G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.affix)
-			.. "   Affix names: " .. cacheCount(_G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.affixName),
+			.. "   Affix names: " .. cacheCount(_G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.affixName)
+			.. "   Recipes: " .. cacheCount(_G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.recipeKnown),
 		"",
 		"Bag slots:",
 	}
@@ -9629,6 +9843,15 @@ function _G.AutoDelete_BuildProcessDebugReport()
 					"    tooltip: soulbound=%s boe=%s affixTier=%s missingBlocked=%s missingState=%s",
 					yes(soulbound), yes(boe), tostring(affix), yes(missingBlocked), tostring(missingState)
 				))
+				if _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType) then
+					table.insert(lines, string.format(
+						"    recipe: enabled=%s state=%s quality=%s qualityToggle=%s",
+						yes(profile.knownRecipeSellEnabled),
+						tostring(profile.knownRecipeSellEnabled and _G.AutoDelete_GetRecipeKnowledgeState(bag, slot, link) or "not scanned"),
+						tostring(_G.AutoDelete_GetRecipeQualityLabel(quality)),
+						yes(_G.AutoDelete_IsKnownRecipeQualityEnabled(profile, quality))
+					))
+				end
 				table.insert(lines, string.format(
 					"    process: action=%s processAction=%s reason=%s source=%s ignored=%s",
 					tostring(action), tostring(processAction), tostring(reason), tostring(sourceRule), yes(ignored)
@@ -10768,6 +10991,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 	if event == "SPELLS_CHANGED" then
 		-- Fires on login and any time the spellbook changes (learn a spell,
 		-- respec, etc). Re-scan to keep the per-spell known caches honest.
+		if _G.AutoDelete_TooltipCache then
+			_G.AutoDelete_TooltipCache.recipeKnown = {}
+		end
 		RefreshDisenchantKnown()
 		UpdateDisenchantButton()
 		if _G.AutoDelete_RefreshMillKnown then
@@ -13284,10 +13510,10 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		row("/del clean",        "remove duplicate or conflicting item-list entries")
 		row("/del sell",         "run a sell pass at the open vendor right now")
 		row("/del process",      "toggle the Process Bags window (DE / Mill / Prospect / Open)")
-		row("/del report",       "open a copyable diagnostic report")
-		row("/del processdebug", "open a Process Bags gate-by-gate diagnostic")
+		row("/del report",       "open a copyable diagnostic report, including recipe filters")
+		row("/del processdebug", "open a Process Bags gate-by-gate diagnostic, including recipes")
 		row("/del de history",   "open recent One-Key Disenchant actions")
-		row("/del history",      "open recent sell / delete / keep decisions")
+		row("/del history",      "open recent sell / delete / keep decisions, including recipes")
 		row("/del audit",        "open a copyable item list audit")
 		row("/del setup",        "re-open the first-time setup / welcome popup")
 		print(" ")
