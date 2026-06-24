@@ -1,9 +1,9 @@
 ## Interface: 30300
-## Title: |cffff8000AutoDelete|r
+## Title: AutoDelete
 ## Notes: Automatically delete and sell specified items from your bags.
 ## Author: Baenre
-## Version: 3.26.1
-## OptionalDeps: ProjectEbonhold
+## Version: 3.27
+## OptionalDeps: ProjectEbonhold, Bagnon
 ## SavedVariables: AutoDeleteDB
 ## SavedVariablesPerCharacter: AutoDeleteStatsDB
 

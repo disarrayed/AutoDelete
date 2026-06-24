@@ -1523,18 +1523,21 @@ local DEFAULT_PROFILE = {
 	autoOpenIncludeLocked = true,
 
 	-- Quality filters are tri-state cycle toggles: "off" | "delete" | "sell".
-	-- Each quality can be independently set to do nothing, auto-delete, or
-	-- auto-sell at vendor. Old booleans (autoGray, autoDeleteCommon,
+	-- Each gear quality can be independently set to do nothing, auto-delete,
+	-- or auto-sell at vendor. Junk is delete-only in the options UI. Old
+	-- booleans (autoGray, autoDeleteCommon,
 	-- autoSellGreens) are migrated to these fields by RunDBMigrations v3
 	-- and then left in place for one version as a fallback read for older
 	-- code paths; the canonical fields going forward are the qualityAction*
 	-- enums.
-	--   Junk    = gray quality, any item type
+	--   Junk    = gray quality, any item type, delete-only
 	--   Common  = white quality, equippable gear only
 	--   Greens  = green quality, equippable gear only
+	--   Rares   = blue quality, equippable gear only
 	qualityActionJunk    = "off",
 	qualityActionCommon  = "off",
 	qualityActionGreens  = "off",
+	qualityActionRares   = "off",
 
 	-- Legacy booleans -- retained for one version while migration settles.
 	-- DO NOT read these in new code; read qualityAction* instead. Removed
@@ -1758,9 +1761,26 @@ local function EnsureProfileFields(p)
 		p.protectAffixTier5 = true
 	end
 
+	if p.qualityActionJunk == nil and (p.autoGray == true or p.autoGray == "delete") then
+		p.qualityActionJunk = "delete"
+	end
+	if p.qualityActionCommon == nil and (p.autoDeleteCommon == true or p.autoDeleteCommon == "delete") then
+		p.qualityActionCommon = "delete"
+	end
+	if p.qualityActionGreens == nil and p.autoSellGreens == true then
+		p.qualityActionGreens = "sell"
+	end
+
 	for k, v in pairs(DEFAULT_PROFILE) do
 		if p[k] == nil then p[k] = v end
 	end
+	if p.qualityActionJunk == "sell" then
+		_G._AutoDelete_NeedJunkActionNotice = (_G._AutoDelete_NeedJunkActionNotice or 0) + 1
+	end
+	if p.qualityActionJunk ~= "delete" then p.qualityActionJunk = "off" end
+	if p.qualityActionCommon ~= "delete" and p.qualityActionCommon ~= "sell" then p.qualityActionCommon = "off" end
+	if p.qualityActionGreens ~= "delete" and p.qualityActionGreens ~= "sell" then p.qualityActionGreens = "off" end
+	if p.qualityActionRares ~= "delete" and p.qualityActionRares ~= "sell" then p.qualityActionRares = "off" end
 	if p.missingAffixColor ~= "red"
 		and p.missingAffixColor ~= "gold"
 		and p.missingAffixColor ~= "mage"
@@ -1792,7 +1812,7 @@ end
 --
 -- One canonical migration spot so a future reader knows exactly where to add a
 -- new step.
-local AUTODELETE_DB_VERSION = 4
+local AUTODELETE_DB_VERSION = 5
 
 local function RunDBMigrations(db)
 	if not db then return end
@@ -1860,6 +1880,22 @@ local function RunDBMigrations(db)
 	-- restore) just need to re-pick Del on the Greens row.
 	if db.version < 4 and db.profiles then
 		-- intentionally empty -- see comment above.
+	end
+	-- v5 (2026-06-24): Junk moved out of the Del/Sell Auto Actions card
+	-- into a delete-only General-tab checkbox. Existing Junk=Sell profiles
+	-- cannot be represented in the new UI, so turn that hidden state off and
+	-- show a one-time notice at PLAYER_LOGIN.
+	if db.version < 5 and db.profiles then
+		local migratedJunkSell = 0
+		for _, profile in pairs(db.profiles) do
+			if profile and profile.qualityActionJunk == "sell" then
+				profile.qualityActionJunk = "off"
+				migratedJunkSell = migratedJunkSell + 1
+			end
+		end
+		if migratedJunkSell > 0 then
+			_G._AutoDelete_NeedJunkActionNotice = migratedJunkSell
+		end
 	end
 	db.version = AUTODELETE_DB_VERSION
 end
@@ -2912,8 +2948,8 @@ _G.AutoDelete_Profiles = {
 -- Deletion Scanner
 -- ============================================================================
 -- Periodic + event-driven scanner that walks the player's bags and either
--- deletes (Delete list, Auto-Delete Junk, Auto-Delete Common) or - when at
--- a vendor - sells (handled by SellItems below). Quest items are hard-
+-- deletes (Delete list, Delete Junk, and Del-selected quality rows) or - when
+-- at a vendor - sells (handled by SellItems below). Quest items are hard-
 -- exempt: they short-circuit before any rule evaluation.
 
 local nextScanAt = 0
@@ -3006,9 +3042,9 @@ function _G.AutoDelete_GetKeepStackSlotChoice(itemId)
 end
 
 -- Cosmetic slots (shirts + tabards). Items in these slots are NEVER touched
--- by the automatic rules (Auto-Delete Junk, Auto-Delete Common, Auto-Sell
--- Greens, the BoE/BoP/BoE Weapons sell categories). They must be explicitly
--- added to the Delete or Sell list to be removed. Used by DeleteItems.
+-- by the automatic quality rules or the BoE/BoP/BoE Weapons sell categories.
+-- They must be explicitly added to the Delete or Sell list to be removed.
+-- Used by DeleteItems.
 local COSMETIC_SLOTS = {
 	INVTYPE_BODY = true,    -- shirts
 	INVTYPE_TABARD = true,  -- tabards
@@ -3106,10 +3142,11 @@ local function DeleteItems()
 	-- too, but ONLY for equippable gear (same gate as doCommon). Reagents,
 	-- consumables, bags, and quest items stay safe.
 	local doGreens = (profile.qualityActionGreens == "delete")
+	local doRares = (profile.qualityActionRares == "delete")
 
-	if not hasWanted and not hasKeepOne and not hasKeepStack and not doGray and not doCommon and not doGreens then
+	if not hasWanted and not hasKeepOne and not hasKeepStack and not doGray and not doCommon and not doGreens and not doRares then
 		if _G.AutoDelete_DebugSell and not _G._AutoDelete_DebugDelEmptyLogged then
-			print("|cffff8000[AutoDelete DEBUG]|r delete scan: no work - Delete/KeepOne/KeepStack lists empty AND Junk/Common/Greens quality filters not in delete mode.")
+			print("|cffff8000[AutoDelete DEBUG]|r delete scan: no work - Delete/KeepOne/KeepStack lists empty AND Junk/Common/Greens/Rares quality filters not in delete mode.")
 			_G._AutoDelete_DebugDelEmptyLogged = true
 		end
 		AutoDelete_PerfEnd("DeleteItems", _p)
@@ -3312,6 +3349,15 @@ local function DeleteItems()
 						if equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG" then
 							shouldDelete = true
 							deleteSourceRule = "Auto Actions: Green gear delete"
+						end
+					end
+
+					if not shouldDelete and doRares and itemQuality and itemQuality == 3
+						and not IsCosmeticSlot(itemLink) then
+						local _, _, _, _, _, _, _, _, equipSlot = GetItemInfo(itemLink)
+						if equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG" then
+							shouldDelete = true
+							deleteSourceRule = "Auto Actions: Rare gear delete"
 						end
 					end
 				end
@@ -3654,6 +3700,13 @@ function _G.AutoDelete_ValidateDrainEntry(profile, entry, currentLink)
 			and equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG" then
 			stillMatches = true
 		end
+		if not stillMatches
+			and profile.qualityActionRares == "delete"
+			and itemQuality == 3
+			and not IsCosmeticSlot(currentLink)
+			and equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG" then
+			stillMatches = true
+		end
 	end
 
 	if not stillMatches then return false, "rule-changed" end
@@ -3893,6 +3946,8 @@ function _G.AutoDelete_HasPendingDeleteItems(profile)
 	-- the player to interact with a merchant, which is a different flow.
 	local doGray   = (profile.qualityActionJunk == "delete")
 	local doCommon = (profile.qualityActionCommon == "delete")
+	local doGreens = (profile.qualityActionGreens == "delete")
+	local doRares  = (profile.qualityActionRares == "delete")
 	-- BuildWantedSets returns (nameSet, idSet) in that order. `hasWanted`
 	-- mirrors DeleteItems' canonical "is the user's Delete list non-empty"
 	-- check via next(); it's the cheap way to skip the per-slot list
@@ -3906,7 +3961,7 @@ function _G.AutoDelete_HasPendingDeleteItems(profile)
 	local hasSingleAffixCleanup = profile.keepSingleMissingAffix == true
 	-- Bail early if there's nothing to look for. Saves the full bag walk
 	-- in the common case of a brand-new profile with no rules enabled.
-	if not (hasWanted or hasKeepOne or hasKeepStack or doGray or doCommon) then return false end
+	if not (hasWanted or hasKeepOne or hasKeepStack or doGray or doCommon or doGreens or doRares) then return false end
 
 	-- Pre-built Keep-list sets so the inner loop's up-to-3 IsWhitelisted
 	-- calls per slot become 3 hash lookups instead of 3 full whitelist
@@ -3958,7 +4013,7 @@ function _G.AutoDelete_HasPendingDeleteItems(profile)
 				end
 
 				-- (2) Auto rules. Quest-protected; respect cosmetic slots.
-				-- Quality codes: 0 = Poor (gray), 1 = Common (white).
+				-- Quality codes: 0 = Poor, 1 = Common, 2 = Uncommon, 3 = Rare.
 				if not isQuestItem then
 					if doGray and itemQuality and itemQuality == 0
 						and not IsCosmeticSlot(link)
@@ -3967,6 +4022,20 @@ function _G.AutoDelete_HasPendingDeleteItems(profile)
 						return true
 					end
 					if doCommon and itemQuality and itemQuality == 1
+						and not IsCosmeticSlot(link)
+						and equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG"
+						and not singleAffixKept
+						and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then
+						return true
+					end
+					if doGreens and itemQuality and itemQuality == 2
+						and not IsCosmeticSlot(link)
+						and equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG"
+						and not singleAffixKept
+						and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then
+						return true
+					end
+					if doRares and itemQuality and itemQuality == 3
 						and not IsCosmeticSlot(link)
 						and equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG"
 						and not singleAffixKept
@@ -5572,11 +5641,12 @@ end
 
 -- Exposed so Options.lua can force an immediate refresh when the user
 -- toggles the affix-dot setting (otherwise dots persist until the next
--- natural bag event). Walks visible default Blizzard bag frames AND
--- pokes ElvUI's bag refresh if loaded. Bumps affixDotVersion so the
--- per-slot link-cache short-circuit above (and the matching one in
--- the ElvUI B:UpdateSlot hook below) still re-runs AutoDelete_SetButtonAffixDot
--- on every slot even when the item link is unchanged.
+-- natural bag event). Walks visible default Blizzard bag frames, pokes
+-- ElvUI's bag refresh if loaded, and refreshes Bagnon slots when present.
+-- Bumps affixDotVersion so the per-slot link-cache short-circuit above
+-- (and the matching addon UI hooks below) still re-runs
+-- AutoDelete_SetButtonAffixDot on every slot even when the item link is
+-- unchanged.
 --
 -- WARNING: do NOT call this function from BAG_UPDATE or any other
 -- per-event path. ElvUI's B:UpdateAllBagSlots() is a full bag-UI
@@ -5599,6 +5669,9 @@ function _G.AutoDelete_RefreshAffixDots()
 		local B = E:GetModule("Bags")
 		if B and B.UpdateAllBagSlots then B:UpdateAllBagSlots() end
 	end)
+	if _G.Bagnon and _G.AutoDelete_RefreshBagnonAffixDots then
+		_G.AutoDelete_RefreshBagnonAffixDots()
+	end
 end
 
 -- ElvUI bag dot support. Prefer the Blizzard ContainerFrame_Update path
@@ -5680,6 +5753,113 @@ local function InstallElvUIAffixDotHook()
 		if B.UpdateAllBagSlots then
 			pcall(B.UpdateAllBagSlots, B)
 		end
+	end)
+end
+
+-- Bagnon bag dot support. Bagnon renders player bags through its own
+-- BagnonItemSlot buttons and does not repaint through the default visible
+-- ContainerFrame path. This adapter is intentionally AutoDelete-side only:
+-- it observes Bagnon's item-slot/frame APIs and skips every cached, bank,
+-- keyring, guild bank, and non-current-player view.
+function _G.AutoDelete_GetBagnonLiveBagSlot(button)
+	if not button or not _G.Bagnon then return nil, nil, nil end
+
+	if button.GetFrameID then
+		local ok, frameID = pcall(button.GetFrameID, button)
+		if not ok or frameID ~= "inventory" then return nil, nil, nil end
+	end
+
+	if button.GetPlayer and UnitName then
+		local ok, player = pcall(button.GetPlayer, button)
+		if ok and player and player ~= UnitName("player") then
+			return nil, nil, nil
+		end
+	end
+
+	if button.IsCached then
+		local ok, cached = pcall(button.IsCached, button)
+		if ok and cached then return nil, nil, nil end
+	end
+
+	local bag, slot
+	if button.GetBag then
+		local ok, value = pcall(button.GetBag, button)
+		if ok then bag = value end
+	end
+	if button.GetID then
+		local ok, value = pcall(button.GetID, button)
+		if ok then slot = value end
+	end
+	if type(bag) ~= "number" or type(slot) ~= "number" then return nil, nil, nil end
+	if bag < 0 or bag > (NUM_BAG_SLOTS or 4) or slot < 1 then return nil, nil, nil end
+
+	return bag, slot, GetContainerItemLink(bag, slot)
+end
+
+function _G.AutoDelete_UpdateBagnonSlotDot(button)
+	if not button then return end
+	if _G.AutoDelete_SpikeDebug then
+		local c = _G.AutoDelete_SpikeCounters
+		local sess = _G.AutoDelete_SpikeSession
+		c.updSlot    = (c.updSlot or 0) + 1
+		sess.updSlot = (sess.updSlot or 0) + 1
+	end
+
+	local _p = AutoDelete_PerfBegin("Bagnon:ItemSlot hook")
+	local bag, slot, link = _G.AutoDelete_GetBagnonLiveBagSlot(button)
+	if not bag or not slot then
+		button._autoDeleteCachedLink = nil
+		button._autoDeleteAffixVersion = affixDotVersion
+		AutoDelete_SetButtonAffixDot(button, false)
+		AutoDelete_PerfEnd("Bagnon:ItemSlot hook", _p)
+		return
+	end
+
+	if button._autoDeleteCachedLink == link
+		and button._autoDeleteAffixVersion == affixDotVersion then
+		AutoDelete_PerfEnd("Bagnon:ItemSlot hook", _p)
+		return
+	end
+
+	button._autoDeleteCachedLink = link
+	button._autoDeleteAffixVersion = affixDotVersion
+	if not link then
+		AutoDelete_SetButtonAffixDot(button, false)
+		AutoDelete_PerfEnd("Bagnon:ItemSlot hook", _p)
+		return
+	end
+
+	local level, color = _G.AutoDelete_DecideDot(link, bag, slot, button)
+	AutoDelete_SetButtonAffixDot(button, level, color)
+	AutoDelete_PerfEnd("Bagnon:ItemSlot hook", _p)
+end
+
+function _G.AutoDelete_RefreshBagnonAffixDots()
+	pcall(function()
+		if not _G.Bagnon or not _G.Bagnon.GetFrame then return end
+		local frame = _G.Bagnon:GetFrame("inventory")
+		if not frame or (frame.IsShown and not frame:IsShown()) then return end
+		if not frame.GetItemFrame then return end
+		local itemFrame = frame:GetItemFrame()
+		if not itemFrame or not itemFrame.GetAllItemSlots then return end
+		for _, button in itemFrame:GetAllItemSlots() do
+			_G.AutoDelete_UpdateBagnonSlotDot(button)
+		end
+	end)
+end
+
+function _G.AutoDelete_InstallBagnonAffixDotHook()
+	if _G.AutoDelete_BagnonAffixDotHookInstalled then return true end
+	return pcall(function()
+		if not _G.Bagnon or not _G.Bagnon.ItemSlot or not _G.Bagnon.ItemSlot.Update then
+			return false
+		end
+		hooksecurefunc(_G.Bagnon.ItemSlot, "Update", function(button)
+			_G.AutoDelete_UpdateBagnonSlotDot(button)
+		end)
+		_G.AutoDelete_BagnonAffixDotHookInstalled = true
+		_G.AutoDelete_RefreshBagnonAffixDots()
+		return true
 	end)
 end
 
@@ -6702,13 +6882,14 @@ local function SellItems(silent)
 
 					-- ============================================================
 					-- SELL DECISION CHAIN (this function handles vendoring only;
-					-- Auto-Delete Junk/Common live in the delete scanner).
+					-- Delete Junk and Del-selected quality rows live in the
+					-- delete scanner).
 					--
 					-- Priority order (highest first):
 					--   1. Keep list  - always wins, skips everything below
 					--   2. Sell list  - explicit user intent (overrides quest protection)
 					--   3. Sell Known Recipes protection/sell - tooltip-confirmed only
-					--   4. Greens     - auto-sell, gear only, skips quest items
+					--   4. Common/Greens/Rares - auto-sell, gear only, skips quest items
 					--   5. BoE Weapons - Rare/Epic, iLvl gated, skips quest items
 					--   6. BoP         - Rare/Epic, iLvl gated, skips quest items
 					--   7. BoE Armor   - Rare/Epic, iLvl gated, skips quest items
@@ -6716,7 +6897,7 @@ local function SellItems(silent)
 					-- ============================================================
 
 					local shouldSell = false
-					local sellReason = nil   -- "list" | "knownRecipe" | "greens" | "boeArmor" | "bop" | "boeWeapons"
+					local sellReason = nil   -- "list" | "knownRecipe" | "common" | "greens" | "rares" | "boeArmor" | "bop" | "boeWeapons"
 					local itemId = GetItemIDFromLink(itemLink)
 					local onSellList = (itemId and sellIDs[itemId]) or (name and sellNames[Normalize(name)])
 					local recipeAction, recipeReason, recipeRule, recipeState, recipeQualityEnabled = nil, nil, nil, nil, nil
@@ -6740,12 +6921,12 @@ local function SellItems(silent)
 							local blockedSourceRule = nil
 							if onSellList then
 								blockedSourceRule = "Sell list"
-							elseif not isQuestItem and itemQuality == 0 and profile.qualityActionJunk == "sell" then
-								blockedSourceRule = "Auto Actions: Junk sell"
 							elseif not isQuestItem and itemQuality == 1 and isGearItem and profile.qualityActionCommon == "sell" then
 								blockedSourceRule = "Auto Actions: Common gear sell"
 							elseif not isQuestItem and itemQuality == 2 and isGearItem and profile.qualityActionGreens == "sell" then
 								blockedSourceRule = "Auto Actions: Green gear sell"
+							elseif not isQuestItem and itemQuality == 3 and isGearItem and profile.qualityActionRares == "sell" then
+								blockedSourceRule = "Auto Actions: Rare gear sell"
 							end
 							if _G.AutoDelete_RecordDecision and blockedSourceRule then
 								_G.AutoDelete_RecordDecision({
@@ -6781,23 +6962,18 @@ local function SellItems(silent)
 						-- item only sells if Step 2 matched it explicitly.
 						if recipeAction ~= "protect" and not shouldSell and not isQuestItem then
 
-							-- Step 3: Tri-state quality filters (Junk / Common /
-							-- Greens). When a quality is set to "sell", items
+							-- Step 3: Tri-state gear quality filters (Common /
+							-- Greens / Rares). When a quality is set to "sell", gear
 							-- of that quality are vendored from this loop.
 							-- When set to "delete" they're handled by the
 							-- delete scanner; "off" skips entirely.
 							--
-							-- Junk (quality 0): any item type. Junk is universally
-							-- vendor-trash; no gear-only restriction.
 							-- Common (quality 1): gear only (matches the old
 							-- Auto-Delete Common semantics -- selling a stack of
 							-- white reagents on a "Sell Common" toggle would be
 							-- surprising and destructive).
 							-- Greens (quality 2): gear only, same as before.
-							if not shouldSell and itemQuality == 0
-								and profile.qualityActionJunk == "sell" then
-								shouldSell = true; sellReason = "junk"
-							end
+							-- Rares (quality 3): gear only, same safety gate.
 							if not shouldSell and itemQuality == 1 and isGearItem
 								and profile.qualityActionCommon == "sell" then
 								shouldSell = true; sellReason = "common"
@@ -6805,6 +6981,10 @@ local function SellItems(silent)
 							if not shouldSell and itemQuality == 2 and isGearItem
 								and profile.qualityActionGreens == "sell" then
 								shouldSell = true; sellReason = "greens"
+							end
+							if not shouldSell and itemQuality == 3 and isGearItem
+								and profile.qualityActionRares == "sell" then
+								shouldSell = true; sellReason = "rares"
 							end
 
 							-- Steps 4-6: Sell-tab category sections. Each is
@@ -6852,12 +7032,12 @@ local function SellItems(silent)
 						local blockedSourceRule = nil
 						if onSellList then
 							blockedSourceRule = "Sell list"
-						elseif not isQuestItem and itemQuality == 0 and profile.qualityActionJunk == "sell" then
-							blockedSourceRule = "Auto Actions: Junk sell"
 						elseif not isQuestItem and itemQuality == 1 and isGearItem and profile.qualityActionCommon == "sell" then
 							blockedSourceRule = "Auto Actions: Common gear sell"
 						elseif not isQuestItem and itemQuality == 2 and isGearItem and profile.qualityActionGreens == "sell" then
 							blockedSourceRule = "Auto Actions: Green gear sell"
+						elseif not isQuestItem and itemQuality == 3 and isGearItem and profile.qualityActionRares == "sell" then
+							blockedSourceRule = "Auto Actions: Rare gear sell"
 						end
 						if blockedSourceRule then
 							_G.AutoDelete_RecordDecision({
@@ -6923,9 +7103,9 @@ local function SellItems(silent)
 								reason = "Vendor sale executed",
 								sourceRule = (sellReason == "list" and "Sell list")
 									or (sellReason == "knownRecipe" and "Sell Filters: Sell Known Recipes")
-									or (sellReason == "junk" and "Auto Actions: Junk sell")
 									or (sellReason == "common" and "Auto Actions: Common gear sell")
 									or (sellReason == "greens" and "Auto Actions: Green gear sell")
+									or (sellReason == "rares" and "Auto Actions: Rare gear sell")
 									or (sellReason == "boeWeapons" and "Sell Filters: BoE Weapons")
 									or (sellReason == "bop" and "Sell Filters: BoP")
 									or (sellReason == "boeArmor" and "Sell Filters: BoE Armor")
@@ -7155,6 +7335,287 @@ local function CreateElvUIBagButton()
 			_G.AutoDelete_AddToKeepList()
 		end
 	end)
+end
+
+function _G.AutoDelete_CreateBagnonBagButtons()
+	return pcall(function()
+		if not _G.Bagnon or not _G.Bagnon.GetFrame then return false end
+		local bagFrame = _G.Bagnon:GetFrame("inventory") or _G.BagnonFrameinventory
+		if not bagFrame then return false end
+
+		local C_BAG_BUTTON_BG = { 0, 0, 0, 0.6 }
+		local C_BAG_BUTTON_BORDER = { 0.20, 0.20, 0.20, 1 }
+		local C_BAG_BUTTON_BORDER_HOVER = { 0.40, 0.40, 0.40, 1 }
+		local C_TOOLTIP_TITLE = { 0.247, 0.780, 0.922 }
+		local C_TOOLTIP_TEXT = { 1, 1, 1 }
+		local C_TOOLTIP_WARN = { 1, 0.30, 0.30 }
+
+		local btn = _G.AutoDelete_BagnonBagBtn
+		if not btn then
+			btn = CreateFrame("Button", "AutoDelete_BagnonBagBtn", bagFrame)
+			_G.AutoDelete_BagnonBagBtn = btn
+			btn:SetSize(20, 20)
+			btn:SetBackdrop({
+				bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+				edgeFile = "Interface\\Buttons\\WHITE8x8",
+				tile = false, tileSize = 16, edgeSize = 1,
+				insets = { left = 1, right = 1, top = 1, bottom = 1 }
+			})
+			local icon = btn:CreateTexture(nil, "ARTWORK")
+			icon:SetPoint("TOPLEFT", 2, -2)
+			icon:SetPoint("BOTTOMRIGHT", -2, 2)
+			icon:SetTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Up")
+			btn._autoDeleteIcon = icon
+			btn:RegisterForDrag("LeftButton")
+			btn:RegisterForClicks("AnyUp")
+			btn:SetScript("OnReceiveDrag", function() _G.AutoDelete_AddToDeleteList() end)
+			btn:SetScript("OnMouseUp", function(self, button)
+				if button == "RightButton" then
+					_G.AutoDelete_OpenPanelToList("delete")
+				elseif CursorHasItem() then
+					_G.AutoDelete_AddToDeleteList()
+				end
+			end)
+			btn:SetScript("OnEnter", function(self)
+				GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT")
+				GameTooltip:AddLine("AutoDelete", unpack(C_TOOLTIP_TITLE))
+				GameTooltip:AddLine("Drop item to add to Delete List.", unpack(C_TOOLTIP_TEXT))
+				GameTooltip:AddLine("Right-click to open settings.", unpack(C_TOOLTIP_TEXT))
+				GameTooltip:Show()
+				self:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER_HOVER))
+				if self._autoDeleteIcon then self._autoDeleteIcon:SetVertexColor(1, 0.2, 0.2) end
+			end)
+			btn:SetScript("OnLeave", function(self)
+				GameTooltip:Hide()
+				self:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER))
+				if self._autoDeleteIcon then self._autoDeleteIcon:SetVertexColor(1, 1, 1) end
+			end)
+		end
+		btn:SetParent(bagFrame)
+		btn:ClearAllPoints()
+		btn:SetPoint("TOPRIGHT", bagFrame, "TOPRIGHT", -126, -8)
+		btn:SetBackdropColor(unpack(C_BAG_BUTTON_BG))
+		btn:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER))
+		btn:Show()
+
+		local sellBtn = _G.AutoDelete_BagnonSellBtn
+		if not sellBtn then
+			sellBtn = CreateFrame("Button", "AutoDelete_BagnonSellBtn", bagFrame)
+			_G.AutoDelete_BagnonSellBtn = sellBtn
+			sellBtn:SetSize(20, 20)
+			sellBtn:SetBackdrop({
+				bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+				edgeFile = "Interface\\Buttons\\WHITE8x8",
+				tile = false, tileSize = 16, edgeSize = 1,
+				insets = { left = 1, right = 1, top = 1, bottom = 1 }
+			})
+			local sellIcon = sellBtn:CreateTexture(nil, "ARTWORK")
+			sellIcon:SetPoint("TOPLEFT", 2, -2)
+			sellIcon:SetPoint("BOTTOMRIGHT", -2, 2)
+			sellIcon:SetTexture("Interface\\Icons\\INV_Misc_Coin_01")
+			sellIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+			sellBtn._autoDeleteIcon = sellIcon
+			sellBtn:RegisterForDrag("LeftButton")
+			sellBtn:RegisterForClicks("AnyUp")
+			sellBtn:SetScript("OnReceiveDrag", function() _G.AutoDelete_AddToSellList() end)
+			sellBtn:SetScript("OnMouseUp", function(self, button)
+				if button == "RightButton" then
+					_G.AutoDelete_OpenPanelToList("sell")
+				elseif CursorHasItem() then
+					_G.AutoDelete_AddToSellList()
+				else
+					SellItems()
+				end
+			end)
+			sellBtn:SetScript("OnEnter", function(self)
+				GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT")
+				GameTooltip:AddLine("Sell Items", unpack(C_TOOLTIP_TITLE))
+				GameTooltip:AddLine("Click to sell at vendor.", unpack(C_TOOLTIP_TEXT))
+				GameTooltip:AddLine("Drop item to add to Sell List.", unpack(C_TOOLTIP_TEXT))
+				GameTooltip:AddLine("Right-click to open settings.", unpack(C_TOOLTIP_TEXT))
+				if not MerchantFrame or not MerchantFrame:IsShown() then
+					GameTooltip:AddLine("Not at a vendor.", unpack(C_TOOLTIP_WARN))
+				end
+				GameTooltip:Show()
+				self:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER_HOVER))
+				if self._autoDeleteIcon then self._autoDeleteIcon:SetVertexColor(1, 1, 0.6) end
+			end)
+			sellBtn:SetScript("OnLeave", function(self)
+				GameTooltip:Hide()
+				self:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER))
+				if self._autoDeleteIcon then self._autoDeleteIcon:SetVertexColor(1, 1, 1) end
+			end)
+		end
+		sellBtn:SetParent(bagFrame)
+		sellBtn:ClearAllPoints()
+		sellBtn:SetPoint("LEFT", btn, "RIGHT", 4, 0)
+		sellBtn:SetBackdropColor(unpack(C_BAG_BUTTON_BG))
+		sellBtn:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER))
+		sellBtn:Show()
+
+		local keepBtn = _G.AutoDelete_BagnonKeepBtn
+		if not keepBtn then
+			keepBtn = CreateFrame("Button", "AutoDelete_BagnonKeepBtn", bagFrame)
+			_G.AutoDelete_BagnonKeepBtn = keepBtn
+			keepBtn:SetSize(20, 20)
+			keepBtn:SetBackdrop({
+				bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+				edgeFile = "Interface\\Buttons\\WHITE8x8",
+				tile = false, tileSize = 16, edgeSize = 1,
+				insets = { left = 1, right = 1, top = 1, bottom = 1 }
+			})
+			local keepIcon = keepBtn:CreateTexture(nil, "ARTWORK")
+			keepIcon:SetPoint("TOPLEFT", 2, -2)
+			keepIcon:SetPoint("BOTTOMRIGHT", -2, 2)
+			keepIcon:SetTexture("Interface\\Icons\\INV_ValentinesBoxOfChocolates02")
+			keepIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+			keepBtn._autoDeleteIcon = keepIcon
+			keepBtn:RegisterForDrag("LeftButton")
+			keepBtn:RegisterForClicks("AnyUp")
+			keepBtn:SetScript("OnReceiveDrag", function() _G.AutoDelete_AddToKeepList() end)
+			keepBtn:SetScript("OnMouseUp", function(self, button)
+				if button == "RightButton" then
+					_G.AutoDelete_OpenPanelToList("whitelist")
+				elseif CursorHasItem() then
+					_G.AutoDelete_AddToKeepList()
+				end
+			end)
+			keepBtn:SetScript("OnEnter", function(self)
+				GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT")
+				GameTooltip:AddLine("Keep List", unpack(C_TOOLTIP_TITLE))
+				GameTooltip:AddLine("Drop item to add to Keep List.", unpack(C_TOOLTIP_TEXT))
+				GameTooltip:AddLine("Right-click to open settings.", unpack(C_TOOLTIP_TEXT))
+				GameTooltip:AddLine("Items on this list are never auto-sold or auto-deleted.", unpack(C_TOOLTIP_TEXT))
+				GameTooltip:Show()
+				self:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER_HOVER))
+				if self._autoDeleteIcon then self._autoDeleteIcon:SetVertexColor(0.6, 0.85, 1) end
+			end)
+			keepBtn:SetScript("OnLeave", function(self)
+				GameTooltip:Hide()
+				self:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER))
+				if self._autoDeleteIcon then self._autoDeleteIcon:SetVertexColor(1, 1, 1) end
+			end)
+		end
+		keepBtn:SetParent(bagFrame)
+		keepBtn:ClearAllPoints()
+		keepBtn:SetPoint("LEFT", sellBtn, "RIGHT", 4, 0)
+		keepBtn:SetBackdropColor(unpack(C_BAG_BUTTON_BG))
+		keepBtn:SetBackdropBorderColor(unpack(C_BAG_BUTTON_BORDER))
+		keepBtn:Show()
+
+		if _G.AutoDelete_ReserveBagnonSearchClickSpace then
+			_G.AutoDelete_ReserveBagnonSearchClickSpace(bagFrame)
+		end
+		return true
+	end)
+end
+
+function _G.AutoDelete_ReserveBagnonSearchClickSpace(bagFrame)
+	return pcall(function()
+		if not bagFrame or not _G.Bagnon then return false end
+		if bagFrame.GetFrameID and bagFrame:GetFrameID() ~= "inventory" then return false end
+
+		local firstButton = _G.AutoDelete_BagnonBagBtn
+		if not firstButton or (firstButton.IsShown and not firstButton:IsShown()) then return false end
+
+		local titleFrame = bagFrame.GetTitleFrame and bagFrame:GetTitleFrame()
+		if not titleFrame then return false end
+
+		titleFrame:ClearAllPoints()
+		local menuButtons = bagFrame.GetMenuButtons and bagFrame:GetMenuButtons()
+		if menuButtons and #menuButtons > 0 then
+			titleFrame:SetPoint("LEFT", menuButtons[#menuButtons], "RIGHT", 4, 0)
+		else
+			titleFrame:SetPoint("TOPLEFT", bagFrame, "TOPLEFT", 8, -8)
+		end
+		titleFrame:SetPoint("RIGHT", firstButton, "LEFT", -4, 0)
+		titleFrame:SetHeight(20)
+
+		local baseLevel = titleFrame.GetFrameLevel and titleFrame:GetFrameLevel()
+		if type(baseLevel) == "number" then
+			firstButton:SetFrameLevel(baseLevel + 2)
+			if _G.AutoDelete_BagnonSellBtn then
+				_G.AutoDelete_BagnonSellBtn:SetFrameLevel(baseLevel + 2)
+			end
+			if _G.AutoDelete_BagnonKeepBtn then
+				_G.AutoDelete_BagnonKeepBtn:SetFrameLevel(baseLevel + 2)
+			end
+		end
+
+		return true
+	end)
+end
+
+function _G.AutoDelete_RefreshBagnonInventoryFrame()
+	AfterDelay(0, function()
+		if not _G.Bagnon then return end
+		if _G.AutoDelete_CreateBagnonBagButtons then
+			_G.AutoDelete_CreateBagnonBagButtons()
+		end
+		if _G.AutoDelete_RefreshBagnonAffixDots then
+			_G.AutoDelete_RefreshBagnonAffixDots()
+		end
+	end)
+end
+
+function _G.AutoDelete_InstallBagnonFrameHooks()
+	if _G.AutoDelete_BagnonFrameHooksInstalled then return true end
+	return pcall(function()
+		if not _G.Bagnon then return false end
+		local usedCallbacks
+		if _G.Bagnon.Callbacks and _G.Bagnon.Callbacks.Listen then
+			local listener = _G.AutoDelete_BagnonFrameListener
+			if not listener then
+				listener = {}
+				_G.AutoDelete_BagnonFrameListener = listener
+				listener.RefreshInventoryFrame = function(_, _, frameID)
+					if frameID == "inventory" then
+						_G.AutoDelete_RefreshBagnonInventoryFrame()
+					end
+				end
+			end
+			_G.Bagnon.Callbacks:Listen(listener, "FRAME_SHOW", listener.RefreshInventoryFrame)
+			_G.Bagnon.Callbacks:Listen(listener, "BAG_FRAME_UPDATE_SHOWN", listener.RefreshInventoryFrame)
+			_G.Bagnon.Callbacks:Listen(listener, "BAG_FRAME_UPDATE_LAYOUT", listener.RefreshInventoryFrame)
+			_G.Bagnon.Callbacks:Listen(listener, "ITEM_FRAME_SIZE_CHANGE", listener.RefreshInventoryFrame)
+			_G.Bagnon.Callbacks:Listen(listener, "BAG_SLOT_SHOW", listener.RefreshInventoryFrame)
+			_G.Bagnon.Callbacks:Listen(listener, "BAG_SLOT_HIDE", listener.RefreshInventoryFrame)
+			usedCallbacks = true
+		end
+		if not usedCallbacks and _G.Bagnon.CreateFrame then
+			hooksecurefunc(_G.Bagnon, "CreateFrame", function(_, frameID)
+				if frameID == "inventory" then
+					_G.AutoDelete_RefreshBagnonInventoryFrame()
+				end
+			end)
+		end
+		if not usedCallbacks and _G.Bagnon.ShowFrame then
+			hooksecurefunc(_G.Bagnon, "ShowFrame", function(_, frameID)
+				if frameID == "inventory" then
+					_G.AutoDelete_RefreshBagnonInventoryFrame()
+				end
+			end)
+		end
+		if not usedCallbacks and _G.Bagnon.Frame and _G.Bagnon.Frame.Layout then
+			hooksecurefunc(_G.Bagnon.Frame, "Layout", function(frame)
+				if frame and frame.GetFrameID and frame:GetFrameID() == "inventory" then
+					_G.AutoDelete_RefreshBagnonInventoryFrame()
+				end
+			end)
+		end
+		_G.AutoDelete_BagnonFrameHooksInstalled = true
+		_G.AutoDelete_CreateBagnonBagButtons()
+		return true
+	end)
+end
+
+function _G.AutoDelete_InstallBagnonCompatibility()
+	if not _G.Bagnon then return false end
+	_G.AutoDelete_InstallBagnonAffixDotHook()
+	_G.AutoDelete_InstallBagnonFrameHooks()
+	_G.AutoDelete_CreateBagnonBagButtons()
+	_G.AutoDelete_RefreshBagnonAffixDots()
+	return true
 end
 
 -- ============================================================================
@@ -8907,6 +9368,9 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 	elseif not isQuestItem and itemQuality == 2 and profile.qualityActionGreens == "delete"
 		and isDeleteGearItem and not IsCosmeticSlot(link) then
 		deleteRule = "Auto Actions: Green gear delete"
+	elseif not isQuestItem and itemQuality == 3 and profile.qualityActionRares == "delete"
+		and isDeleteGearItem and not IsCosmeticSlot(link) then
+		deleteRule = "Auto Actions: Rare gear delete"
 	end
 	if deleteRule then
 		if onKeep then
@@ -8935,14 +9399,15 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 			recipeProtectRule = recipeRule
 		elseif onSell then
 			sellRule = "Sell list"
-		elseif not isQuestItem and itemQuality == 0 and profile.qualityActionJunk == "sell" then
-			sellRule = "Auto Actions: Junk sell"
 		elseif not isQuestItem and itemQuality == 1 and isSellGearItem
 			and profile.qualityActionCommon == "sell" then
 			sellRule = "Auto Actions: Common gear sell"
 		elseif not isQuestItem and itemQuality == 2 and isSellGearItem
 			and profile.qualityActionGreens == "sell" then
 			sellRule = "Auto Actions: Green gear sell"
+		elseif not isQuestItem and itemQuality == 3 and isSellGearItem
+			and profile.qualityActionRares == "sell" then
+			sellRule = "Auto Actions: Rare gear sell"
 		elseif not isQuestItem and isSellGearItem and (itemQuality == 3 or itemQuality == 4) then
 			local isBoE = IsBindOnEquip(bag, slot)
 			local rarityIsRare = (itemQuality == 3)
@@ -9413,6 +9878,8 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		table.insert(lines, "  Final: delete. Common gear auto action is Delete.")
 	elseif quality == 2 and profile.qualityActionGreens == "delete" and isDeleteGearItem and not isCosmetic then
 		table.insert(lines, "  Final: delete. Green gear auto action is Delete.")
+	elseif quality == 3 and profile.qualityActionRares == "delete" and isDeleteGearItem and not isCosmetic then
+		table.insert(lines, "  Final: delete. Rare gear auto action is Delete.")
 	else
 		table.insert(lines, "  Final: keep. No delete rule matched.")
 	end
@@ -9441,12 +9908,12 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		table.insert(lines, "  Final: sell at vendor. Explicit Sell list entry matches.")
 	elseif isQuestItem then
 		table.insert(lines, "  Final: keep. Quest item blocks auto-sell.")
-	elseif quality == 0 and profile.qualityActionJunk == "sell" then
-		table.insert(lines, "  Final: sell at vendor. Junk auto action is Sell.")
 	elseif quality == 1 and profile.qualityActionCommon == "sell" and isSellGearItem then
 		table.insert(lines, "  Final: sell at vendor. Common gear auto action is Sell.")
 	elseif quality == 2 and profile.qualityActionGreens == "sell" and isSellGearItem then
 		table.insert(lines, "  Final: sell at vendor. Green gear auto action is Sell.")
+	elseif quality == 3 and profile.qualityActionRares == "sell" and isSellGearItem then
+		table.insert(lines, "  Final: sell at vendor. Rare gear auto action is Sell.")
 	elseif (quality == 3 or quality == 4) and isSellGearItem then
 		if not bag or not slot then
 			table.insert(lines, "  Final: keep for current scan. Rare/Epic sell categories require a bag slot to read BoE/BoP state.")
@@ -9641,6 +10108,7 @@ function _G.AutoDelete_BuildDiagnosticReport()
 		"  ElvUI junk coin hidden: " .. tostring(_G.AutoDelete_ElvUIJunkIconState and _G.AutoDelete_ElvUIJunkIconState.active or false),
 		"  Common: " .. tostring(profile.qualityActionCommon),
 		"  Greens: " .. tostring(profile.qualityActionGreens),
+		"  Rares: " .. tostring(profile.qualityActionRares),
 		"",
 		"Recipe filters:",
 		"  Sell Known Recipes: " .. tostring(profile.knownRecipeSellEnabled),
@@ -10857,6 +11325,12 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 			_G._AutoDelete_NeedMigrationNotice = nil
 			print("|cffff8000[AutoDelete]|r |cffffff00Sell rules updated:|r the old Sell Filters/Conditions split has been replaced with per-category sections (BoE Armor, BoP, BoE Weapons). Your existing settings were migrated. Open |cff00ff00/del|r and review the Sell tab.")
 		end
+		if _G._AutoDelete_NeedJunkActionNotice then
+			local migratedJunkSell = _G._AutoDelete_NeedJunkActionNotice
+			_G._AutoDelete_NeedJunkActionNotice = nil
+			print("|cffff8000[AutoDelete]|r |cffffff00Auto Actions updated:|r Junk Sell was removed from the options panel and set to Off for " ..
+				tostring(migratedJunkSell) .. " profile(s). Use General > Delete Junk if you want gray items deleted.")
+		end
 
 		-- Keep bags open when the vendor closes. Diagnostic trace on PE-ElvUI
 		-- showed the call order is:
@@ -10934,6 +11408,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 			-- Last-resort compatibility path for ElvUI's replacement bag UI.
 			-- Default Blizzard bags use ContainerFrame_Update above.
 			InstallElvUIAffixDotHook()
+			if _G.AutoDelete_InstallBagnonCompatibility then
+				_G.AutoDelete_InstallBagnonCompatibility()
+			end
 			if _G.AutoDelete_RefreshElvUIJunkIconSuppression then
 				_G.AutoDelete_RefreshElvUIJunkIconSuppression(cachedProfile)
 			end

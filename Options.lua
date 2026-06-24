@@ -896,11 +896,15 @@ local DEFAULT_PROFILE = {
 	whitelistText = "",
 	keepOneText = "",
 	keepStackText = "",
-	-- 3-state quality filters: "off" | "delete" | "sell"
-	-- Migration: old boolean true → "delete" (user requested default)
-	autoGray = "delete",
+	-- 3-state gear quality filters: "off" | "delete" | "sell".
+	-- Junk is delete-only in the options UI.
+	qualityActionJunk   = "off",
+	qualityActionCommon = "off",
+	qualityActionGreens = "off",
+	qualityActionRares  = "off",
 	scanInterval = 0.5,
-	autoDeleteCommon = "delete",
+	autoGray = false,
+	autoDeleteCommon = false,
 	autoSellGreens    = false,
 	boeArmorEnabled   = false,
 	boeArmorIlvlMin   = 1,
@@ -1018,9 +1022,26 @@ local function EnsureProfileFields(p)
 		p.protectAffixTier5 = true
 	end
 
+	if p.qualityActionJunk == nil and (p.autoGray == true or p.autoGray == "delete") then
+		p.qualityActionJunk = "delete"
+	end
+	if p.qualityActionCommon == nil and (p.autoDeleteCommon == true or p.autoDeleteCommon == "delete") then
+		p.qualityActionCommon = "delete"
+	end
+	if p.qualityActionGreens == nil and p.autoSellGreens == true then
+		p.qualityActionGreens = "sell"
+	end
+
 	for k, v in pairs(DEFAULT_PROFILE) do
 		if p[k] == nil then p[k] = v end
 	end
+	if p.qualityActionJunk == "sell" then
+		_G._AutoDelete_NeedJunkActionNotice = (_G._AutoDelete_NeedJunkActionNotice or 0) + 1
+	end
+	if p.qualityActionJunk ~= "delete" then p.qualityActionJunk = "off" end
+	if p.qualityActionCommon ~= "delete" and p.qualityActionCommon ~= "sell" then p.qualityActionCommon = "off" end
+	if p.qualityActionGreens ~= "delete" and p.qualityActionGreens ~= "sell" then p.qualityActionGreens = "off" end
+	if p.qualityActionRares ~= "delete" and p.qualityActionRares ~= "sell" then p.qualityActionRares = "off" end
 	if p.missingAffixColor ~= "red"
 		and p.missingAffixColor ~= "gold"
 		and p.missingAffixColor ~= "mage"
@@ -1201,7 +1222,7 @@ end
 -- ============================================================================
 
 local frame = CreateFrame("Frame", "AutoDeleteFrame", UIParent)
-frame:SetSize(580, 840)   -- 540+40 to give cards more breathing room
+frame:SetSize(580, 882)   -- 840 + 42px for the taller Sell-tab gear cards
 frame:SetPoint("CENTER")
 frame:SetFrameStrata("DIALOG")
 frame:SetFrameLevel(100)
@@ -3534,8 +3555,8 @@ local function BuildUI(self)
 	--   2. Sell rules - note banner + recipe section + three category cards
 	--   3. Scan Options - Delete / Sell / Keep list-mode tabs
 	--   4. Search & Manage - search row + active list view
-	-- The Auto-Delete Junk / Common and Auto-Sell Greens toggles live INSIDE
-	-- Section 1's General tab (card 2), not as a standalone section.
+	-- Delete Junk lives in Section 1's General tab. Common / Greens / Rares
+	-- live in Section 1's Filters tab Auto Actions card.
 	-- ========================================================================
 	-- ========================================================================
 	-- GRID (everything anchors to these positions)
@@ -3702,10 +3723,9 @@ local function BuildUI(self)
 
 	-- ========================================================================
 	-- GENERAL TAB: 3 cards horizontally:
-	--   Card 1: Enable Addon + Auto-Add Equipped + Auto-Repair (+ guild bank
-	--           sub-toggle indented under Auto-Repair)
+	--   Card 1: Enable Addon + Auto-Add Equipped + Delete Junk
 	--   Card 2: Process Bags     (title + live count + Open Panel button)
-	--   Card 3: Scan Speed       (dropdown + help text + detailed tooltip)
+	--   Card 3: Scan Speed       (dropdown + Auto-Repair dropdown)
 	-- Content area is 100px tall; cards occupy 92px with 4px top/bottom margins.
 	-- ========================================================================
 	local generalPage = tabPages.general
@@ -3732,14 +3752,10 @@ local function BuildUI(self)
 
 	-- Card 1 (Option B reorg per user request 2026-05-20):
 	--   Row 1: Enable Addon  (master toggle; description dropped from the
-	--          card to make room for Auto-Repair below -- the hover tooltip
-	--          still carries the full explanation)
+	--          card to make room for dense controls -- the hover tooltip still
+	--          carries the full explanation)
 	--   Row 2: Auto-Add Equipped
-	--   Row 3: Auto-Repair      (master)
-	--   Row 3-sub: Use Guild Bank money (16px sub-toggle, indented)
-	-- 3 main rows + 1 sub-row fit in cardH=92 with 4px slack.
-	-- Sub-toggle indent matches MakeSubToggle convention (parent box+gap=32).
-	local SUBTGL_INDENT_GEN = CARD_INNER_PAD_X + 14 + 8
+	--   Row 3: Delete Junk
 
 	local tglEnable = MakeToggle(card1, "Enable Addon", C_ACCENT,
 		"Turns AutoDelete on. When this is off, it will not sell or delete items. Auto-Invite and Hide Greedy Spam still work.")
@@ -3753,17 +3769,11 @@ local function BuildUI(self)
 	tglAutoAddEquipped:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglAutoAddEquipped = tglAutoAddEquipped
 
-	local tglRepair = MakeToggle(card1, "Auto-Repair", C_ACCENT,
-		"Repairs your gear when you talk to a repair vendor.")
-	tglRepair:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
-	tglRepair:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglRepair = tglRepair
-
-	local tglRepairGuild = MakeSubToggle(card1, "Use Guild Bank money", C_DK_RED,
-		"Use guild gold for repairs if you can. If not, your own gold is used.")
-	tglRepairGuild:SetPoint("TOPLEFT", SUBTGL_INDENT_GEN, -(CARD_INNER_PAD_Y + 66))
-	tglRepairGuild:SetWidth(cardW - SUBTGL_INDENT_GEN - CARD_INNER_PAD_X)
-	self._tglRepairGuild = tglRepairGuild
+	local tglDeleteJunk = MakeToggle(card1, "Delete Junk", C_RED,
+		"Delete gray-quality junk during bag scans. Keep and quest items stay safe.")
+	tglDeleteJunk:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
+	tglDeleteJunk:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglDeleteJunk = tglDeleteJunk
 
 	-- Card 2: Process Bags launcher (moved from Filters -> Card 3 per the
 	-- Option B reorg). General tab now carries the "I want to actively run
@@ -3840,40 +3850,55 @@ local function BuildUI(self)
 		end
 	end
 
-	-- Card 3: Scan Speed (dot toggles moved to Filters -> Affix Display per
-	-- the Option B reorg). Card now has just the dropdown + a couple of
-	-- help lines + a detailed hover tooltip explaining the trade-off.
-	-- "Nobody knows what it does" was the original feedback that triggered
-	-- this rewrite -- the in-card description spells out concretely what
-	-- the scan does and the hover tooltip spells out the trade-off.
-	local scanSpeedCard = card3
-	local speedLabel = MakeText(scanSpeedCard, 10, C_TEXT, "OUTLINE")
-	speedLabel:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y - 2)
-	speedLabel:SetText("Scan Speed")
+	-- Card 3: Scan Speed plus Auto-Repair. The card is 92px tall; the two
+	-- 22px dropdowns sit at y=-20 and y=-64, leaving bottom padding.
+	local speedDD
+	local repairDD
+	do
+		local scanSpeedCard = card3
+		local speedLabel = MakeText(scanSpeedCard, 10, C_TEXT, "OUTLINE")
+		speedLabel:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y - 2)
+		speedLabel:SetText("Scan Speed")
 
-	local speedOpts = {
-		{ value = 0.5, label = "0.5 sec" }, { value = 0.75, label = "0.75 sec" },
-		{ value = 1, label = "1 sec" }, { value = 5, label = "5 sec" },
-		{ value = 10, label = "10 sec" }, { value = 30, label = "30 sec" },
-		{ value = 60, label = "1 min" }, { value = 120, label = "2 min" },
-		{ value = 300, label = "5 min" },
-	}
-	local speedDD = MakeDropdown(scanSpeedCard, cardW - CARD_INNER_PAD_X * 2, speedOpts, function(val)
-		local p = GetActiveProfile(db)
-		p.scanInterval = val
-	end, "Choose how often AutoDelete checks your bags. Faster checks feel quicker but use a little more CPU.", "Scan Speed")
-	speedDD:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 14))
-	self._speedDD = speedDD
+		local speedOpts = {
+			{ value = 0.5, label = "0.5 sec" }, { value = 0.75, label = "0.75 sec" },
+			{ value = 1, label = "1 sec" }, { value = 5, label = "5 sec" },
+			{ value = 10, label = "10 sec" }, { value = 30, label = "30 sec" },
+			{ value = 60, label = "1 min" }, { value = 120, label = "2 min" },
+			{ value = 300, label = "5 min" },
+		}
+		speedDD = MakeDropdown(scanSpeedCard, cardW - CARD_INNER_PAD_X * 2, speedOpts, function(val)
+			local p = GetActiveProfile(db)
+			p.scanInterval = val
+		end, "Choose how often AutoDelete checks your bags. Faster checks feel quicker but use a little more CPU.", "Scan Speed")
+		speedDD:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 14))
+		self._speedDD = speedDD
 
-	-- In-card description (2 lines, dim, wrapped) summarizing what the
-	-- option controls. Sits below the dropdown so the card visually
-	-- balances and the user has a hint without needing to hover.
-	local speedHelp = MakeText(scanSpeedCard, 9, C_DIM, "OUTLINE")
-	speedHelp:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 42))
-	speedHelp:SetPoint("TOPRIGHT", scanSpeedCard, "TOPRIGHT", -CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 42))
-	speedHelp:SetJustifyH("LEFT")
-	speedHelp:SetWordWrap(true)
-	speedHelp:SetText("How often bags are checked against your Delete and Sell lists.")
+		local repairLabel = MakeText(scanSpeedCard, 10, C_TEXT, "OUTLINE")
+		repairLabel:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 46))
+		repairLabel:SetText("Auto-Repair")
+
+		local repairOpts = {
+			{ value = "none", label = "None" },
+			{ value = "player", label = "Player" },
+			{ value = "guild", label = "Guild" },
+		}
+		repairDD = MakeDropdown(scanSpeedCard, cardW - CARD_INNER_PAD_X * 2, repairOpts, function(val)
+			local p = GetActiveProfile(db)
+			if val == "guild" then
+				p.autoRepair = true
+				p.autoRepairUseGuildBank = true
+			elseif val == "player" then
+				p.autoRepair = true
+				p.autoRepairUseGuildBank = false
+			else
+				p.autoRepair = false
+				p.autoRepairUseGuildBank = false
+			end
+		end, "Choose repair behavior: None disables repairs, Player spends your gold, and Guild uses guild repair funds when available.", "Auto-Repair")
+		repairDD:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 58))
+		self._repairDD = repairDD
+	end
 
 	-- ========================================================================
 	-- HELP TAB: topic buttons, each opening a formatted help popup.
@@ -3892,7 +3917,7 @@ local function BuildUI(self)
 				sections = {
 					{ icon = "Interface\\Icons\\INV_Misc_Gear_01", title = "Enable Addon", body = "The master switch on the General tab. While it is off, nothing is auto-deleted or auto-sold. Auto-Invite and Hide Greedy Spam keep working either way." },
 					{ icon = "Interface\\Icons\\Ability_Defend", title = "Auto-Add Equipped", body = "Adds gear you equip to your Keep list so it is never sold or deleted by mistake. Shirts and tabards are skipped. Click it again after you change gear or copy a profile." },
-					{ icon = "Interface\\Icons\\Ability_Repair", title = "Auto-Repair", body = "Repairs your gear whenever you talk to a vendor. Turn on Use Guild Bank money below it to pay from the guild bank first when you can." },
+					{ icon = "Interface\\Icons\\Ability_Repair", title = "Auto-Repair", body = "Repairs your gear whenever you talk to a vendor. Choose None to disable it, Player to use your own gold, or Guild to use guild repair funds when available." },
 					{ icon = "Interface\\Icons\\INV_Misc_Bag_10_Black", title = "Process Bags", body = "Open Panel opens the Process Bags window, a separate list of every bag item ready for One-Key Disenchant, Mill, Prospect, or Open. The card also shows a live count." },
 					{ icon = "Interface\\Icons\\INV_Misc_PocketWatch_01", title = "Scan Speed", body = "How often your bags are checked against the Delete and Sell lists. Fast clears matches almost instantly, slow is quieter in the background. Vendor selling always runs when a merchant opens." },
 					{ icon = "Interface\\Icons\\INV_Scroll_06", title = "Recipe Safety", body = "Sell Known Recipes lives on the Sell Filters tab. When enabled, recipe-like items are checked with their bag tooltip; only Already known recipes whose quality toggle is on can auto-sell." },
@@ -3931,7 +3956,7 @@ local function BuildUI(self)
 				label = "Filters",
 				title = "Filters",
 				sections = {
-					{ icon = "Interface\\Icons\\INV_Broom_01", title = "Auto Actions", body = "Sets Junk, Common, and Greens each to Del or Sell, or leaves them off. |cffbf3838Del deletes matching items on bag scans|r, Sell vendors them. Keep-list and quest items are always safe. If ElvUI is loaded, Junk Del hides ElvUI's junk coin while active." },
+					{ icon = "Interface\\Icons\\INV_Broom_01", title = "Auto Actions", body = "Sets Common, Greens, and Rares each to Del or Sell, or leaves them off. Junk delete is a separate checkbox on the General tab. |cffbf3838Del deletes matching gear on bag scans|r, Sell vendors it. Keep-list and quest items are always safe." },
 					{ icon = "Interface\\Icons\\INV_Enchant_ShardGlimmering", title = "DE Filters", body = "Controls which items One-Key Disenchant will target, by bind state (BoP, BoE), quality (Unc, Rare, Epic), and the iLvl range. Keep, KeepOne, KeepStack, and Affix rules still protect items." },
 					{ icon = "Interface\\Icons\\Spell_Shadow_DetectInvisibility", title = "Ignored Items", body = "Manage Ignored opens the list of items you marked Ignore on the Keep-list popup. Ignore only hides an item from Process Bags, it is not protection from cleanup." },
 				}
@@ -4396,26 +4421,22 @@ local function BuildUI(self)
 	local aCard2 = MakeAffixCard(cardW + CARD_GAP)
 	local aCard3 = MakeAffixCard((cardW + CARD_GAP) * 2)
 
-	-- Filters Card 1: Auto Actions. Each quality (Junk / Common / Greens)
-	-- is an independent segmented control showing Del / Sell pills (Greens
-	-- shows Sell only -- deleting greens by quality is rarely the intended
-	-- outcome; if a user wants that they can put a specific green on the
-	-- Delete list explicitly). The default state for every row is "off"
-	-- (no pill highlighted). Clicking a pill activates that action;
-	-- clicking the active pill again deselects (back to off). Colors
-	-- follow the semantic palette: red for delete, blue for sell.
+	-- Filters Card 1: Auto Actions. Common / Greens / Rares are independent
+	-- segmented controls showing Del / Sell pills. Junk moved to a delete-only
+	-- checkbox on General Card 1 so this card can fit the blue-quality row.
+	-- The default state for every row is "off" (no pill highlighted). Clicking
+	-- a pill activates that action; clicking the active pill again deselects
+	-- (back to off). Colors follow the semantic palette: red for delete, blue
+	-- for sell.
 	-- Migration from the old three-checkbox layout (autoGray /
 	-- autoDeleteCommon / autoSellGreens booleans) runs at PLAYER_LOGIN
-	-- in RunDBMigrations v3. v4 normalizes any legacy
-	-- qualityActionGreens=="delete" back to "off" since Greens has no
-	-- Delete pill in this UI -- without the migration the stored "delete"
-	-- would render as no-pill-active (visually equivalent to off), but
-	-- it's cleaner to normalize the data than leave the gotcha lying.
+	-- in RunDBMigrations v3. v4 is a no-op now because Greens Delete was
+	-- restored before release.
 	--
 	-- Wrapped in `do ... end` so the per-state tables, helper, and three
 	-- pill locals don't bump BuildUI past Lua 5.1's 200-local cap. The
-	-- segmented controls themselves survive on self._pillJunk/_pillCommon/
-	-- _pillGreens for state restore in Refresh and the OnClick handlers
+	-- segmented controls themselves survive on self._pillCommon/
+	-- _pillGreens/_pillRares for state restore in Refresh and the OnClick handlers
 	-- below.
 	do
 	local card1Title = MakeText(tCard1, 11, C_ACCENT, "OUTLINE")
@@ -4492,20 +4513,12 @@ local function BuildUI(self)
 
 	-- Three rows, anchored at the standard CARD_ROW1/2/3 y-positions so
 	-- they line up with widgets on Cards 2 and 3 (uniformity rule).
-	local pillJunk = MakeQualityRow(
-		"Junk",
-		"qualityActionJunk",
-		QUALITY_STATES_DEL_SELL,
-		"Gray-quality poor items. Keep, quest items, shirts, and tabards stay safe.",
-		-24)
-	self._pillJunk = pillJunk
-
 	local pillCommon = MakeQualityRow(
 		"Common",
 		"qualityActionCommon",
 		QUALITY_STATES_DEL_SELL,
 		"White-quality gear only. Reagents, consumables, quest items, and Keep items stay safe.",
-		-46)
+		-24)
 	self._pillCommon = pillCommon
 
 	local pillGreens = MakeQualityRow(
@@ -4513,8 +4526,16 @@ local function BuildUI(self)
 		"qualityActionGreens",
 		QUALITY_STATES_DEL_SELL,
 		"Green-quality gear only. Bags, reagents, consumables, quest items, and Keep items stay safe.",
-		-68)
+		-46)
 	self._pillGreens = pillGreens
+
+	local pillRares = MakeQualityRow(
+		"Rares",
+		"qualityActionRares",
+		QUALITY_STATES_DEL_SELL,
+		"Blue-quality gear only. Bags, reagents, consumables, quest items, and Keep items stay safe.",
+		-68)
+	self._pillRares = pillRares
 	end  -- /Filters Card 1: Auto Actions
 
 	-- Affix Tab Card 1: Affix Protection (moved from Filters tab in v3.20).
@@ -5775,17 +5796,16 @@ local function BuildUI(self)
 	-- BoP, and BoE Weapons. Gear cards have Rare/Epic toggles and iLvl range;
 	-- Sell Known Recipes has white/green/blue/purple quality toggles.
 	--
-	-- The Auto-Delete Junk / Auto-Delete Common / Auto-Sell Greens toggles
-	-- live on the General tab (card 2 of the General page), NOT here. They
-	-- aren't categories - they're global, quality-based actions that run
-	-- independently of the category sections.
+	-- Delete Junk lives on the General tab. Common / Greens / Rares live in
+	-- the Filters tab Auto Actions card. They are global, quality-based
+	-- actions that run independently of the category sections.
 	--
 	-- Sell decision priority is implemented in AutoDelete.lua's SellItems.
 	-- Summary (highest first):
 	--   1. Keep list  (always wins)
 	--   2. Sell list  (explicit user intent)
 	--   3. Sell Known Recipes (only tooltip-confirmed Already known recipes)
-	--   4. Auto-Sell Greens (only Greens; Junk and Common are deleted, not sold)
+	--   4. Auto Actions sell rows (Common / Greens / Rares)
 	--   5. BoE Weapons section
 	--   6. BoP section
 	--   7. BoE Armor section (excludes weapon-slot items, which are step 5)
@@ -5821,9 +5841,8 @@ local function BuildUI(self)
 		lblIlvl:SetPoint("TOPLEFT", 15, -42)
 		lblIlvl:SetText("iLvl")
 
-		-- Compute spinner width so both spinners + label + "to" fill the row.
-		-- Rough: card width ~340, minus 30 (margins), minus 32 (label),
-		-- minus 24 (gaps + "to") = ~254. Each spinner = ~120.
+		-- Keep the iLvl spinners compact and stable; the surrounding card stays
+		-- full-width to match the rest of the Sell tab.
 		local SPINNER_W = 100
 
 		local minFrame = MakeSpinnerInput(card, SPINNER_W, 22, 1, 9999, nil,
@@ -5850,10 +5869,12 @@ local function BuildUI(self)
 		}
 	end
 
-	-- Fixed-frame budget at the real 840px frame height:
-	--   yOff -202 - note 30 - recipe section 44 - gear cards 234 - List Mode 72 = -582
-	--   Search & Manage = 840 - 28 - 582 - 8 = 222px, above the 220px minimum.
-	local CARD_H = 56
+	-- Fixed-frame budget at the real 882px frame height:
+	--   yOff -202 - note 30 - recipe section 44 - gear cards 276 - List Mode 72 = -624
+	--   Search & Manage = 882 - 28 - 624 - 8 = 222px, above the 220px minimum.
+	-- Gear-card row math: row 1 is y=-12..-32, row 2 is y=-42..-64, leaving
+	-- 6px bottom padding inside a 70px card.
+	local CARD_H = 70
 	local RECIPE_CARD_H = 22
 
 	-- Info banner above the category cards. Keep this as a note; controls
@@ -6768,16 +6789,18 @@ local function BuildUI(self)
 		GetActiveProfile(db).summonScavenger = btn._checked
 	end)
 
-	-- Goblin tab: Auto-Repair main + Guild Bank sub
-	tglRepair:SetScript("OnClick", function(btn)
+	-- General tab: Delete Junk.
+	tglDeleteJunk:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).autoRepair = btn._checked
-	end)
-	tglRepairGuild:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).autoRepairUseGuildBank = btn._checked
+		local p = GetActiveProfile(db)
+		p.qualityActionJunk = btn._checked and "delete" or "off"
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+		if _G.AutoDelete_RefreshElvUIJunkIconSuppression then
+			_G.AutoDelete_RefreshElvUIJunkIconSuppression(p)
+		end
 	end)
 
 	-- Goblin tab: Summon Scavenger sub-toggles
@@ -7455,13 +7478,17 @@ local function BuildUI(self)
 		-- Quality Filters card now uses cycle pills, not checkboxes.
 		-- Read the tri-state enum field; default to "off" if the migration
 		-- somehow hasn't run yet (defensive; shouldn't happen post-v3).
-		self._pillJunk:SetValue(p.qualityActionJunk or "off")
 		self._pillCommon:SetValue(p.qualityActionCommon or "off")
 		self._pillGreens:SetValue(p.qualityActionGreens or "off")
+		self._pillRares:SetValue(p.qualityActionRares or "off")
 
-		-- General tab: Auto-Repair (Card 2, moved from Goblin tab)
-		tglRepair:SetChecked(p.autoRepair)
-		tglRepairGuild:SetChecked(p.autoRepairUseGuildBank)
+		-- General tab: Auto-Repair dropdown + Delete Junk.
+		if p.autoRepair then
+			repairDD:SetValue(p.autoRepairUseGuildBank and "guild" or "player")
+		else
+			repairDD:SetValue("none")
+		end
+		tglDeleteJunk:SetChecked(p.qualityActionJunk == "delete")
 
 		-- Pets tab: Scavenger + Goblin Merchant + Hide Greedy Spam
 		tglScav:SetChecked(p.summonScavenger)

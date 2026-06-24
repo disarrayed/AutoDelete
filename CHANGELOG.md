@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [3.27] - 2026-06-24
+
+### Added
+
+- AutoDelete now works with Bagnon bags.
+- You can now choose Delete or Sell for blue gear.
+
 ## [3.26.1] - 2026-06-16
 
 ### Hot Fix
