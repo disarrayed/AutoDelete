@@ -1,6 +1,8 @@
 local function reloadRules()
 	_G.AutoDelete_RecipeClassNames = nil
 	_G.AutoDelete_RecipeSubtypeNames = nil
+	_G.AutoDelete_RecipeExcludedNamePrefixes = nil
+	_G.AutoDelete_IsRecipeExcludedItem = nil
 	_G.AutoDelete_IsRecipeLikeItem = nil
 	_G.AutoDelete_IsKnownRecipeQualityEnabled = nil
 	_G.AutoDelete_GetRecipeQualityLabel = nil
@@ -39,6 +41,14 @@ describe("Sell Known Recipes rules", function()
 		assert.is_true(_G.AutoDelete_IsRecipeLikeItem("Trade Goods", "Pattern"))
 		assert.is_true(_G.AutoDelete_IsRecipeLikeItem("Trade Goods", "First Aid"))
 		assert.is_false(_G.AutoDelete_IsRecipeLikeItem("Armor", "Plate"))
+	end)
+
+	it("does not treat Echo tomes as recipes even when their class looks recipe-like", function()
+		assert.is_false(_G.AutoDelete_IsRecipeLikeItem("Recipe", nil, "Tome of Echo: Constellations"))
+		assert.is_false(_G.AutoDelete_IsRecipeLikeItem("Trade Goods", "Inscription", "Tome of Echo: Adaptive Power"))
+		assert.is_false(_G.AutoDelete_IsRecipeLikeItem("Recipe", nil, "Echo Tomb: Battlefield Hazard"))
+		assert.is_false(_G.AutoDelete_IsRecipeLikeItem("Recipe", nil, "|cff0070dd|Hitem:300844::::::::|h[Tome of Echo: Constellations]|h|r"))
+		assert.is_true(_G.AutoDelete_IsRecipeLikeItem("Recipe", nil, "Recipe: Echoing Stew"))
 	end)
 
 	it("maps recipe quality toggles to white, green, blue, and purple", function()
@@ -95,6 +105,14 @@ describe("Sell Known Recipes rules", function()
 		assert.are.equal("Sell Filters: Sell Known Recipes", rule)
 		assert.are.equal("known", state)
 		assert.is_true(qualityEnabled)
+	end)
+
+	it("does not sell Echo tomes through Sell Known Recipes", function()
+		local action =
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile(), 0, 1, "item:300844", "Recipe", nil, 2, false, false, "Tome of Echo: Constellations")
+
+		assert.is_nil(action)
+		assert.is_false(_G.AutoDelete_IsRecipeDeleteProtected(profile(), "Recipe", nil, "Junk", "Tome of Echo: Constellations"))
 	end)
 
 	it("protects known recipes when the quality toggle is off", function()

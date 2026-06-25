@@ -44,9 +44,10 @@ Quest items are protected from every auto-rule, regardless of list state.
 - **Audit Lists** (Profile tab or `/del audit`): copyable report for duplicates, cross-list conflicts, name-only entries, same-name item ID traps, and uncached item IDs. **Fix Safe** removes same-list duplicates and normalizes safe item references only.
 - **Manage Ignored Items** (Filters tab): view and clear the per-item skip list that builds up when you accept Keep-override popups
 
-**ElvUI bag buttons**
-- Three buttons next to your bag frame: Delete, Sell, Keep
-- Drop to add. Right-click to jump to that list's tab.
+**Bag buttons**
+- ElvUI and Bagnon bag windows can show Delete, Sell, and Keep buttons.
+- Drop an item on a button to add it to that list.
+- Right-click a button to jump to that list's tab.
 
 **Sell rules**
 
@@ -57,11 +58,12 @@ Four independent categories.
 - BoP (bind-on-pickup gear)
 - BoE Weapons (bind-on-equip weapon-slot items, priority over BoE Armor)
 
-**Auto Actions** (Filters tab)
-- Per-quality Del / Sell pills for Junk, Common, and Greens
+**Auto Actions** (General and Filters tabs)
+- Delete Junk is a checkbox on the General tab.
+- Common, Greens, and Rares have Del / Sell pills on the Filters tab.
 - Click a pill to light it red (delete) or blue (sell). Click again to turn it off.
-- If ElvUI is loaded, Junk set to Del hides ElvUI's junk coin while that mode is active.
-- Greens defaults to off. Green gear stays in bags unless you opt in.
+- If ElvUI is loaded, Delete Junk hides ElvUI's junk coin while that mode is active.
+- Greens and Rares default to off. Green and blue gear stay in bags unless you opt in.
 - Cosmetic slots (shirts, tabards) and quest items are always protected
 
 **Affix Protection** (Affix tab)
@@ -93,7 +95,7 @@ Four independent categories.
 - Items with the same item ID are grouped together to reduce repeated rows when affix names differ
 - Left-click DE / Mill / Prospect / Open rows to arm that item for the matching keybind
 - Left-click Sell / Delete / Kept rows to open Why?
-- Right-click a row for quick actions: Keep, Sell, Delete, or Why? Ignore for Process appears only for one-key action rows.
+- Right-click a row for quick actions: Keep, Sell, Delete, or Why? Ignore for Process appears only for DE, Mill, and Prospect rows and removes that item from those one-key targets.
 - Alt+Right-click a real bag item for the same quick actions, without changing normal right-click item use
 
 **Why? and report**
@@ -107,7 +109,7 @@ Four independent categories.
 **Quality of life**
 - Minimap button: square AD mark; left-click opens or closes settings, right-click opens a quick menu for safe panels and reports, and drag moves the button
 - Bags stay open when the vendor closes
-- Auto-repair with optional guild bank fallback
+- Auto-repair dropdown with None, Player, and Guild choices
 - Hide Greedy Scavenger spam
 - Auto-invite on whisper keyword, with loot rule and raid conversion options
 - Per-character stats: gold earned, items sold or deleted, repairs, average inventory worth

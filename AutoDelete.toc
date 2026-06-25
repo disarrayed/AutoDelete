@@ -2,7 +2,7 @@
 ## Title: AutoDelete
 ## Notes: Automatically delete and sell specified items from your bags.
 ## Author: Baenre
-## Version: 3.27
+## Version: 3.27.1
 ## OptionalDeps: ProjectEbonhold, Bagnon
 ## SavedVariables: AutoDeleteDB
 ## SavedVariablesPerCharacter: AutoDeleteStatsDB

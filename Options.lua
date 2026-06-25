@@ -3958,7 +3958,7 @@ local function BuildUI(self)
 				sections = {
 					{ icon = "Interface\\Icons\\INV_Broom_01", title = "Auto Actions", body = "Sets Common, Greens, and Rares each to Del or Sell, or leaves them off. Junk delete is a separate checkbox on the General tab. |cffbf3838Del deletes matching gear on bag scans|r, Sell vendors it. Keep-list and quest items are always safe." },
 					{ icon = "Interface\\Icons\\INV_Enchant_ShardGlimmering", title = "DE Filters", body = "Controls which items One-Key Disenchant will target, by bind state (BoP, BoE), quality (Unc, Rare, Epic), and the iLvl range. Keep, KeepOne, KeepStack, and Affix rules still protect items." },
-					{ icon = "Interface\\Icons\\Spell_Shadow_DetectInvisibility", title = "Ignored Items", body = "Manage Ignored opens the list of items you marked Ignore on the Keep-list popup. Ignore only hides an item from Process Bags, it is not protection from cleanup." },
+					{ icon = "Interface\\Icons\\Spell_Shadow_DetectInvisibility", title = "Ignored Items", body = "Manage Ignored opens the list of items you marked Ignore on the Keep-list popup. Process Bags is the source for DE, Mill, and Prospect; hidden items are not processed by those keybinds." },
 				}
 			},
 			{
@@ -4034,8 +4034,8 @@ local function BuildUI(self)
 				sections = {
 					{ icon = "Interface\\Icons\\INV_Misc_Bag_07", title = "Process Bags window", body = "A separate panel listing every bag item ready for One-Key Disenchant, Mill, Prospect, or Open, with an Item column and an Action column. An empty list means nothing matched right now." },
 					{ icon = "Interface\\Icons\\Ability_Hunter_MasterMarksman", title = "Left-click a row", body = "Left-click a row to arm that item as the next target for its matching keybind. Read the row once more before you press the key." },
-					{ icon = "Interface\\Icons\\Trade_Engineering", title = "Right-click a row", body = "Right-click a row to open Keep, Sell, |cffbf3838Delete|r, Ignore for Process, and Why?. This menu only appears inside the Process Bags list." },
-					{ icon = "Interface\\Icons\\INV_Misc_Blindfold_01", title = "Ignore for Process", body = "Stops an item from showing in Process Bags on this character. It is not protection: use Keep if the item needs to be safe from cleanup rules." },
+					{ icon = "Interface\\Icons\\Trade_Engineering", title = "Right-click a row", body = "Right-click a row to open Keep, Sell, |cffbf3838Delete|r, Ignore for Process, and Why?. Ignore appears only on DE, Mill, and Prospect rows." },
+					{ icon = "Interface\\Icons\\INV_Misc_Blindfold_01", title = "Ignore for Process", body = "Stops an item from showing as DE, Mill, or Prospect on this character and removes it from those one-key targets." },
 					{ icon = "Interface\\Icons\\INV_Misc_QuestionMark", title = "Why?", body = "Explains why an item is kept, sold, deleted, dotted, or skipped. The report shows list membership, item facts, recipe knowledge, affix protection, and any matched process action." },
 				}
 			},

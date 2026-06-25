@@ -1,0 +1,15 @@
+* text=auto
+
+*.lua text eol=lf
+*.toc text eol=lf
+*.md text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+LICENSE text eol=lf
+
+*.tga binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary

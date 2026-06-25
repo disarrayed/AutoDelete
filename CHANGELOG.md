@@ -2,7 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## [3.27.1] - 2026-06-24
+
+### Hot Fix
+
+- **Process Bags is now the source of truth for one-key actions.** Disenchant, Mill, Prospect, and Open targets must appear under their matching Process Bags filter before the keybind can process them. Ignore for Process is scoped to DE, Mill, and Prospect; Open rows stay visible and processable.
+- **Echo Tomes no longer sell as recipes.** Tome of Echo and Echo Tomb items are excluded from Sell Known Recipes even when the client reports recipe-like class/subtype data.
 
 ## [3.27] - 2026-06-24
 

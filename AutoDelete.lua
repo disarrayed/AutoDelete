@@ -1256,16 +1256,29 @@ function _G.AutoDelete_IsOneKeyTargetAllowed(action, target)
 	if not action or not target or not target.bag or not target.slot then return false end
 	local profile = _G.AutoDelete_GetCachedProfile and _G.AutoDelete_GetCachedProfile()
 	if not profile then return false end
-	if action == "disenchant" and _G.AutoDelete_IsDisenchantable then
-		local override = _G.AutoDelete_KeepOverrideTargets and _G.AutoDelete_KeepOverrideTargets.disenchant
-		if target.keepOverride and override and override.bag == target.bag and override.slot == target.slot then
-			local link = GetContainerItemLink(target.bag, target.slot)
-			local id = link and GetItemIDFromLink(link) or nil
-			if id == override.id and _G.AutoDelete_IsDisenchantable_IgnoringKeep then
-				return _G.AutoDelete_IsDisenchantable_IgnoringKeep(profile, target.bag, target.slot)
-			end
-			return false
+	if target.keepOverride then
+		local override = _G.AutoDelete_KeepOverrideTargets and _G.AutoDelete_KeepOverrideTargets[action]
+		if not override or override.bag ~= target.bag or override.slot ~= target.slot then return false end
+		local link = GetContainerItemLink(target.bag, target.slot)
+		local id = link and GetItemIDFromLink(link) or nil
+		if id ~= override.id then return false end
+		if action == "disenchant" and _G.AutoDelete_IsDisenchantable_IgnoringKeep then
+			return _G.AutoDelete_IsDisenchantable_IgnoringKeep(profile, target.bag, target.slot)
+		elseif action == "mill" and _G.AutoDelete_IsMillable_IgnoringKeep then
+			return _G.AutoDelete_IsMillable_IgnoringKeep(profile, target.bag, target.slot)
+		elseif action == "prospect" and _G.AutoDelete_IsProspectable_IgnoringKeep then
+			return _G.AutoDelete_IsProspectable_IgnoringKeep(profile, target.bag, target.slot)
+		elseif action == "open" and _G.AutoDelete_IsOpenable_IgnoringKeep then
+			return _G.AutoDelete_IsOpenable_IgnoringKeep(profile, target.bag, target.slot)
 		end
+		return false
+	end
+	local matchesProcessRow = _G.AutoDelete_ProcessSlotMatchesAction
+	if matchesProcessRow then
+		local ok = matchesProcessRow(profile, action, target.bag, target.slot)
+		if not ok then return false end
+	end
+	if action == "disenchant" and _G.AutoDelete_IsDisenchantable then
 		return _G.AutoDelete_IsDisenchantable(profile, target.bag, target.slot)
 	elseif action == "mill" and _G.AutoDelete_IsMillable then
 		return _G.AutoDelete_IsMillable(profile, target.bag, target.slot)
@@ -3381,7 +3394,7 @@ local function DeleteItems()
 					end
 					local affixBlocked = (not keepBlocked) and (missingAffixBlocked or IsAffixProtected(profile, bag, slot, itemLink, "delete", singleAffixSlot))
 					local recipeDeleteBlocked = (not keepBlocked) and (not affixBlocked)
-						and _G.AutoDelete_IsRecipeDeleteProtected(profile, itemClass, itemSubType, deleteSourceRule)
+						and _G.AutoDelete_IsRecipeDeleteProtected(profile, itemClass, itemSubType, deleteSourceRule, itemName)
 					if not keepBlocked and not affixBlocked and not recipeDeleteBlocked then
 						if _G.AutoDelete_DebugSell then
 							local reason = (deleteSourceRule == "KeepOne" and "KeepOne")
@@ -6912,7 +6925,7 @@ local function SellItems(silent)
 					if not isOnKeepList and not isAffixProtected then
 
 						recipeAction, recipeReason, recipeRule, recipeState, recipeQualityEnabled =
-							_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, itemLink, itemClass, itemSubType, itemQuality, isQuestItem, onSellList)
+							_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, itemLink, itemClass, itemSubType, itemQuality, isQuestItem, onSellList, name)
 
 						if recipeAction == "sell" then
 							shouldSell = true
@@ -7072,7 +7085,7 @@ local function SellItems(silent)
 								tostring(equipSlot), tostring(itemClass),
 								tostring(isGearItem), tostring(isWeaponSlot), boeStr
 							))
-							if _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType) then
+							if _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType, name) then
 								print(string.format(
 									"|cffff8000[AutoDelete DEBUG]|r recipe SOLD: %s (id=%s) | state=%s | quality=%s | qualityToggle=%s | source=%s",
 									tostring(name), idStr, tostring(recipeState),
@@ -7110,7 +7123,7 @@ local function SellItems(silent)
 									or (sellReason == "bop" and "Sell Filters: BoP")
 									or (sellReason == "boeArmor" and "Sell Filters: BoE Armor")
 									or tostring(sellReason),
-								recipeLike = _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType),
+								recipeLike = _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType, name),
 								recipeState = recipeState,
 								recipeQuality = itemQuality,
 								recipeQualityEnabled = recipeQualityEnabled,
@@ -7925,14 +7938,11 @@ local function FindNextOpenable(profile)
 		_sc.find = (_sc.find or 0) + 1
 		_ss.find = (_ss.find or 0) + 1
 	end
-	for bag = 0, NUM_BAG_SLOTS do
-		local slots = GetContainerNumSlots(bag) or 0
-		for slot = 1, slots do
-			if IsOpenable(profile, bag, slot) then
-				local link = GetContainerItemLink(bag, slot)
-				local name = GetItemInfo(link) or "?"
-				return bag, slot, link, name
-			end
+	local processScan = _G.AutoDelete_ProcessScan
+	if not processScan then return nil end
+	for _, entry in ipairs(processScan(profile)) do
+		if entry.action == "open" and entry.processAction then
+			return entry.bag, entry.slot, entry.link, entry.name
 		end
 	end
 	return nil
@@ -7994,7 +8004,7 @@ local function UpdateOpenButton()
 		local _oId = _oLink and GetItemIDFromLink(_oLink) or nil
 		if _oId == _oo.id then
 			local _oName = GetItemInfo(_oLink)
-			openLastTarget = { bag = _oo.bag, slot = _oo.slot, link = _oLink, name = _oName }
+			openLastTarget = { bag = _oo.bag, slot = _oo.slot, link = _oLink, name = _oName, keepOverride = true }
 			ApplyOpenMacrotext(_oo.bag, _oo.slot)
 			local panel = _G.AutoDeleteOptionsPanel
 			if panel and panel.IsShown and panel:IsShown() and panel._refreshOpenStatus then
@@ -8157,14 +8167,11 @@ local function FindMillTarget(profile)
 		_sc.find = (_sc.find or 0) + 1
 		_ss.find = (_ss.find or 0) + 1
 	end
-	for bag = 0, NUM_BAG_SLOTS do
-		local slots = GetContainerNumSlots(bag) or 0
-		for slot = 1, slots do
-			if IsMillable(profile, bag, slot) then
-				local link = GetContainerItemLink(bag, slot)
-				local name = GetItemInfo(link) or "?"
-				return bag, slot, link, name
-			end
+	local processScan = _G.AutoDelete_ProcessScan
+	if not processScan then return nil end
+	for _, entry in ipairs(processScan(profile)) do
+		if entry.action == "mill" and entry.processAction then
+			return entry.bag, entry.slot, entry.link, entry.name
 		end
 	end
 	return nil
@@ -8218,7 +8225,7 @@ local function UpdateMillButton()
 		local _oId = _oLink and GetItemIDFromLink(_oLink) or nil
 		if _oId == _om.id then
 			local _oName = GetItemInfo(_oLink)
-			millLastTarget = { bag = _om.bag, slot = _om.slot, link = _oLink, name = _oName }
+			millLastTarget = { bag = _om.bag, slot = _om.slot, link = _oLink, name = _oName, keepOverride = true }
 			ApplyMillMacrotext(_om.bag, _om.slot)
 			local panel = _G.AutoDeleteOptionsPanel
 			if panel and panel.IsShown and panel:IsShown() and panel._refreshMillStatus then
@@ -8360,14 +8367,11 @@ local function FindProspectTarget(profile)
 		_sc.find = (_sc.find or 0) + 1
 		_ss.find = (_ss.find or 0) + 1
 	end
-	for bag = 0, NUM_BAG_SLOTS do
-		local slots = GetContainerNumSlots(bag) or 0
-		for slot = 1, slots do
-			if IsProspectable(profile, bag, slot) then
-				local link = GetContainerItemLink(bag, slot)
-				local name = GetItemInfo(link) or "?"
-				return bag, slot, link, name
-			end
+	local processScan = _G.AutoDelete_ProcessScan
+	if not processScan then return nil end
+	for _, entry in ipairs(processScan(profile)) do
+		if entry.action == "prospect" and entry.processAction then
+			return entry.bag, entry.slot, entry.link, entry.name
 		end
 	end
 	return nil
@@ -8421,7 +8425,7 @@ local function UpdateProspectButton()
 		local _oId = _oLink and GetItemIDFromLink(_oLink) or nil
 		if _oId == _op.id then
 			local _oName = GetItemInfo(_oLink)
-			prospectLastTarget = { bag = _op.bag, slot = _op.slot, link = _oLink, name = _oName }
+			prospectLastTarget = { bag = _op.bag, slot = _op.slot, link = _oLink, name = _oName, keepOverride = true }
 			ApplyProspectMacrotext(_op.bag, _op.slot)
 			local panel = _G.AutoDeleteOptionsPanel
 			if panel and panel.IsShown and panel:IsShown() and panel._refreshProspectStatus then
@@ -8670,19 +8674,15 @@ local function FindDisenchantTarget(profile)
 		_ss.find = (_ss.find or 0) + 1
 	end
 	local _p = AutoDelete_PerfBegin("FindDisenchantTarget")
-	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
-	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
-	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
-	local singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
-	for bag = 0, NUM_BAG_SLOTS do
-		local count = GetContainerNumSlots(bag) or 0
-		for slot = 1, count do
-			if IsDisenchantable(profile, bag, slot, singleAffixPlan, keepIDs, keepNames, keepOneIDs, keepStackIDs) then
-				local link = GetContainerItemLink(bag, slot)
-				local name = GetItemInfo(link) or "?"
-				AutoDelete_PerfEnd("FindDisenchantTarget", _p)
-				return bag, slot, link, name
-			end
+	local processScan = _G.AutoDelete_ProcessScan
+	if not processScan then
+		AutoDelete_PerfEnd("FindDisenchantTarget", _p)
+		return nil
+	end
+	for _, entry in ipairs(processScan(profile)) do
+		if entry.action == "disenchant" and entry.processAction then
+			AutoDelete_PerfEnd("FindDisenchantTarget", _p)
+			return entry.bag, entry.slot, entry.link, entry.name
 		end
 	end
 	AutoDelete_PerfEnd("FindDisenchantTarget", _p)
@@ -9043,7 +9043,7 @@ function _G.AutoDelete_OnOneKeyPreClick(action)
 	end
 	if hasTarget and _G.AutoDelete_IsOneKeyTargetAllowed and not _G.AutoDelete_IsOneKeyTargetAllowed(action, target) then
 		if _G.AutoDelete_ClearOneKeyTarget then _G.AutoDelete_ClearOneKeyTarget(action) end
-		print("|cffff8000[AutoDelete]|r Keep list blocked that one-key target.")
+		print("|cffff8000[AutoDelete]|r That target is no longer listed for that one-key action in Process Bags.")
 		hasTarget = false
 	end
 	if hasTarget then return end
@@ -9219,11 +9219,10 @@ _G.AutoDelete_IsDisenchantable       = IsDisenchantable
 -- ============================================================================
 -- Process Bags
 -- ============================================================================
--- Aggregates the four secure-action predicates (Open, Disenchant, Mill,
--- Prospect) into a single bag walk so the Process Bags panel can render
--- one row per actionable item. Action precedence is gear-first (disenchant)
--- then crafting (mill, prospect) then container (open) -- in practice
--- each item satisfies at most one predicate so order rarely matters.
+-- Aggregates delete/sell decisions plus the four secure-action predicates
+-- (Disenchant, Mill, Prospect, Open) into a single bag walk. Process Bags is
+-- the source of truth for what can be processed: normal one-key targets are
+-- armed only from rows whose action matches the keybind.
 --
 -- Ignored items are stored per-character in AutoDeleteStatsDB.processIgnored
 -- as {[itemId] = true}. Stats DB is the right home because:
@@ -9262,6 +9261,10 @@ end
 local function ClearProcessIgnored()
 	local t = GetProcessIgnoredTable()
 	for k in pairs(t) do t[k] = nil end
+end
+
+function _G.AutoDelete_IsProcessIgnoreAction(action)
+	return action == "disenchant" or action == "mill" or action == "prospect"
 end
 
 function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignored, ruleCtx)
@@ -9379,7 +9382,7 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 			return "kept", missingAffixReason .. " blocked delete", deleteRule, name
 		elseif IsAffixProtected(profile, bag, slot, link, "delete", singleAffixSlot) then
 			return "kept", "Affix Protection blocked delete", deleteRule, name
-		elseif _G.AutoDelete_IsRecipeDeleteProtected(profile, itemClass, itemSubType, deleteRule) then
+		elseif _G.AutoDelete_IsRecipeDeleteProtected(profile, itemClass, itemSubType, deleteRule, name) then
 			return "kept", "Sell Known Recipes blocked delete", deleteRule, name
 		else
 			return "delete", "Would delete", deleteRule, name
@@ -9391,7 +9394,7 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 	local recipeProtectRule = nil
 	if vendorPrice and vendorPrice > 0 then
 		local recipeAction, recipeReason, recipeRule =
-			_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, link, itemClass, itemSubType, itemQuality, isQuestItem, onSell)
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, link, itemClass, itemSubType, itemQuality, isQuestItem, onSell, name)
 		if recipeAction == "sell" then
 			sellRule = recipeRule
 		elseif recipeAction == "protect" then
@@ -9445,12 +9448,12 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 		end
 	end
 
+	local isDisenchantable = _G.AutoDelete_IsDisenchantable
+	local isDisenchantableIgnoringKeep = _G.AutoDelete_IsDisenchantable_IgnoringKeep
+	local isMillable       = _G.AutoDelete_IsMillable
+	local isProspectable   = _G.AutoDelete_IsProspectable
+	local isOpenable       = _G.AutoDelete_IsOpenable
 	if not ignored then
-		local isDisenchantable = _G.AutoDelete_IsDisenchantable
-		local isDisenchantableIgnoringKeep = _G.AutoDelete_IsDisenchantable_IgnoringKeep
-		local isMillable       = _G.AutoDelete_IsMillable
-		local isProspectable   = _G.AutoDelete_IsProspectable
-		local isOpenable       = _G.AutoDelete_IsOpenable
 		if isDisenchantableIgnoringKeep and isDisenchantableIgnoringKeep(profile, bag, slot) then
 			local deProtected, deProtectReason = false, nil
 			if _G.AutoDelete_IsDestructiveRuleProtected then
@@ -9475,15 +9478,16 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 			return "mill", "Eligible for milling", "One-Key Mill", name, true
 		elseif isProspectable and isProspectable(profile, bag, slot) then
 			return "prospect", "Eligible for prospecting", "One-Key Prospect", name, true
-		elseif isOpenable and isOpenable(profile, bag, slot) then
-			return "open", "Eligible to open", "One-Key Open", name, true
 		end
+	end
+	if isOpenable and isOpenable(profile, bag, slot) then
+		return "open", "Eligible to open", "One-Key Open", name, true
 	end
 
 	if onKeep then
 		return "kept", "Keep list", "Keep list", name
 	elseif ignored then
-		return "kept", "Ignored for Process Bags", "Process ignore", name
+		return "kept", "Ignored for DE, Mill, and Prospect", "Process ignore", name
 	elseif isQuestItem then
 		return "kept", "Quest item protected", "Quest protection", name
 	end
@@ -9561,6 +9565,37 @@ local function ProcessScan(profile)
 	return results
 end
 
+function _G.AutoDelete_EvaluateCurrentProcessSlot(profile, bag, slot)
+	if not profile or not bag or not slot then return nil end
+	local link = GetContainerItemLink(bag, slot)
+	if not link then return nil end
+	local id = GetItemIDFromLink(link)
+	if not id then return nil end
+	local deleteNames, deleteIDs = BuildWantedSets(profile.listText, "delete-list")
+	local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
+	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+	local ruleCtx = {
+		deleteNames = deleteNames,
+		deleteIDs = deleteIDs,
+		sellNames = sellNames,
+		sellIDs = sellIDs,
+		keepNames = keepNames,
+		keepIDs = keepIDs,
+		keepOneIDs = keepOneIDs,
+		keepStackIDs = keepStackIDs,
+		keepOneSeenUnits = {},
+		singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames),
+	}
+	return _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, IsProcessIgnored(id), ruleCtx)
+end
+
+function _G.AutoDelete_ProcessSlotMatchesAction(profile, action, bag, slot)
+	local currentAction, reason, _, _, processAction = _G.AutoDelete_EvaluateCurrentProcessSlot(profile, bag, slot)
+	return currentAction == action and processAction == true, reason
+end
+
 -- Returns row counts plus copy counts. `total` is visible rows after grouping;
 -- `copies` is actual matching bag slots represented by those rows.
 -- Used by the Tools Card 1 launcher's status line.
@@ -9597,28 +9632,10 @@ local function ProcessArm(action, bag, slot)
 	if bag and slot then
 		local db = GetDB()
 		local profile = select(1, GetActiveProfile(db))
-		local id = link and GetItemIDFromLink(link) or nil
 		local currentAction, currentReason, _, _, processAction
 		if profile and link then
-			local deleteNames, deleteIDs = BuildWantedSets(profile.listText, "delete-list")
-			local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
-			local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
-			local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
-			local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
-			local ruleCtx = {
-				deleteNames = deleteNames,
-				deleteIDs = deleteIDs,
-				sellNames = sellNames,
-				sellIDs = sellIDs,
-				keepNames = keepNames,
-				keepIDs = keepIDs,
-				keepOneIDs = keepOneIDs,
-				keepStackIDs = keepStackIDs,
-				keepOneSeenUnits = {},
-				singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames),
-			}
 			currentAction, currentReason, _, _, processAction =
-				_G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, IsProcessIgnored(id), ruleCtx)
+				_G.AutoDelete_EvaluateCurrentProcessSlot(profile, bag, slot)
 		end
 		if currentAction ~= action or not processAction then
 			return false, currentReason or "blocked"
@@ -9773,7 +9790,7 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		vendorPrice = info[11]
 	end
 	local isQuestItem = (itemClass == "Quest")
-	local isRecipeLike = _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType)
+	local isRecipeLike = _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType, name)
 	local recipeKnowledgeState = nil
 	local recipeQualityEnabled = nil
 	if profile.knownRecipeSellEnabled and isRecipeLike and bag and slot and itemLink then
@@ -9868,7 +9885,7 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		table.insert(lines, "  Final: keep. Affix protection blocks delete.")
 	elseif onDelete then
 		table.insert(lines, "  Final: delete. Explicit Delete list entry matches.")
-	elseif _G.AutoDelete_IsRecipeDeleteProtected(profile, itemClass, itemSubType, "auto") then
+	elseif _G.AutoDelete_IsRecipeDeleteProtected(profile, itemClass, itemSubType, "auto", name) then
 		table.insert(lines, "  Final: keep. Sell Known Recipes keeps recipe items out of automatic delete rules.")
 	elseif isQuestItem then
 		table.insert(lines, "  Final: keep. Quest item blocks auto-delete.")
@@ -9896,7 +9913,7 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		table.insert(lines, "  Final: keep. Affix protection blocks sell.")
 	elseif profile.knownRecipeSellEnabled and isRecipeLike then
 		local recipeAction, recipeReason, recipeRule =
-			_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, itemLink, itemClass, itemSubType, quality, isQuestItem, onSell)
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, itemLink, itemClass, itemSubType, quality, isQuestItem, onSell, name)
 		if recipeAction == "sell" and recipeRule == "Sell list" then
 			table.insert(lines, "  Final: sell at vendor. Explicit Sell list entry matches.")
 		elseif recipeAction == "sell" then
@@ -10007,47 +10024,46 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 	table.insert(lines, "")
 	table.insert(lines, "Process Bags:")
 	if itemId and IsProcessIgnored(itemId) then
-		table.insert(lines, "  Ignored on this character.")
-	else
-		local found = false
-		if bag and slot then
-			for _, entry in ipairs(ProcessScan(profile)) do
-				if entry.bag == bag and entry.slot == slot then
-					local meta = PROCESS_ACTIONS[entry.action]
-					table.insert(lines, "  Row action: " .. (meta and meta.label or entry.action))
-					if entry.reason then table.insert(lines, "  Reason: " .. tostring(entry.reason)) end
-					if entry.sourceRule then table.insert(lines, "  Source rule: " .. tostring(entry.sourceRule)) end
-					if not profile.enabled and (entry.action == "delete" or entry.action == "sell") then
-						table.insert(lines, "  Runtime: preview only while AutoDelete is disabled.")
-					end
-					if (entry.count or 1) > 1 then
-						table.insert(lines, "  Grouped copies: " .. tostring(entry.count) .. " share this item ID.")
-					end
-					found = true
-					break
-				end
-			end
-		end
-		if not found and itemId then
-			for _, entry in ipairs(ProcessScan(profile)) do
-				if entry.itemId == itemId then
-					local meta = PROCESS_ACTIONS[entry.action]
-					table.insert(lines, "  Row action: " .. (meta and meta.label or entry.action) .. " (grouped by item ID).")
-					if entry.reason then table.insert(lines, "  Reason: " .. tostring(entry.reason)) end
-					if entry.sourceRule then table.insert(lines, "  Source rule: " .. tostring(entry.sourceRule)) end
-					if not profile.enabled and (entry.action == "delete" or entry.action == "sell") then
-						table.insert(lines, "  Runtime: preview only while AutoDelete is disabled.")
-					end
-					if (entry.count or 1) > 1 then
-						table.insert(lines, "  Grouped copies: " .. tostring(entry.count) .. " share this item ID.")
-					end
-					found = true
-					break
-				end
-			end
-		end
-		if not found then table.insert(lines, "  No current process action matched.") end
+		table.insert(lines, "  Ignored for DE, Mill, and Prospect on this character.")
 	end
+	local found = false
+	if bag and slot then
+		for _, entry in ipairs(ProcessScan(profile)) do
+			if entry.bag == bag and entry.slot == slot then
+				local meta = PROCESS_ACTIONS[entry.action]
+				table.insert(lines, "  Row action: " .. (meta and meta.label or entry.action))
+				if entry.reason then table.insert(lines, "  Reason: " .. tostring(entry.reason)) end
+				if entry.sourceRule then table.insert(lines, "  Source rule: " .. tostring(entry.sourceRule)) end
+				if not profile.enabled and (entry.action == "delete" or entry.action == "sell") then
+					table.insert(lines, "  Runtime: preview only while AutoDelete is disabled.")
+				end
+				if (entry.count or 1) > 1 then
+					table.insert(lines, "  Grouped copies: " .. tostring(entry.count) .. " share this item ID.")
+				end
+				found = true
+				break
+			end
+		end
+	end
+	if not found and itemId then
+		for _, entry in ipairs(ProcessScan(profile)) do
+			if entry.itemId == itemId then
+				local meta = PROCESS_ACTIONS[entry.action]
+				table.insert(lines, "  Row action: " .. (meta and meta.label or entry.action) .. " (grouped by item ID).")
+				if entry.reason then table.insert(lines, "  Reason: " .. tostring(entry.reason)) end
+				if entry.sourceRule then table.insert(lines, "  Source rule: " .. tostring(entry.sourceRule)) end
+				if not profile.enabled and (entry.action == "delete" or entry.action == "sell") then
+					table.insert(lines, "  Runtime: preview only while AutoDelete is disabled.")
+				end
+				if (entry.count or 1) > 1 then
+					table.insert(lines, "  Grouped copies: " .. tostring(entry.count) .. " share this item ID.")
+				end
+				found = true
+				break
+			end
+		end
+	end
+	if not found then table.insert(lines, "  No current process action matched.") end
 
 	return table.concat(lines, "\n")
 end
@@ -10324,7 +10340,7 @@ function _G.AutoDelete_BuildProcessDebugReport()
 					"    tooltip: soulbound=%s boe=%s affixTier=%s missingBlocked=%s missingState=%s",
 					yes(soulbound), yes(boe), tostring(affix), yes(missingBlocked), tostring(missingState)
 				))
-				if _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType) then
+				if _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType, name) then
 					table.insert(lines, string.format(
 						"    recipe: enabled=%s state=%s quality=%s qualityToggle=%s",
 						yes(profile.knownRecipeSellEnabled),
@@ -10454,6 +10470,9 @@ function _G.AutoDelete_ShowItemQuickMenu(data, owner)
 	local name = data.name or (link and GetItemInfo(link)) or (id and GetItemInfo(id))
 	if not id then return end
 	local isProcessRow = data.processAction == true
+	local isProcessIgnorable = isProcessRow
+		and _G.AutoDelete_IsProcessIgnoreAction
+		and _G.AutoDelete_IsProcessIgnoreAction(data.action)
 	local stackCount
 	if data.bag and data.slot then
 		local _, count = GetContainerItemInfo(data.bag, data.slot)
@@ -10538,11 +10557,11 @@ function _G.AutoDelete_ShowItemQuickMenu(data, owner)
 			end
 		end })
 	end
-	if isProcessRow then
+	if isProcessIgnorable then
 		actions[#actions + 1] = { label = "Ignore for Process", func = function()
 			SetProcessIgnored(id, true)
 			if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
-			print("|cffff8000[AutoDelete]|r Ignoring " .. (link or name or ("item:" .. id)) .. " in Process Bags.")
+			print("|cffff8000[AutoDelete]|r Ignoring " .. (link or name or ("item:" .. id)) .. " for DE, Mill, and Prospect in Process Bags.")
 		end }
 	end
 	actions[#actions + 1] = { label = "Why?", func = function()
@@ -13504,7 +13523,7 @@ function _G.AutoDelete_CreateMinimapButton()
 	if _G.AutoDelete_MinimapButton or not Minimap then return end
 
 	local button = CreateFrame("Button", "AutoDeleteMinimapButton", Minimap)
-	button:SetSize(30, 30)
+	button:SetSize(20, 20)
 	button:SetFrameStrata("MEDIUM")
 	button:SetFrameLevel(8)
 	button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
@@ -13518,7 +13537,7 @@ function _G.AutoDelete_CreateMinimapButton()
 	button:SetBackdropBorderColor(1, 0.5, 0, 1)
 
 	local label = button:CreateFontString(nil, "OVERLAY")
-	label:SetFont("Fonts\\FRIZQT__.TTF", 13, "OUTLINE")
+	label:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
 	label:SetText("AD")
 	label:SetTextColor(1, 0.5, 0, 1)
 	label:SetPoint("CENTER", 0, 0)

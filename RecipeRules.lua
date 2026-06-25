@@ -27,7 +27,26 @@ _G.AutoDelete_RecipeSubtypeNames = {
 	Technique = true,
 }
 
-function _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType)
+_G.AutoDelete_RecipeExcludedNamePrefixes = {
+	["tome of echo"] = true,
+	["echo tome"] = true,
+	["echo tomb"] = true,
+}
+
+function _G.AutoDelete_IsRecipeExcludedItem(itemName)
+	if type(itemName) ~= "string" then return false end
+	local linkedName = string.match(itemName, "%|h%[(.-)%]%|h")
+	local normalizedName = string.lower(linkedName or itemName)
+	for prefix in pairs(_G.AutoDelete_RecipeExcludedNamePrefixes) do
+		if string.sub(normalizedName, 1, string.len(prefix)) == prefix then
+			return true
+		end
+	end
+	return false
+end
+
+function _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType, itemName)
+	if _G.AutoDelete_IsRecipeExcludedItem(itemName) then return false end
 	if itemClass and _G.AutoDelete_RecipeClassNames[itemClass] then return true end
 	if itemSubType and _G.AutoDelete_RecipeSubtypeNames[itemSubType] then return true end
 	return false
@@ -78,9 +97,12 @@ function _G.AutoDelete_RememberRecipeKnowledgeState(cache, link, state)
 	end
 end
 
-function _G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, link, itemClass, itemSubType, itemQuality, isQuestItem, onExplicitSell)
+function _G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, link, itemClass, itemSubType, itemQuality, isQuestItem, onExplicitSell, itemName)
 	if not profile or profile.knownRecipeSellEnabled ~= true then return nil end
-	if not _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType) then return nil end
+	if not itemName and link and type(GetItemInfo) == "function" then
+		itemName = GetItemInfo(link)
+	end
+	if not _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType, itemName) then return nil end
 
 	if onExplicitSell then
 		return "sell", "list", "Sell list", "explicit-sell", nil
@@ -104,10 +126,10 @@ function _G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, link, item
 	return "protect", "Unknown recipe protected", "Unknown Recipe Protection", state, qualityEnabled
 end
 
-function _G.AutoDelete_IsRecipeDeleteProtected(profile, itemClass, itemSubType, sourceRule)
+function _G.AutoDelete_IsRecipeDeleteProtected(profile, itemClass, itemSubType, sourceRule, itemName)
 	return profile
 		and profile.knownRecipeSellEnabled == true
-		and _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType)
+		and _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType, itemName)
 		and sourceRule ~= "Delete list"
 		and sourceRule ~= "KeepOne"
 		and sourceRule ~= "KeepStack"
