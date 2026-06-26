@@ -123,8 +123,7 @@ _G.AutoDelete_SpikeSuppressedCount = _G.AutoDelete_SpikeSuppressedCount or 0
 --            -> defer Goblin, do NOT start the timer
 --   State 2: bags below threshold, pipeline is active (queue has items,
 --            or drain/enqueue recent)
---            -> start timer, reset on queue-shrink, fire if queue
---               stops shrinking for BAGS_FULL_DELAY
+--            -> defer Goblin, do NOT start the timer
 --   State 3: bags below threshold, last walk found NO deletable
 --            candidates
 --            -> start timer immediately, fire after BAGS_FULL_DELAY
@@ -1537,13 +1536,14 @@ local DEFAULT_PROFILE = {
 
 	-- Quality filters are tri-state cycle toggles: "off" | "delete" | "sell".
 	-- Each gear quality can be independently set to do nothing, auto-delete,
-	-- or auto-sell at vendor. Junk is delete-only in the options UI. Old
-	-- booleans (autoGray, autoDeleteCommon,
+	-- or auto-sell at vendor. Junk is checkbox-driven in the options UI:
+	-- checked deletes gray items, unchecked auto-sells gray items at vendors.
+	-- Old booleans (autoGray, autoDeleteCommon,
 	-- autoSellGreens) are migrated to these fields by RunDBMigrations v3
 	-- and then left in place for one version as a fallback read for older
 	-- code paths; the canonical fields going forward are the qualityAction*
 	-- enums.
-	--   Junk    = gray quality, any item type, delete-only
+	--   Junk    = gray quality, any item type, delete when checked, sell when unchecked
 	--   Common  = white quality, equippable gear only
 	--   Greens  = green quality, equippable gear only
 	--   Rares   = blue quality, equippable gear only
@@ -1704,12 +1704,9 @@ local function EnsureProfileFields(p)
 		or (p.sellBoE ~= nil) or (p.sellBoEWeapons ~= nil)
 		or (p.sellIlvlEnabled ~= nil)
 	if hasOldFields and not p._v302Migrated then
-		-- Old global rarity toggles: Junk/Common become DELETE actions,
-		-- Greens become a SELL action.
-		-- Junk: existing autoGray field is the canonical Auto-Delete Junk
-		-- toggle (was already wired). If a profile had sellJunk=true but
-		-- autoGray was unset/false, prefer the user's intent.
-		if p.sellJunk == true then p.autoGray = true end
+		-- Old global rarity toggles: Common becomes a DELETE action and
+		-- Greens becomes a SELL action. Junk is now controlled only by the
+		-- Delete Junk checkbox: checked deletes, unchecked sells at vendors.
 		p.autoDeleteCommon = false                 -- old schema had no Common toggle
 		p.autoSellGreens   = (p.sellGreen == true)
 
@@ -1850,11 +1847,13 @@ local function RunDBMigrations(db)
 	-- v3 (2026-05-22): three independent quality booleans
 	-- (autoGray, autoDeleteCommon, autoSellGreens) become three tri-state
 	-- enum fields (qualityActionJunk/Common/Greens) so each quality can be
-	-- independently set to Off / Delete / Sell. Migration: existing TRUE
-	-- becomes the same semantic the old field had (delete for Junk and
-	-- Common, sell for Greens); FALSE becomes "off". Legacy booleans stay
-	-- present for one version so any straggler code path that still reads
-	-- the old field doesn't crash, but new code reads the new enum only.
+	-- independently set to Off / Delete / Sell. For Junk, "off" now means
+	-- the Delete Junk checkbox is unchecked, so the vendor path auto-sells
+	-- gray items. Migration: existing TRUE becomes the same semantic the old
+	-- field had (delete for Junk and Common, sell for Greens); FALSE becomes
+	-- "off". Legacy booleans stay present for one version so any straggler
+	-- code path that still reads the old field doesn't crash, but new code
+	-- reads the new enum only.
 	if db.version < 3 and db.profiles then
 		local migrated = 0
 		for _, profile in pairs(db.profiles) do
@@ -1895,9 +1894,8 @@ local function RunDBMigrations(db)
 		-- intentionally empty -- see comment above.
 	end
 	-- v5 (2026-06-24): Junk moved out of the Del/Sell Auto Actions card
-	-- into a delete-only General-tab checkbox. Existing Junk=Sell profiles
-	-- cannot be represented in the new UI, so turn that hidden state off and
-	-- show a one-time notice at PLAYER_LOGIN.
+	-- into a General-tab checkbox. Existing Junk=Sell profiles collapse to
+	-- the unchecked checkbox state, which now auto-sells at vendors.
 	if db.version < 5 and db.profiles then
 		local migratedJunkSell = 0
 		for _, profile in pairs(db.profiles) do
@@ -2991,9 +2989,9 @@ local DELETE_BATCH_SIZE = 32
 -- (~4-6ms) is now spread across multiple frames -- no single frame
 -- exceeds budget, no chug.
 --
--- Throughput tradeoff: steady-state at 90ms is ~11
--- items/sec. For a typical scav burst of 20-30 items this is the
--- difference between a 1.5s clean-up and a 2-3s clean-up -- well
+-- Throughput tradeoff: steady-state at 70ms with up to 10 items per tick
+-- is ~140 items/sec. For a typical scav burst of 20-30 items this is the
+-- difference between a 0.15s clean-up and a 0.2s clean-up -- well
 -- under the 5s BAG_QUIESCENCE_MAX_S anti-starvation cap.
 --
 -- Drain re-validates the slot link before executing: between walk
@@ -3004,8 +3002,9 @@ local DELETE_BATCH_SIZE = 32
 _G.AutoDelete_DeleteQueue = _G.AutoDelete_DeleteQueue or {
 	items  = {},
 	lastAt = 0,
-	DELAY  = 0.09,  -- 90ms; slight speed nudge, still one pop per tick
+	DELAY  = 0.07,  -- 70ms
 }
+_G.AutoDelete_DeleteDrainBatchSize = _G.AutoDelete_DeleteDrainBatchSize or 10
 
 local function PlanKeepOneSlotAction(totalUnits, slotCount)
 	totalUnits = tonumber(totalUnits) or 0
@@ -3092,7 +3091,7 @@ local function DeleteItems()
 	-- v3.20: Queue-throttled. If the previous walk's queue is still
 	-- draining, skip this walk -- otherwise we'd re-enqueue the same
 	-- slots and risk double-deletes once the drain catches up. The
-	-- drain re-runs every OnUpdate frame and pops at 90ms cadence, so
+	-- drain re-runs every OnUpdate frame and pops at 70ms cadence, so
 	-- skipping here just defers until the queue is empty.
 	if #_G.AutoDelete_DeleteQueue.items > 0 then
 		-- v3.20 spike debug: count early-returns separately so the
@@ -3410,7 +3409,7 @@ local function DeleteItems()
 						-- v3.20 queue-throttled deletes: enqueue instead of
 						-- executing the API call now. AutoDelete_DrainDeleteQueue
 						-- (called from the scanner OnUpdate) pops one item per
-						-- DELAY (90ms) and runs PickupContainerItem +
+						-- DELAY (70ms) and runs PickupContainerItem +
 						-- DeleteCursorItem then. Capture link+name+id so the
 						-- drain can re-validate the slot before acting (the
 						-- user may move/use/swap the item between walk and
@@ -3564,7 +3563,7 @@ _G.AutoDelete_QueueMaxTries = _G.AutoDelete_QueueMaxTries or 4
 
 -- v3.20 drain-time re-validation. The walk filters at enqueue time, but
 -- between enqueue and drain (up to a few seconds for a 32-item queue
--- at 90ms throttle) the user may have:
+-- at 70ms throttle) the user may have:
 --   * Added the item to the Keep list
 --   * Toggled Affix Protection on / changed protected tiers
 --   * Changed quality-action filters (e.g. Greens delete -> off)
@@ -3793,7 +3792,7 @@ function _G.AutoDelete_DrainDeleteQueue(now)
 	if linkMatches and not locked then
 		-- v3.20 drain-time re-validation: trust nothing the walk decided.
 		-- Between enqueue and now (up to several seconds for a full
-		-- queue at 90ms throttle) the user may have changed Keep list,
+		-- queue at 70ms throttle) the user may have changed Keep list,
 		-- Affix Protection, quality filters, or the Delete list itself.
 		-- The validator returns (eligible, reason). Drop with the
 		-- matching counter on any failure; the item stays out of bags
@@ -3828,7 +3827,7 @@ function _G.AutoDelete_DrainDeleteQueue(now)
 				))
 			end
 			-- Advance lastAt so this validation tick counts; next entry
-			-- gets its 90ms window like any successful or stale pop.
+			-- gets its 70ms window like any successful or stale pop.
 			Q.lastAt = math.max(now, Q.lastAt + Q.DELAY)
 			AutoDelete_PerfEnd("DeleteItems/drain", _pDrain)
 			return
@@ -3996,17 +3995,19 @@ function _G.AutoDelete_HasPendingDeleteItems(profile)
 				local isQuestItem = (itemClass == "Quest")
 				local singleAffixSlot = affixPlan and affixPlan.slots[bag .. ":" .. slot]
 				local singleAffixKept = singleAffixSlot and not singleAffixSlot.extra
+				local keepBlocked = _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
+				local affixBlocked = IsAffixProtected(profile, bag, slot, link, "delete", singleAffixSlot)
 
 				if hasKeepOne and itemId and keepOneIDs[itemId]
-					and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
-					and not IsAffixProtected(profile, bag, slot, link, "delete")
+					and not keepBlocked
+					and not affixBlocked
 					and _G.AutoDelete_CountBagUnitsByItemId(itemId) > 1 then
 					return true
 				end
 
 				if hasKeepStack and itemId and keepStackIDs[itemId]
-					and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName)
-					and not IsAffixProtected(profile, bag, slot, link, "delete") then
+					and not keepBlocked
+					and not affixBlocked then
 					local stackCount, keepBag, keepSlot = _G.AutoDelete_GetKeepStackSlotChoice(itemId)
 					if stackCount > 1 and (bag ~= keepBag or slot ~= keepSlot) then
 						return true
@@ -4020,7 +4021,7 @@ function _G.AutoDelete_HasPendingDeleteItems(profile)
 					if not onList and itemName and wantedNames[Normalize(itemName)] then
 						onList = true
 					end
-					if onList and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then
+					if onList and not keepBlocked and not singleAffixKept and not affixBlocked then
 						return true
 					end
 				end
@@ -4031,28 +4032,32 @@ function _G.AutoDelete_HasPendingDeleteItems(profile)
 					if doGray and itemQuality and itemQuality == 0
 						and not IsCosmeticSlot(link)
 						and not singleAffixKept
-						and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then
+						and not keepBlocked
+						and not affixBlocked then
 						return true
 					end
 					if doCommon and itemQuality and itemQuality == 1
 						and not IsCosmeticSlot(link)
 						and equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG"
 						and not singleAffixKept
-						and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then
+						and not keepBlocked
+						and not affixBlocked then
 						return true
 					end
 					if doGreens and itemQuality and itemQuality == 2
 						and not IsCosmeticSlot(link)
 						and equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG"
 						and not singleAffixKept
-						and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then
+						and not keepBlocked
+						and not affixBlocked then
 						return true
 					end
 					if doRares and itemQuality and itemQuality == 3
 						and not IsCosmeticSlot(link)
 						and equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG"
 						and not singleAffixKept
-						and not _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, itemName) then
+						and not keepBlocked
+						and not affixBlocked then
 						return true
 					end
 				end
@@ -4125,6 +4130,51 @@ boeTip:SetClampedToScreen(false)
 _G.AutoDelete_RecipeTip = CreateFrame("GameTooltip", "AutoDelete_RecipeTip", UIParent, "GameTooltipTemplate")
 _G.AutoDelete_RecipeTip:SetClampedToScreen(false)
 
+function _G.AutoDelete_IsWeaponProcAffixText(text)
+	if type(text) ~= "string" or text == "" then return false end
+	local lower = Normalize(text)
+	return string.find(lower, "chance on hit", 1, true)
+		or string.find(lower, "on hit:", 1, true)
+		or string.find(lower, "on hit ", 1, true)
+end
+
+function _G.AutoDelete_GetWeaponProcAffixKeyForSlot(bag, slot, link)
+	if not bag or not slot or not link then return nil end
+	local _, _, _, _, _, itemClass, _, _, equipSlot = GetItemInfo(link)
+	if itemClass ~= "Weapon" and not (equipSlot and WEAPON_SLOTS[equipSlot]) then
+		return nil
+	end
+
+	local cache = _G.AutoDelete_TooltipCache and _G.AutoDelete_TooltipCache.weaponAffixKey
+	if cache and cache[link] ~= nil then
+		return cache[link] or nil
+	end
+
+	boeTip:Hide()
+	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
+	boeTip:ClearLines()
+	boeTip:SetBagItem(bag, slot)
+	boeTip:Show()
+	local n = boeTip:NumLines()
+	local key = nil
+	for i = 1, n do
+		local leftFS  = _G["AutoDelete_BoETipTextLeft"  .. i]
+		local rightFS = _G["AutoDelete_BoETipTextRight" .. i]
+		local leftTxt  = leftFS  and leftFS:GetText()  or nil
+		local rightTxt = rightFS and rightFS:GetText() or nil
+		local procText = _G.AutoDelete_IsWeaponProcAffixText(leftTxt) and leftTxt
+			or (_G.AutoDelete_IsWeaponProcAffixText(rightTxt) and rightTxt)
+		if procText then
+			key = "weapon-proc:" .. Normalize(procText)
+			break
+		end
+	end
+	boeTip:Hide()
+
+	if cache then cache[link] = key or false end
+	return key
+end
+
 -- ============================================================================
 -- Tooltip-result cache (Phase D)
 -- ============================================================================
@@ -4154,6 +4204,7 @@ _G.AutoDelete_TooltipCache = _G.AutoDelete_TooltipCache or {
 	boe       = {},
 	recipeKnown = {},
 	soulbound = {},
+	weaponAffixKey = {},
 }
 -- Versioned cache invalidation. When the parsing logic (esp.
 -- AutoDelete_ExtractAffixLevel) changes between addon builds, cached values from
@@ -4165,13 +4216,14 @@ _G.AutoDelete_TooltipCache = _G.AutoDelete_TooltipCache or {
 -- so we drop the affected sub-cache here when the version doesn't
 -- match. Bump _CACHE_VERSION whenever parsing semantics change.
 do
-	local _CACHE_VERSION = 8
+	local _CACHE_VERSION = 10
 	if _G.AutoDelete_TooltipCache._cacheVersion ~= _CACHE_VERSION then
 		_G.AutoDelete_TooltipCache.affix     = {}
 		_G.AutoDelete_TooltipCache.affixName = {}
 		_G.AutoDelete_TooltipCache.soulbound = {}
 		_G.AutoDelete_TooltipCache.boe       = {}
 		_G.AutoDelete_TooltipCache.recipeKnown = {}
+		_G.AutoDelete_TooltipCache.weaponAffixKey = {}
 		_G.AutoDelete_TooltipCache._cacheVersion = _CACHE_VERSION
 	end
 end
@@ -4307,6 +4359,10 @@ function _G.AutoDelete_ScanBagItemMarkers(bag, slot, link)
 		end
 	else
 		affixLevel = AutoDelete_ExtractKnownAffixLevel(itemName) or false
+		if not affixLevel and _G.AutoDelete_GetWeaponProcAffixKeyForSlot
+			and _G.AutoDelete_GetWeaponProcAffixKeyForSlot(bag, slot, link) then
+			affixLevel = 1
+		end
 		if affixLevel and _G.AutoDelete_DebugSell then
 			print(string.format(
 				"|cffff8000[AutoDelete DEBUG]|r affix-name fallback: name='%s' -> tier=%d",
@@ -4491,10 +4547,9 @@ end
 
 function _G.AutoDelete_ExtractKnownAffixLevel(itemName)
 	local tier = AutoDelete_ExtractAffixLevel(itemName)
-	if not tier then return nil end
 	if _G.AutoDelete_GetAffixKeyForItemName
 		and _G.AutoDelete_GetAffixKeyForItemName(itemName) then
-		return tier
+		return tier or 1
 	end
 	return nil
 end
@@ -4856,6 +4911,10 @@ local function HasAffix(bag, slot)
 		else
 			local itemName = link and GetItemInfo(link) or nil
 			foundLevel = AutoDelete_ExtractKnownAffixLevel(itemName) or false
+			if not foundLevel and link and _G.AutoDelete_GetWeaponProcAffixKeyForSlot
+				and _G.AutoDelete_GetWeaponProcAffixKeyForSlot(bag, slot, link) then
+				foundLevel = 1
+			end
 			if foundLevel then
 				print(string.format(
 					"|cffff8000[AutoDelete DEBUG]|r HasAffix bag=%d slot=%d lines=%d name='%s' level=%d (known-affix name fallback)",
@@ -5525,6 +5584,8 @@ function _G.AutoDelete_GetMissingAffixKeyForSlot(profile, bag, slot, link, itemN
 	local owned = AutoDelete_IsAffixOwnedByItemName(itemName)
 	if owned ~= false then return nil end
 	return _G.AutoDelete_GetAffixKeyForItemName(itemName)
+		or (_G.AutoDelete_GetWeaponProcAffixKeyForSlot
+			and _G.AutoDelete_GetWeaponProcAffixKeyForSlot(bag, slot, link))
 end
 
 function _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
@@ -5935,6 +5996,15 @@ function _G.AutoDelete_IsDestructiveRuleProtected(profile, bag, slot, itemLink, 
 		return true, "keep-blocked"
 	end
 
+	local missingBlocked, missingState = _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot)
+	if missingBlocked then
+		return true, missingState == "unknown" and "missing-affix-unknown" or "missing-affix-blocked"
+	end
+
+	if IsAffixProtected(profile, bag, slot, itemLink, action, singleAffixSlot) then
+		return true, "affix-blocked"
+	end
+
 	if not keepOneIDs then
 		keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
 	end
@@ -5951,15 +6021,6 @@ function _G.AutoDelete_IsDestructiveRuleProtected(profile, bag, slot, itemLink, 
 
 	if singleAffixSlot and not singleAffixSlot.extra then
 		return true, "single-affix-kept"
-	end
-
-	local missingBlocked, missingState = _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot)
-	if missingBlocked then
-		return true, missingState == "unknown" and "missing-affix-unknown" or "missing-affix-blocked"
-	end
-
-	if IsAffixProtected(profile, bag, slot, itemLink, action, singleAffixSlot) then
-		return true, "affix-blocked"
 	end
 	return false, nil
 end
@@ -6419,6 +6480,11 @@ local function DelayedSummon(delaySeconds)
 	AfterDelay(delaySeconds or 1.5, function()
 		summonPending = false
 		if not _G.AutoDelete_ScavengerCombatAllowed(cachedProfile) then return end
+		if MerchantFrame and MerchantFrame:IsShown() then
+			_G.AutoDelete_ScavengerLastSummonResult = "waiting-for-merchant-close"
+			DelayedSummon(2.0)
+			return
+		end
 		if _G.AutoDelete_ShouldMerchantHavePriority and _G.AutoDelete_ShouldMerchantHavePriority(cachedProfile) then
 			_G.AutoDelete_ScavengerLastSummonResult = "waiting-for-bags-full-merchant"
 			_G.AutoDelete_PendingScavengerAfterBags = true
@@ -6823,10 +6889,9 @@ local function TryAutoRepair()
 	end
 end
 
--- Items sold per scan tick. Same throttle rationale as DELETE_BATCH_SIZE
--- (see comment there). Kept equal so delete and sell behave the same
--- under the scan-tick gate, matching user-facing expectation.
-local SELL_BATCH_SIZE = 30
+-- Items sold per vendor scan tick. Sell is slightly higher than delete because
+-- standing at a vendor is the risky part of the farming loop.
+local SELL_BATCH_SIZE = 20
 local sellSessionCount = 0
 local sellSessionCopper = 0
 local sellDryTicks = 0
@@ -6854,6 +6919,8 @@ local function SellItems(silent)
 	-- old IsWhitelisted re-parse was the dominant cost in scan loops.
 	-- "keep-list" cache key is shared with DeleteItems / HasPendingDeleteItems.
 	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
 	local singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
 
 	local batchCount = 0
@@ -6895,34 +6962,35 @@ local function SellItems(silent)
 
 					-- ============================================================
 					-- SELL DECISION CHAIN (this function handles vendoring only;
-					-- Delete Junk and Del-selected quality rows live in the
-					-- delete scanner).
+					-- Delete Junk lives in the delete scanner only when the
+					-- checkbox is checked. If unchecked, junk is auto-sold here.
 					--
 					-- Priority order (highest first):
 					--   1. Keep list  - always wins, skips everything below
 					--   2. Sell list  - explicit user intent (overrides quest protection)
 					--   3. Sell Known Recipes protection/sell - tooltip-confirmed only
-					--   4. Common/Greens/Rares - auto-sell, gear only, skips quest items
-					--   5. BoE Weapons - Rare/Epic, iLvl gated, skips quest items
-					--   6. BoP         - Rare/Epic, iLvl gated, skips quest items
-					--   7. BoE Armor   - Rare/Epic, iLvl gated, skips quest items
+					--   4. Junk        - auto-sell when Delete Junk is unchecked
+					--   5. Common/Greens/Rares - auto-sell, gear only, skips quest items
+					--   6. BoE Weapons - Rare/Epic, iLvl gated, skips quest items
+					--   7. BoP         - Rare/Epic, iLvl gated, skips quest items
+					--   8. BoE Armor   - Rare/Epic, iLvl gated, skips quest items
 					-- An item can only match one rule per scan.
 					-- ============================================================
 
 					local shouldSell = false
-					local sellReason = nil   -- "list" | "knownRecipe" | "common" | "greens" | "rares" | "boeArmor" | "bop" | "boeWeapons"
+					local sellReason = nil   -- "list" | "knownRecipe" | "junk" | "common" | "greens" | "rares" | "boeArmor" | "bop" | "boeWeapons"
 					local itemId = GetItemIDFromLink(itemLink)
 					local onSellList = (itemId and sellIDs[itemId]) or (name and sellNames[Normalize(name)])
 					local recipeAction, recipeReason, recipeRule, recipeState, recipeQualityEnabled = nil, nil, nil, nil, nil
 
-					-- Step 1: Keep list short-circuits the whole chain.
-					-- Step 1b: Affix Protection also short-circuits before any sell rule.
-					local isOnKeepList = _G.AutoDelete_IsWhitelistedFast(keepIDs, keepNames, itemId, name)
+					-- Step 1: Keep / KeepOne / KeepStack and Affix Protection
+					-- short-circuit before any sell rule.
 					local singleAffixSlot = singleAffixPlan and singleAffixPlan.slots[bag .. ":" .. slot]
-					local missingAffixBlocked, missingAffixState = _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, singleAffixSlot)
-					local isAffixProtected = missingAffixBlocked or IsAffixProtected(profile, bag, slot, itemLink, "sell", singleAffixSlot)
+					local protectedByRule, protectReason = _G.AutoDelete_IsDestructiveRuleProtected(
+						profile, bag, slot, itemLink, "sell", singleAffixSlot,
+						keepIDs, keepNames, keepOneIDs, keepStackIDs)
 
-					if not isOnKeepList and not isAffixProtected then
+					if not protectedByRule then
 
 						recipeAction, recipeReason, recipeRule, recipeState, recipeQualityEnabled =
 							_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, itemLink, itemClass, itemSubType, itemQuality, isQuestItem, onSellList, name)
@@ -6934,6 +7002,9 @@ local function SellItems(silent)
 							local blockedSourceRule = nil
 							if onSellList then
 								blockedSourceRule = "Sell list"
+							elseif not isQuestItem and itemQuality == 0 and profile.qualityActionJunk ~= "delete"
+								and not IsCosmeticSlot(itemLink) then
+								blockedSourceRule = "Auto Actions: Junk sell"
 							elseif not isQuestItem and itemQuality == 1 and isGearItem and profile.qualityActionCommon == "sell" then
 								blockedSourceRule = "Auto Actions: Common gear sell"
 							elseif not isQuestItem and itemQuality == 2 and isGearItem and profile.qualityActionGreens == "sell" then
@@ -6975,7 +7046,15 @@ local function SellItems(silent)
 						-- item only sells if Step 2 matched it explicitly.
 						if recipeAction ~= "protect" and not shouldSell and not isQuestItem then
 
-							-- Step 3: Tri-state gear quality filters (Common /
+							-- Step 3: Junk sells automatically when Delete Junk is
+							-- unchecked. Checked junk is handled by the delete scanner.
+							if not shouldSell and itemQuality == 0
+								and profile.qualityActionJunk ~= "delete"
+								and not IsCosmeticSlot(itemLink) then
+								shouldSell = true; sellReason = "junk"
+							end
+
+							-- Step 4: Tri-state gear quality filters (Common /
 							-- Greens / Rares). When a quality is set to "sell", gear
 							-- of that quality are vendored from this loop.
 							-- When set to "delete" they're handled by the
@@ -7045,6 +7124,9 @@ local function SellItems(silent)
 						local blockedSourceRule = nil
 						if onSellList then
 							blockedSourceRule = "Sell list"
+						elseif not isQuestItem and itemQuality == 0 and profile.qualityActionJunk ~= "delete"
+							and not IsCosmeticSlot(itemLink) then
+							blockedSourceRule = "Auto Actions: Junk sell"
 						elseif not isQuestItem and itemQuality == 1 and isGearItem and profile.qualityActionCommon == "sell" then
 							blockedSourceRule = "Auto Actions: Common gear sell"
 						elseif not isQuestItem and itemQuality == 2 and isGearItem and profile.qualityActionGreens == "sell" then
@@ -7057,9 +7139,12 @@ local function SellItems(silent)
 								itemName = name,
 								itemId = itemId,
 								action = "kept",
-								reason = isOnKeepList and "Keep list blocked sell"
-									or (missingAffixBlocked
-										and ("Missing affix hard stop blocked sell" .. (missingAffixState == "unknown" and " (ownership unknown)" or "")))
+								reason = (protectReason == "keep-blocked" and "Keep list blocked sell")
+									or (protectReason == "keepone-blocked" and "KeepOne blocked sell")
+									or (protectReason == "keepstack-blocked" and "KeepStack blocked sell")
+									or (protectReason == "single-affix-kept" and "KeepOne Missing Affix blocked sell")
+									or (protectReason == "missing-affix-blocked" and "Missing affix hard stop blocked sell")
+									or (protectReason == "missing-affix-unknown" and "Missing affix hard stop blocked sell (ownership unknown)")
 									or "Affix Protection blocked sell",
 								sourceRule = blockedSourceRule,
 								bag = bag,
@@ -7116,6 +7201,7 @@ local function SellItems(silent)
 								reason = "Vendor sale executed",
 								sourceRule = (sellReason == "list" and "Sell list")
 									or (sellReason == "knownRecipe" and "Sell Filters: Sell Known Recipes")
+									or (sellReason == "junk" and "Auto Actions: Junk sell")
 									or (sellReason == "common" and "Auto Actions: Common gear sell")
 									or (sellReason == "greens" and "Auto Actions: Green gear sell")
 									or (sellReason == "rares" and "Auto Actions: Rare gear sell")
@@ -7139,6 +7225,7 @@ local function SellItems(silent)
 	end
 
 	if batchCount > 0 then
+		_G.AutoDelete_SellSessionHadSalesSinceOpen = true
 		sellDryTicks = 0
 	else
 		sellDryTicks = sellDryTicks + 1
@@ -7147,18 +7234,8 @@ local function SellItems(silent)
 			sellSessionCount = 0
 			sellSessionCopper = 0
 			sellDryTicks = 0
-			-- After-sell summon: gated by summonScavenger master + summonAfterSell.
-			-- Vendor window is still open here (MERCHANT_CLOSED fires later).
-			-- If summonOnlyInCombat is set, the player must be in combat here
-			-- and when the delayed summon fires.
-			if cachedProfile and cachedProfile.summonScavenger and cachedProfile.summonAfterSell then
-				local combatOk = (not cachedProfile.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player"))
-				if combatOk then
-					_G.AutoDelete_ScavengerLastTriggerReason = "after-sell"
-					DelayedSummon(2.0)
-				else
-					_G.AutoDelete_ScavengerLastTriggerReason = "after-sell-combat-blocked"
-				end
+			if MerchantFrame and MerchantFrame:IsShown() then
+				MerchantFrame:Hide()
 			end
 		end
 	end
@@ -7709,7 +7786,8 @@ function _G.AutoDelete_GetCachedProfile() return cachedProfile end
 -- ============================================================================
 -- Two behaviours, both gated on the same toggle:
 --   1) Sync (one-time per toggle-flip from false to true): walk all 19
---      inventory slots and add each equipped item to the Keep list.
+--      inventory slots and Blizzard Equipment Manager sets, then add each
+--      discovered item to the Keep list.
 --   2) Reactive: PLAYER_EQUIPMENT_CHANGED fires whenever the player swaps
 --      gear; the new item in that slot is added to Keep.
 -- Both paths funnel through AddItemToKeepQuiet, which is identical to
@@ -7724,6 +7802,7 @@ function _G.AutoDelete_GetCachedProfile() return cachedProfile end
 local EQUIPPED_SLOT_FIRST = 1
 local EQUIPPED_SLOT_LAST  = 19
 local SKIPPED_EQUIP_SLOTS = {
+	[0]  = true,   -- ammo
 	[4]  = true,   -- shirt
 	[19] = true,   -- tabard
 }
@@ -7752,31 +7831,121 @@ local function AddItemToKeepQuiet(itemId)
 	return true
 end
 
--- Walk the equipped inventory and add each item to Keep. Used on toggle
--- flip-to-on and (optionally) PLAYER_LOGIN if we ever wire it that way.
+-- Walk the equipped inventory and Blizzard equipment sets, then add each item
+-- to Keep. Used on toggle flip-to-on and equipment-set changes.
 local function SyncEquippedToKeep()
-	local added = 0
+	local function addEquipmentSetItemID(idSet, slot, itemId)
+		slot = tonumber(slot)
+		itemId = tonumber(itemId)
+		if not slot or not itemId or itemId <= 0 then return end
+		if SKIPPED_EQUIP_SLOTS[slot] then return end
+		idSet[itemId] = true
+	end
+
+	local function addEquipmentSetItemIDsFromResult(idSet, results)
+		if type(results[1]) == "table" then
+			for slot, itemId in pairs(results[1]) do
+				addEquipmentSetItemID(idSet, slot, itemId)
+			end
+			return true
+		end
+
+		for slot = 1, table.getn(results) do
+			addEquipmentSetItemID(idSet, slot, results[slot])
+		end
+		return true
+	end
+
+	local function addEquipmentSetItemIDsFromCall(idSet, getter, setKey, target)
+		local results
+		if target ~= nil then
+			results = { pcall(getter, setKey, target) }
+		else
+			results = { pcall(getter, setKey) }
+		end
+		local ok = table.remove(results, 1)
+		if not ok then return false end
+		return addEquipmentSetItemIDsFromResult(idSet, results)
+	end
+
+	local function collectBlizzardEquipmentSetItemIDs()
+		local idSet = {}
+
+		if type(GetNumEquipmentSets) == "function"
+			and type(GetEquipmentSetInfo) == "function"
+			and type(GetEquipmentSetItemIDs) == "function" then
+			local okCount, setCount = pcall(GetNumEquipmentSets)
+			setCount = okCount and tonumber(setCount) or 0
+			for index = 1, setCount do
+				local info = { pcall(GetEquipmentSetInfo, index) }
+				local okInfo = table.remove(info, 1)
+				local setName = okInfo and info[1] or nil
+				local setID = okInfo and info[3] or nil
+				if setName then
+					local addedSetItems = addEquipmentSetItemIDsFromCall(idSet, GetEquipmentSetItemIDs, setName, {})
+					if not addedSetItems then
+						addEquipmentSetItemIDsFromCall(idSet, GetEquipmentSetItemIDs, setName, nil)
+					end
+				elseif setID then
+					local addedSetItems = addEquipmentSetItemIDsFromCall(idSet, GetEquipmentSetItemIDs, setID, {})
+					if not addedSetItems then
+						addEquipmentSetItemIDsFromCall(idSet, GetEquipmentSetItemIDs, setID, nil)
+					end
+				end
+			end
+		end
+
+		local equipmentSetAPI = _G.C_EquipmentSet
+		if type(equipmentSetAPI) == "table"
+			and type(equipmentSetAPI.GetEquipmentSetIDs) == "function"
+			and type(equipmentSetAPI.GetItemIDs) == "function" then
+			local okSets, setIDs = pcall(equipmentSetAPI.GetEquipmentSetIDs)
+			if okSets and type(setIDs) == "table" then
+				for _, setID in ipairs(setIDs) do
+					addEquipmentSetItemIDsFromCall(idSet, equipmentSetAPI.GetItemIDs, setID, nil)
+				end
+			end
+		end
+
+		return idSet
+	end
+
+	local equippedAdded = 0
 	for slot = EQUIPPED_SLOT_FIRST, EQUIPPED_SLOT_LAST do
 		if not SKIPPED_EQUIP_SLOTS[slot] then
 			local link = GetInventoryItemLink("player", slot)
 			if link then
 				local id = GetItemIDFromLink(link)
 				if id and AddItemToKeepQuiet(id) then
-					added = added + 1
+					equippedAdded = equippedAdded + 1
 				end
 			end
 		end
 	end
+	local setAdded = 0
+	local setItemIDs = collectBlizzardEquipmentSetItemIDs()
+	for itemId in pairs(setItemIDs) do
+		if AddItemToKeepQuiet(itemId) then
+			setAdded = setAdded + 1
+		end
+	end
+	local added = equippedAdded + setAdded
 	if added > 0 then
-		print("|cffff8000[AutoDelete]|r Auto-added " .. added
-			.. " currently equipped item" .. (added == 1 and "" or "s") .. " to Keep.")
+		local parts = {}
+		if equippedAdded > 0 then
+			table.insert(parts, equippedAdded .. " currently equipped item" .. (equippedAdded == 1 and "" or "s"))
+		end
+		if setAdded > 0 then
+			table.insert(parts, setAdded .. " Blizzard equipment set item" .. (setAdded == 1 and "" or "s"))
+		end
+		print("|cffff8000[AutoDelete]|r Auto-added " .. table.concat(parts, " and ") .. " to Keep.")
 		local panel = _G.AutoDeleteOptionsPanel
 		if panel and panel._built and panel:IsVisible()
 			and not (panel._rawBoxHolder and panel._rawBoxHolder:IsShown()) then
 			panel:Refresh()
 		end
 	end
-	return added
+	return added, equippedAdded, setAdded
 end
 _G.AutoDelete_SyncEquippedToKeep = SyncEquippedToKeep
 
@@ -9402,6 +9571,9 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 			recipeProtectRule = recipeRule
 		elseif onSell then
 			sellRule = "Sell list"
+		elseif not isQuestItem and itemQuality == 0 and profile.qualityActionJunk ~= "delete"
+			and not IsCosmeticSlot(link) then
+			sellRule = "Auto Actions: Junk sell"
 		elseif not isQuestItem and itemQuality == 1 and isSellGearItem
 			and profile.qualityActionCommon == "sell" then
 			sellRule = "Auto Actions: Common gear sell"
@@ -9907,6 +10079,12 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		table.insert(lines, "  Final: no auto-sell. AutoDelete is disabled.")
 	elseif onKeep then
 		table.insert(lines, "  Final: keep. Keep list wins before Sell or auto-sell.")
+	elseif onKeepOne then
+		table.insert(lines, "  Final: keep. KeepOne blocks sell rules.")
+	elseif onKeepStack then
+		table.insert(lines, "  Final: keep. KeepStack blocks sell rules.")
+	elseif singleAffixSlot and not singleAffixSlot.extra then
+		table.insert(lines, "  Final: keep. KeepOne Missing Affix blocks sell.")
 	elseif missingAffixBlocked then
 		table.insert(lines, "  Final: keep. " .. missingAffixWhyText .. " blocks sell.")
 	elseif bag and slot and itemLink and IsAffixProtected(profile, bag, slot, itemLink, "sell", singleAffixSlot) then
@@ -9925,6 +10103,8 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		table.insert(lines, "  Final: sell at vendor. Explicit Sell list entry matches.")
 	elseif isQuestItem then
 		table.insert(lines, "  Final: keep. Quest item blocks auto-sell.")
+	elseif quality == 0 and profile.qualityActionJunk ~= "delete" and not isCosmetic then
+		table.insert(lines, "  Final: sell at vendor. Delete Junk is unchecked.")
 	elseif quality == 1 and profile.qualityActionCommon == "sell" and isSellGearItem then
 		table.insert(lines, "  Final: sell at vendor. Common gear auto action is Sell.")
 	elseif quality == 2 and profile.qualityActionGreens == "sell" and isSellGearItem then
@@ -10004,6 +10184,9 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 			local affixKey = _G.AutoDelete_GetAffixKeyForItemName
 				and _G.AutoDelete_GetAffixKeyForItemName(affixDisplayName)
 				or nil
+			if not affixKey and _G.AutoDelete_GetWeaponProcAffixKeyForSlot then
+				affixKey = _G.AutoDelete_GetWeaponProcAffixKeyForSlot(bag, slot, itemLink)
+			end
 			local dotLevel, dotColor = _G.AutoDelete_DecideDot(itemLink, bag, slot, nil)
 			table.insert(lines, "  Tier: " .. tostring(tier))
 			if affixDisplayName and affixDisplayName ~= itemName then
@@ -10120,7 +10303,7 @@ function _G.AutoDelete_BuildDiagnosticReport()
 		"  KeepStack: " .. CountEntries(profile.keepStackText),
 		"",
 		"Auto actions:",
-		"  Junk: " .. tostring(profile.qualityActionJunk),
+		"  Junk: " .. ((profile.qualityActionJunk == "delete") and "delete" or "sell at vendor"),
 		"  ElvUI junk coin hidden: " .. tostring(_G.AutoDelete_ElvUIJunkIconState and _G.AutoDelete_ElvUIJunkIconState.active or false),
 		"  Common: " .. tostring(profile.qualityActionCommon),
 		"  Greens: " .. tostring(profile.qualityActionGreens),
@@ -10631,6 +10814,7 @@ scanner:RegisterEvent("BAG_UPDATE_DELAYED")
 scanner:RegisterEvent("MERCHANT_SHOW")
 scanner:RegisterEvent("MERCHANT_CLOSED")
 scanner:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+pcall(scanner.RegisterEvent, scanner, "EQUIPMENT_SETS_CHANGED")
 scanner:RegisterEvent("PLAYER_REGEN_ENABLED")    -- flush deferred disenchant updates
 scanner:RegisterEvent("SPELLS_CHANGED")          -- re-check Disenchant known status
 scanner:RegisterEvent("UNIT_SPELLCAST_START")
@@ -10659,6 +10843,37 @@ scanner:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED") -- v3.20: chat notify after DE
 --   3. Optional: walk through binding "Interact With Target" in Esc menu.
 -- After all steps, opens the main settings panel.
 
+function _G.AutoDelete_ShouldSuppressWelcome()
+	local db = GetDB()
+	local charKey = GetCharKey() or "Default"
+	db.welcomeDismissedByChar = db.welcomeDismissedByChar or {}
+
+	if db.welcomeDismissedByChar[charKey] == true then return true end
+
+	-- Legacy v3.x stored "Don't show again" as one account-wide flag. Keep
+	-- that player's next login dismissed, then clear the global flag so fresh
+	-- characters/profiles are not silently skipped forever.
+	if db.welcomeDismissed == true then
+		db.welcomeDismissedByChar[charKey] = true
+		db.welcomeDismissed = nil
+		return true
+	end
+
+	return false
+end
+
+function _G.AutoDelete_SetWelcomeDismissedForCharacter(dismissed)
+	local db = GetDB()
+	local charKey = GetCharKey() or "Default"
+	db.welcomeDismissedByChar = db.welcomeDismissedByChar or {}
+	if dismissed then
+		db.welcomeDismissedByChar[charKey] = true
+	else
+		db.welcomeDismissedByChar[charKey] = nil
+	end
+	db.welcomeDismissed = nil
+end
+
 local function ShowWelcomePopup()
 	if _G.AutoDelete_WelcomePopup then
 		_G.AutoDelete_WelcomePopup:Show()
@@ -10682,6 +10897,8 @@ local function ShowWelcomePopup()
 		TEXT_BRIGHT = { 0.90, 0.90, 0.90, 1 },
 		TEXT_MUTED = { 0.75, 0.75, 0.75, 1 },
 		TEXT_SUBTLE = { 0.55, 0.55, 0.55, 1 },
+		CALLOUT_BG = { 0.06, 0.11, 0.13, 1 },
+		CALLOUT_BORDER = { 0.35, 0.82, 1.00, 0.95 },
 		CLOSE_HOVER = { 1.00, 0.30, 0.30, 1 },
 		BUTTON_BG = { 0.10, 0.10, 0.10, 1 },
 		BUTTON_HOVER = { 0.18, 0.18, 0.18, 1 },
@@ -10707,7 +10924,7 @@ local function ShowWelcomePopup()
 	-- dark body, dark gray border, dark title bar, orange title text, dim
 	-- close X that turns red on hover.
 	local f = CreateFrame("Frame", "AutoDelete_WelcomePopup", UIParent)
-	f:SetSize(440, 658)
+	f:SetSize(440, 730)
 	f:SetPoint("CENTER")
 	f:SetFrameStrata("DIALOG")
 	f:SetFrameLevel(100)
@@ -11017,33 +11234,42 @@ local function ShowWelcomePopup()
 			end
 		end
 	end
-	local aaeCheck = CreateFrame("Button", nil, f)
-	aaeCheck:SetSize(14, 14)
-	aaeCheck:SetPoint("TOPLEFT", 16, -482)
+	local aaeBox = CreateFrame("Frame", nil, f)
+	aaeBox:SetPoint("TOPLEFT", 16, -500)
+	aaeBox:SetPoint("TOPRIGHT", -16, -500)
+	aaeBox:SetHeight(58)
+	aaeBox:SetBackdrop({ bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 1 })
+	aaeBox:SetBackdropColor(unpack(C.CALLOUT_BG))
+	aaeBox:SetBackdropBorderColor(unpack(C.CALLOUT_BORDER))
+
+	local aaeCheck = CreateFrame("Button", nil, aaeBox)
+	aaeCheck:SetSize(18, 18)
+	aaeCheck:SetPoint("TOPLEFT", 10, -10)
 	aaeCheck:SetBackdrop({ bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 1 })
 	aaeCheck:SetBackdropColor(unpack(C.CHECK_BG))
-	aaeCheck:SetBackdropBorderColor(unpack(C.CHECK_BORDER))
+	aaeCheck:SetBackdropBorderColor(unpack(C.CALLOUT_BORDER))
 
 	local aaeMark = aaeCheck:CreateTexture(nil, "OVERLAY")
 	aaeMark:SetTexture("Interface\\AddOns\\AutoDelete\\textures\\checkmark.tga")
-	aaeMark:SetSize(12, 12)
+	aaeMark:SetSize(16, 16)
 	aaeMark:SetPoint("CENTER")
 	if aaeChecked then aaeMark:Show() else aaeMark:Hide() end
 
-	local aaeLabel = f:CreateFontString(nil, "OVERLAY")
-	aaeLabel:SetFont(FONT, 11)
+	local aaeLabel = aaeBox:CreateFontString(nil, "OVERLAY")
+	aaeLabel:SetFont(FONT, 12, "OUTLINE")
 	aaeLabel:SetPoint("LEFT", aaeCheck, "RIGHT", 6, 0)
-	aaeLabel:SetTextColor(unpack(C.TEXT))
+	aaeLabel:SetTextColor(unpack(C.CALLOUT_BORDER))
 	aaeLabel:SetText("Auto-Add Equipped Items to Keep")
 
-	local aaeDesc = f:CreateFontString(nil, "OVERLAY")
+	local aaeDesc = aaeBox:CreateFontString(nil, "OVERLAY")
 	aaeDesc:SetFont(FONT, 10)
-	aaeDesc:SetPoint("TOPLEFT", aaeCheck, "BOTTOMLEFT", 0, -2)
-	aaeDesc:SetPoint("RIGHT", f, "RIGHT", -16, 0)
+	aaeDesc:SetPoint("TOPLEFT", aaeLabel, "BOTTOMLEFT", 0, -5)
+	aaeDesc:SetPoint("RIGHT", aaeBox, "RIGHT", -10, 0)
+	aaeDesc:SetHeight(22)
 	aaeDesc:SetJustifyH("LEFT")
 	aaeDesc:SetWordWrap(true)
-	aaeDesc:SetTextColor(unpack(C.TEXT_SUBTLE))
-	aaeDesc:SetText("Adds your currently equipped items to Keep, plus anything you equip later. Recommended.")
+	aaeDesc:SetTextColor(unpack(C.TEXT_BRIGHT))
+	aaeDesc:SetText("Recommended: protects equipped gear, saved equipment sets, and newly equipped items.")
 
 	-- Click handler writes to profile and (if enabling) runs the sync.
 	local function ToggleAutoAddEquipped()
@@ -11070,9 +11296,10 @@ local function ShowWelcomePopup()
 	aaeCheck:SetScript("OnClick", ToggleAutoAddEquipped)
 
 	-- Make label clickable too
-	local aaeLabelBtn = CreateFrame("Button", nil, f)
+	local aaeLabelBtn = CreateFrame("Button", nil, aaeBox)
 	aaeLabelBtn:SetPoint("LEFT", aaeCheck, "RIGHT", 0, 0)
-	aaeLabelBtn:SetSize(280, 14)
+	aaeLabelBtn:SetPoint("RIGHT", aaeBox, "RIGHT", -8, 0)
+	aaeLabelBtn:SetHeight(36)
 	aaeLabelBtn:SetScript("OnClick", ToggleAutoAddEquipped)
 
 	-- Warning callout: bright red box reminding users to put valuable items
@@ -11080,8 +11307,8 @@ local function ShowWelcomePopup()
 	-- between 'How it works' and the footer. Backdrop with red border for
 	-- visual punch so it can't be missed.
 	local warnFrame = CreateFrame("Frame", nil, f)
-	warnFrame:SetPoint("TOPLEFT", 16, -522)
-	warnFrame:SetPoint("TOPRIGHT", -16, -522)
+	warnFrame:SetPoint("TOPLEFT", 16, -580)
+	warnFrame:SetPoint("TOPRIGHT", -16, -580)
 	warnFrame:SetHeight(84)
 	warnFrame:SetBackdrop({
 		bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 2,
@@ -11156,8 +11383,7 @@ local function ShowWelcomePopup()
 	openSettings:SetPoint("RIGHT", footerBar, "RIGHT", -16, 0)
 	openSettings:SetScript("OnClick", function()
 		if dontShow then
-			_G.AutoDeleteDB = _G.AutoDeleteDB or {}
-			_G.AutoDeleteDB.welcomeDismissed = true
+			_G.AutoDelete_SetWelcomeDismissedForCharacter(true)
 		end
 		f:Hide()
 		local panel = _G.AutoDeleteOptionsPanel
@@ -11187,8 +11413,7 @@ local function ShowWelcomePopup()
 	-- Hook close (X or Esc) to also persist the dismissal if checked
 	f:SetScript("OnHide", function()
 		if dontShow then
-			_G.AutoDeleteDB = _G.AutoDeleteDB or {}
-			_G.AutoDeleteDB.welcomeDismissed = true
+			_G.AutoDelete_SetWelcomeDismissedForCharacter(true)
 		end
 	end)
 end
@@ -11253,6 +11478,12 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 			_G.AutoDelete_TooltipCache.soulbound = {}
 		end
 		HandleEquipmentChanged(arg1)
+		return
+	end
+	if event == "EQUIPMENT_SETS_CHANGED" then
+		if cachedProfile and cachedProfile.autoAddEquipped then
+			SyncEquippedToKeep()
+		end
 		return
 	end
 	if event == "PLAYER_LOGIN" then
@@ -11347,8 +11578,8 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 		if _G._AutoDelete_NeedJunkActionNotice then
 			local migratedJunkSell = _G._AutoDelete_NeedJunkActionNotice
 			_G._AutoDelete_NeedJunkActionNotice = nil
-			print("|cffff8000[AutoDelete]|r |cffffff00Auto Actions updated:|r Junk Sell was removed from the options panel and set to Off for " ..
-				tostring(migratedJunkSell) .. " profile(s). Use General > Delete Junk if you want gray items deleted.")
+			print("|cffff8000[AutoDelete]|r |cffffff00Auto Actions updated:|r Junk Sell is automatic when Delete Junk is unchecked. " ..
+				tostring(migratedJunkSell) .. " profile(s) were moved to the checkbox behavior.")
 		end
 
 		-- Keep bags open when the vendor closes. Diagnostic trace on PE-ElvUI
@@ -11423,6 +11654,15 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 		end
 
 		AfterDelay(2, function()
+			-- Keep first-run setup independent from optional bag integrations.
+			-- If ElvUI/Bagnon setup errors, the timer pcall catches that
+			-- callback; this separate callback still gets a chance to show.
+			if not (_G.AutoDelete_ShouldSuppressWelcome and _G.AutoDelete_ShouldSuppressWelcome()) then
+				ShowWelcomePopup()
+			end
+		end)
+
+		AfterDelay(2, function()
 			CreateElvUIBagButton()
 			-- Last-resort compatibility path for ElvUI's replacement bag UI.
 			-- Default Blizzard bags use ContainerFrame_Update above.
@@ -11432,11 +11672,6 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 			end
 			if _G.AutoDelete_RefreshElvUIJunkIconSuppression then
 				_G.AutoDelete_RefreshElvUIJunkIconSuppression(cachedProfile)
-			end
-			-- Show the welcome popup unless the user clicked
-			-- "Don't show this again" on a previous login.
-			if not (_G.AutoDeleteDB and _G.AutoDeleteDB.welcomeDismissed) then
-				ShowWelcomePopup()
 			end
 			-- One-shot scan: detect items present on more than one list
 			-- (Delete + Sell, Delete + Keep, Sell + Keep). The add-time
@@ -11532,6 +11767,7 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 		-- Sample inventory worth BEFORE selling (otherwise we'd always sample
 		-- post-sell bags, underselling the average).
 		SampleInventoryWorth()
+		_G.AutoDelete_SellSessionHadSalesSinceOpen = false
 		-- Master toggle gate: when AutoDelete is disabled the addon must
 		-- not perform ANY action, including auto-repair or auto-sell. Bag
 		-- sampling and tracking still run because they're passive.
@@ -11558,18 +11794,20 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 			scanner.nextButtonRefreshAt = catchupAt
 			scanner.nextPanelRefreshAt  = catchupAt
 		end)
-		local hadSellSession = sellSessionCount > 0
-		if hadSellSession then
+		local hadUnprintedSellSession = sellSessionCount > 0
+		local hadSellSession = hadUnprintedSellSession or _G.AutoDelete_SellSessionHadSalesSinceOpen
+		if hadUnprintedSellSession then
 			print("|cffff8000[AutoDelete]|r Sold " .. sellSessionCount .. " item(s) for " .. FormatMoney(sellSessionCopper))
 			sellSessionCount = 0
 			sellSessionCopper = 0
 			sellDryTicks = 0
 		end
+		_G.AutoDelete_SellSessionHadSalesSinceOpen = false
 		if cachedProfile and cachedProfile.summonScavenger and cachedProfile.summonAfterSell and hadSellSession then
 			local combatOk = (not cachedProfile.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player"))
 			if combatOk then
 				_G.AutoDelete_ScavengerLastTriggerReason = "after-sell-merchant-closed"
-				DelayedSummon(1.5)
+				DelayedSummon(2.0)
 			else
 				_G.AutoDelete_ScavengerLastTriggerReason = "after-sell-merchant-closed-combat-blocked"
 			end
@@ -11777,13 +12015,25 @@ scanner:SetScript("OnUpdate", function(self, elapsed)
 		end
 		return
 	end
-	-- v3.20: drain the throttled delete queue. One item per DELAY (90ms)
-	-- interval; cheap no-op when the queue is empty or the throttle hasn't
-	-- elapsed. Placed AFTER the master-enable gate so disabling the addon
-	-- mid-burst stops further deletes AND clears the queue (see above) so
-	-- re-enabling does a fresh walk under current settings.
+	-- v3.20: drain the throttled delete queue. Up to 10 items per DELAY
+	-- (70ms) interval; cheap no-op when the queue is empty or the throttle
+	-- hasn't elapsed. Placed AFTER the master-enable gate so disabling the
+	-- addon mid-burst stops further deletes AND clears the queue (see above)
+	-- so re-enabling does a fresh walk under current settings.
 	if _G.AutoDelete_DrainDeleteQueue then
-		_G.AutoDelete_DrainDeleteQueue(now)
+		local Q = _G.AutoDelete_DeleteQueue
+		local drained = 0
+		local maxDrain = _G.AutoDelete_DeleteDrainBatchSize or 10
+		while Q and drained < maxDrain do
+			local before = #Q.items
+			if before == 0 then break end
+			_G.AutoDelete_DrainDeleteQueue(now)
+			if #Q.items >= before then break end
+			drained = drained + 1
+			if drained < maxDrain and #Q.items > 0 then
+				Q.lastAt = now - (Q.DELAY or 0)
+			end
+		end
 	end
 	if now >= nextPeriodicAt then
 		nextPeriodicAt = now + periodicInterval
@@ -11841,11 +12091,11 @@ scanner:SetScript("OnUpdate", function(self, elapsed)
 			-- throughput stays roughly the same (~20 items/sec) but no
 			-- single scan tick exceeds one frame.
 			local interval = (cachedProfile.scanInterval and cachedProfile.scanInterval >= 0.25) and cachedProfile.scanInterval or 0.25
-			-- Vendor selling should stay responsive even when the normal bag
-			-- scan setting is slower. The sell batch is already capped, so this
-			-- only tightens the gap between merchant sell passes.
-			if MerchantFrame and MerchantFrame:IsShown() and interval > 0.35 then
-				interval = 0.35
+			-- Vendor selling matches the delete cadence: one server-facing
+			-- batch of item actions every 70ms. The normal scan interval can be faster
+			-- or slower, but vendor UseContainerItem calls should not burst.
+			if MerchantFrame and MerchantFrame:IsShown() then
+				interval = 0.07
 			end
 			nextScanAt = now + interval
 			DeleteItems()
@@ -11889,10 +12139,9 @@ local dismissedDueToMount = nil
 local bagsFullArmed       = true   -- true = next 'near full' will fire
 local bagsFullSince       = nil    -- GetTime() when bags first became near-full; reset when a slot frees
 -- v3.20 queue-aware Goblin defer: snapshot of #_G.AutoDelete_DeleteQueue.items
--- at the moment bagsFullSince started accumulating. While the queue keeps
--- SHRINKING from this snapshot the drain is winning and we re-arm the timer
--- (no Goblin yet). If the queue plateaus or grows (loot rate >= drain rate),
--- the timer accumulates normally and Goblin fires after BAGS_FULL_DELAY.
+-- while the delete pipeline is active. Merchant is deferred while queue
+-- entries exist or delete/enqueue activity is recent; the timer only starts
+-- after a settled scan finds no deletable candidates.
 -- Lives on _G (not a file-local) because the main chunk is already at
 -- Lua 5.1's 200-local cap; adding a file-local here triggers the
 -- "main function has more than 200 local variables" compile error.
@@ -11936,13 +12185,11 @@ end
 --          before the merchant fires)
 --   v3.20: 2.0 -> 3.5 (queue-throttled deletes changed throughput from
 --          ~16 items/sec to ~9 items/sec, so the 2.0 s window only
---          absorbed ~18 items. Current drain is ~11 items/sec, and 3.5 s still
+--          absorbed ~18 items. Current drain is up to ~140 items/sec, and 3.5 s still
 --          comfortably absorbs a typical burst before the anti-starvation cap.
---          PLUS the bag-full check now defers when the delete
---          queue is actively shrinking -- see _G.AutoDelete_BagsFullQueueAtStart logic
---          in the auto-summon block below. The shrink-defer is the
---          primary mechanism; this absolute cap is the anti-starvation
---          backstop for when loot rate genuinely exceeds drain rate.)
+--          PLUS the bag-full check now defers while the delete pipeline is
+--          active. This absolute cap only applies once AutoDelete has scanned
+--          and found no deletable candidates.)
 local BAGS_FULL_DELAY = 3.5
 
 -- ============================================================================
@@ -12203,41 +12450,17 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 
 	-- (3) Bag-full auto-summon. See BAGS_FULL_DELAY above for debounce.
 	--
-	-- The 1.5s debounce IS the "give AutoDelete a chance to clear"
-	-- gate: if AutoDelete frees slots in time, bags rise above
-	-- threshold and the "above threshold" branch below resets the
-	-- timer; no summon fires. If AutoDelete CAN'T keep up (e.g. scav
-	-- is looting faster than the delete scan can clear, so bags
-	-- oscillate around or stay below threshold for 1.5s straight),
-	-- the timer accumulates and the summon fires -- which is correct
-	-- (more loot coming in than auto-delete can handle, user needs
-	-- the Goblin).
+	-- The debounce is the "give AutoDelete a chance to clear" gate:
+	-- if AutoDelete frees slots in time, bags rise above threshold and
+	-- the "above threshold" branch below resets the timer; no summon
+	-- fires. While the delete pipeline is active, Merchant is deferred
+	-- outright. Merchant is only allowed once the pipeline has had a
+	-- settled scan and found no deletable candidates.
 	--
-	-- An earlier build added an AutoDelete_HasPendingDeleteItems gate
-	-- here that reset bagsFullSince whenever any delete-eligible item
-	-- was in bags. That broke the scav-looting-faster-than-deletes
-	-- case: with pending deletes always present during a sustained
-	-- loot burst, the timer never accumulated and Goblin never
-	-- summoned. Removed.
-	--
--- v3.20 queue-aware re-add: with queue-throttled deletes (current drain is
--- ~11 items/sec vs old ~16/sec) the raw timer-based debounce could
-	-- fire Goblin BEFORE the drain finished a moderate burst. Fix is
-	-- a SHRINKING-QUEUE gate (not a "pending-exists" gate, which had
-	-- the old bug): snapshot queue length when bagsFullSince starts;
-	-- if the queue length is currently SMALLER than the snapshot, the
-	-- drain is winning and we re-arm the timer with the new (smaller)
-	-- snapshot. If the queue plateaus or grows (loot rate >= drain
-	-- rate), the timer accumulates normally and Goblin fires after
-	-- BAGS_FULL_DELAY. Edge cases:
-	--   - Queue empty AND free still under threshold: snapshot starts
-	--     at 0, current is 0, no shrink possible, timer accumulates,
-	--     Goblin fires. Correct (nothing left to auto-delete).
-	--   - Loot rate > drain rate: queue grows past snapshot, no
-	--     shrink, timer accumulates. Goblin fires. Correct.
-	--   - Drain catches up before timer hits cap: queue shrinks each
-	--     tick, timer keeps resetting, eventually free rises past
-	--     threshold and the else-branch fires the FULL reset (re-arm).
+	-- v3.20 queue-aware re-add, revised after live testing: with
+	-- queue-throttled deletes, raw timer debounce could fire Goblin
+	-- before the drain finished a moderate burst. Queue presence or
+	-- recent drain/enqueue activity is now a hard defer.
 	if p.summonMerchantWhenBagsFull then
 		local free = ComputeTotalFreeSlots()
 		local qLen = #_G.AutoDelete_DeleteQueue.items
@@ -12296,34 +12519,20 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 			local foundNothingLastWalk = walkSinceBelow and lastWalkEnq == 0
 
 			if pipelineBusy then
-				-- State 2: pipeline actively working. Use queue-shrink
-				-- timer (preserved from prior implementation).
-				if not bagsFullSince then
-					bagsFullSince = now
-					_G.AutoDelete_BagsFullQueueAtStart = qLen
-				elseif _G.AutoDelete_BagsFullQueueAtStart
-					and qLen > 0
-					and qLen < _G.AutoDelete_BagsFullQueueAtStart then
-					-- Queue shrunk: drain is winning, reset + re-snapshot.
-					bagsFullSince = now
-					_G.AutoDelete_BagsFullQueueAtStart = qLen
-					_G.AutoDelete_GoblinLastDeferReason = "pipeline-busy-shrinking"
-				elseif (now - bagsFullSince) >= BAGS_FULL_DELAY then
-					-- Queue stopped shrinking for the full delay window
-					-- = loot rate > drain rate. Fire.
-					if _G.AutoDelete_GoblinAutoBackoffActive and _G.AutoDelete_GoblinAutoBackoffActive() then
-						_G.AutoDelete_GoblinLastDeferReason = "summon-backoff"
+				-- State 2: pipeline actively working. Do not summon while
+				-- queued or recent deletes may still free slots.
+				bagsFullSince = nil
+				if qLen > 0 then
+					if _G.AutoDelete_BagsFullQueueAtStart
+						and qLen < _G.AutoDelete_BagsFullQueueAtStart then
+						_G.AutoDelete_GoblinLastDeferReason = "pipeline-busy-shrinking"
 					else
-						bagsFullArmed = false
-						bagsFullSince = nil
-						_G.AutoDelete_BagsFullQueueAtStart = nil
-						_G.AutoDelete_BagsBelowAt = 0
-						_G.AutoDelete_GoblinLastFireAt = now
-						_G.AutoDelete_GoblinLastFireReason = "queue-stopped-shrinking"
-						SummonGoblinMerchant()
+						_G.AutoDelete_GoblinLastDeferReason = "pipeline-busy-queue"
 					end
+					_G.AutoDelete_BagsFullQueueAtStart = qLen
 				else
-					_G.AutoDelete_GoblinLastDeferReason = "pipeline-busy-waiting"
+					_G.AutoDelete_BagsFullQueueAtStart = nil
+					_G.AutoDelete_GoblinLastDeferReason = "pipeline-busy-recent"
 				end
 			elseif not walkSinceBelow then
 				-- State 1: pipeline has NOT scanned yet since bags went
@@ -12471,7 +12680,7 @@ end)
 --                       below for the matching rules)
 -- /del sell          -> force a sell pass at the current vendor (NOT gated
 --                       by master Enable; manual override)
--- /del setup         -> reopen the welcome popup (clears welcomeDismissed)
+-- /del setup         -> reopen the welcome popup (clears this character's dismissal)
 -- /autodelete        -> alias for /del
 
 -- ----------------------------------------------------------------------------
@@ -13611,8 +13820,9 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		-- Re-open the welcome popup. Clears the dismissed flag so the user
 		-- can see it again from this point forward unless they re-check
 		-- "Don't show this again" inside the popup.
-		_G.AutoDeleteDB = _G.AutoDeleteDB or {}
-		_G.AutoDeleteDB.welcomeDismissed = false
+		if _G.AutoDelete_SetWelcomeDismissedForCharacter then
+			_G.AutoDelete_SetWelcomeDismissedForCharacter(false)
+		end
 		ShowWelcomePopup()
 		return
 	end
