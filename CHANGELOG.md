@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+## [3.28] - 2026-06-26
+
+### Changed
+
+- **Junk now auto-sells when Delete Junk is unchecked.** The General tab keeps one checkbox: checked deletes gray junk during bag scans, unchecked sells gray junk at vendors.
+- **Sell is faster while delete stays steady.** AutoDelete deletes up to 10 item actions every 70ms, while vendor selling now clears up to 20 item actions every 70ms so selling does not leave you standing still as long.
+- **Vendor closes before Scavenger returns.** After a sell session dries up, AutoDelete closes the merchant window first; Greedy Scavenger no longer fires while the vendor is still open.
+- **Process Bags has a manual refresh.** A Refresh button now sits beside Clear Ignored so the panel can rebuild from current bag contents on demand.
+- **Goblin Merchant waits for active deletes.** Bag-full Merchant summon now defers while the delete queue is active or recently drained; it only starts its summon timer after AutoDelete scans and finds no deletable candidates.
+- **Auto-Add Equipped now includes Blizzard equipment sets.** Saved equipment set items are added to Keep along with currently worn gear, and set changes resync while the toggle is on.
+- **Welcome popup dismissal is now per character.** The old account-wide "Don't show this again" flag could hide setup for fresh characters; it is now migrated to the current character only.
+- **Welcome popup now opens independently of bag integration setup.** First-run setup is no longer blocked if a delayed ElvUI or Bagnon hook errors before the popup call.
+- **Welcome popup Auto-Add Equipped is more visible.** The checkbox now appears in a highlighted callout with clearer copy about protecting equipped gear and saved Blizzard equipment sets.
+- **KeepOne and KeepStack now block vendor sell rules.** Items on KeepOne or KeepStack are protected before Rare/Common/BoE/BoP sell filters, matching Process Bags, Delete, and One-Key Disenchant behavior.
+- **Affix Protection is the destructive-action hard stop.** Checked affix tiers and missing-affix hard stops now win before KeepOne/KeepStack sell protection and no longer count as pending delete candidates.
+- **No-tier known affixes now count as affixes.** Weapon affixes without a Roman tier suffix use the same Tier I fallback as tooltip-marker detection, so known-affix name fallback can still block Sell/Delete.
+- **Unlisted weapon on-hit affixes are protected.** Weapon-slot items with on-hit proc text now count as missing weapon affixes when PE has not listed the affix yet, letting Show/Keep Missing Affix and KeepOne Missing Affix block Sell/Delete.
+- **Process Bags now shows rule reasons in row tooltips.** Hovering a row shows the source rule and reason, making Affix Protection, missing-affix, KeepOne, and KeepStack blockers visible without opening Why.
+
 ## [3.27.1] - 2026-06-24
 
 ### Hot Fix

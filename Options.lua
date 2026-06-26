@@ -897,7 +897,8 @@ local DEFAULT_PROFILE = {
 	keepOneText = "",
 	keepStackText = "",
 	-- 3-state gear quality filters: "off" | "delete" | "sell".
-	-- Junk is delete-only in the options UI.
+	-- Junk is checkbox-driven in the options UI: checked deletes gray
+	-- items, unchecked auto-sells gray items at vendors.
 	qualityActionJunk   = "off",
 	qualityActionCommon = "off",
 	qualityActionGreens = "off",
@@ -972,7 +973,8 @@ local function EnsureProfileFields(p)
 		or (p.sellBoE ~= nil) or (p.sellBoEWeapons ~= nil)
 		or (p.sellIlvlEnabled ~= nil)
 	if hasOldFields and not p._v302Migrated then
-		if p.sellJunk == true then p.autoGray = true end
+		-- Junk is no longer a separate sell option. Delete Junk checked
+		-- deletes; unchecked auto-sells at vendors.
 		p.autoDeleteCommon = false
 		p.autoSellGreens   = (p.sellGreen == true)
 
@@ -1480,7 +1482,7 @@ scrollFrame:SetScript("OnVerticalScroll", function(self, offset)
 		end)
 end)
 
--- Footer: row count on the left, "Clear Ignored" button on the right.
+-- Footer: row count on the left, refresh / clear actions on the right.
 local footer = CreateFrame("Frame", nil, panel)
 footer:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 0, 0)
 footer:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 0)
@@ -1503,8 +1505,6 @@ local clearBtn = MakeActionButton(footer, "Clear Ignored", C_RED, function()
 end, 110, 22)
 clearBtn:SetPoint("RIGHT", footer, "RIGHT", -8, 0)
 if clearBtn._text then clearBtn._text:SetFont(FONT, 10, "") end
-footerCount:SetPoint("RIGHT", clearBtn, "LEFT", -8, 0)
-footerCount:SetJustifyH("LEFT")
 clearBtn:SetScript("OnEnter", function(btn)
 	btn:SetBackdropColor(C_RED[1], C_RED[2], C_RED[3], 0.3)
 	btn:SetBackdropBorderColor(C_RED[1], C_RED[2], C_RED[3], 1)
@@ -1516,6 +1516,29 @@ clearBtn:SetScript("OnEnter", function(btn)
 	GameTooltip:Show()
 end)
 clearBtn:SetScript("OnLeave", function(btn)
+	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
+	btn._text:SetTextColor(unpack(C_TEXT))
+	GameTooltip:Hide()
+end)
+
+local refreshBtn = MakeActionButton(footer, "Refresh", C_ACCENT, function()
+	if _G.AutoDelete_RefreshProcessPanel then _G.AutoDelete_RefreshProcessPanel() end
+end, 76, 22)
+refreshBtn:SetPoint("RIGHT", clearBtn, "LEFT", -6, 0)
+if refreshBtn._text then refreshBtn._text:SetFont(FONT, 10, "") end
+footerCount:SetPoint("RIGHT", refreshBtn, "LEFT", -8, 0)
+footerCount:SetJustifyH("LEFT")
+refreshBtn:SetScript("OnEnter", function(btn)
+	btn:SetBackdropColor(C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.3)
+	btn:SetBackdropBorderColor(C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 1)
+	btn._text:SetTextColor(1, 1, 1)
+	GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+	GameTooltip:SetText("Refresh", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
+	GameTooltip:AddLine("Rebuilds Process Bags from your current bag contents.",
+		C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
+	GameTooltip:Show()
+end)
+refreshBtn:SetScript("OnLeave", function(btn)
 	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
 	btn._text:SetTextColor(unpack(C_TEXT))
 	GameTooltip:Hide()
@@ -1641,6 +1664,13 @@ local function GetOrCreateRow(i)
 			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 			GameTooltip:SetHyperlink(self._entry.link)
 			GameTooltip:AddLine(" ", 1, 1, 1)
+			if self._entry.sourceRule or self._entry.reason then
+				GameTooltip:AddLine("|cff66ddff" .. tostring(self._entry.sourceRule or "Rule") .. "|r",
+					C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
+				GameTooltip:AddLine(tostring(self._entry.reason or ""),
+					C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
+				GameTooltip:AddLine(" ", 1, 1, 1)
+			end
 			if (self._entry.count or 1) > 1 then
 				GameTooltip:AddLine("|cffffd200" .. tostring(self._entry.count) .. " matching copies|r share this item ID.",
 					C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
@@ -3764,13 +3794,13 @@ local function BuildUI(self)
 	self._tglEnable = tglEnable
 
 	local tglAutoAddEquipped = MakeToggle(card1, "Auto-Add Equipped", C_ACCENT,
-		"Adds gear you wear to Keep. Keep items are safe from Sell and Delete. Shirts and tabards are skipped.")
+		"Adds gear you wear and Blizzard equipment set items to Keep. Keep items are safe from Sell and Delete. Shirts and tabards are skipped.")
 	tglAutoAddEquipped:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 22))
 	tglAutoAddEquipped:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglAutoAddEquipped = tglAutoAddEquipped
 
 	local tglDeleteJunk = MakeToggle(card1, "Delete Junk", C_RED,
-		"Delete gray-quality junk during bag scans. Keep and quest items stay safe.")
+		"Checked deletes gray-quality junk during bag scans. Unchecked sells junk at vendors. Keep and quest items stay safe.")
 	tglDeleteJunk:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
 	tglDeleteJunk:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglDeleteJunk = tglDeleteJunk
@@ -3916,7 +3946,7 @@ local function BuildUI(self)
 				title = "General",
 				sections = {
 					{ icon = "Interface\\Icons\\INV_Misc_Gear_01", title = "Enable Addon", body = "The master switch on the General tab. While it is off, nothing is auto-deleted or auto-sold. Auto-Invite and Hide Greedy Spam keep working either way." },
-					{ icon = "Interface\\Icons\\Ability_Defend", title = "Auto-Add Equipped", body = "Adds gear you equip to your Keep list so it is never sold or deleted by mistake. Shirts and tabards are skipped. Click it again after you change gear or copy a profile." },
+					{ icon = "Interface\\Icons\\Ability_Defend", title = "Auto-Add Equipped", body = "Adds gear you equip and Blizzard equipment set items to your Keep list so they are never sold or deleted by mistake. Shirts and tabards are skipped." },
 					{ icon = "Interface\\Icons\\Ability_Repair", title = "Auto-Repair", body = "Repairs your gear whenever you talk to a vendor. Choose None to disable it, Player to use your own gold, or Guild to use guild repair funds when available." },
 					{ icon = "Interface\\Icons\\INV_Misc_Bag_10_Black", title = "Process Bags", body = "Open Panel opens the Process Bags window, a separate list of every bag item ready for One-Key Disenchant, Mill, Prospect, or Open. The card also shows a live count." },
 					{ icon = "Interface\\Icons\\INV_Misc_PocketWatch_01", title = "Scan Speed", body = "How often your bags are checked against the Delete and Sell lists. Fast clears matches almost instantly, slow is quieter in the background. Vendor selling always runs when a merchant opens." },

@@ -59,11 +59,12 @@ Four independent categories.
 - BoE Weapons (bind-on-equip weapon-slot items, priority over BoE Armor)
 
 **Auto Actions** (General and Filters tabs)
-- Delete Junk is a checkbox on the General tab.
+- Delete Junk is a checkbox on the General tab: checked deletes gray junk during bag scans, unchecked sells gray junk at vendors.
 - Common, Greens, and Rares have Del / Sell pills on the Filters tab.
 - Click a pill to light it red (delete) or blue (sell). Click again to turn it off.
 - If ElvUI is loaded, Delete Junk hides ElvUI's junk coin while that mode is active.
 - Greens and Rares default to off. Green and blue gear stay in bags unless you opt in.
+- Auto-Add Equipped also adds Blizzard equipment set items to Keep.
 - Cosmetic slots (shirts, tabards) and quest items are always protected
 
 **Affix Protection** (Affix tab)
@@ -93,9 +94,11 @@ Four independent categories.
 - Filter rows by All, Sell, Delete, DE, Mill, Prospect, Open, or Kept
 - Inspect what's about to happen before it does
 - Items with the same item ID are grouped together to reduce repeated rows when affix names differ
+- Hover a row to see the matching rule and reason, including Affix Protection and KeepOne/KeepStack blockers
 - Left-click DE / Mill / Prospect / Open rows to arm that item for the matching keybind
 - Left-click Sell / Delete / Kept rows to open Why?
 - Right-click a row for quick actions: Keep, Sell, Delete, or Why? Ignore for Process appears only for DE, Mill, and Prospect rows and removes that item from those one-key targets.
+- Refresh rebuilds the list from current bag contents when new items appear.
 - Alt+Right-click a real bag item for the same quick actions, without changing normal right-click item use
 
 **Why? and report**
