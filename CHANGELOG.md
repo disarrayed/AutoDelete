@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+No changes yet.
+
+## [3.29] - 2026-06-28
+
+### Added
+
+- **Minimap enable toggle.** The minimap quick menu can now enable or disable AutoDelete, synced with the General tab Enable Addon checkbox.
+- **No Group Summons toggle.** Pets now has a No Group Summons option that blocks automatic Greedy Scavenger and Goblin Merchant summons while grouped.
+- **Recipe BoE/BoP toggles.** Sell Known Recipes can now include or exclude BoE and BoP known recipes separately.
+- **Auto-Close after sell toggle.** Pets now has an Auto-Close after sell option in the Summon Merchant card. Checked keeps the existing behavior of closing the vendor after AutoDelete finishes selling; unchecked leaves the vendor open.
+
+### Changed
+
+- **Enable Addon now gates every automatic feature.** Turning AutoDelete off stops automatic delete, sell, repair, companion summon, auto-invite, Greedy spam hiding, and equipped-item sync actions.
+- **Affix list now uses a PEEv1-style Affix Book layout inside AutoDelete.** Update Affix List and `/del affix` open AutoDelete's own server-fed affix mirror with PEEv1-style Armor, Weapon, and Learned filters, search, family selection, tier icons, descriptions, learned/locked states, counts, hover, and custom scrollbar. AutoDelete requests and parses the learned-affix server packet itself; it no longer depends on PEE runtime globals.
+- **Sell Known Recipes card is cleaner.** The enable, BoE/BoP, and rarity toggles now use the same checkbox size in left-aligned grouped rows, and all Sell Filters cards share the same height.
+- **Options layout math now has a Busted gate.** The test suite checks the Sell Filters vertical budget, Search & Manage frame fit, and recipe-card checkbox helper consistency.
+- **Recipe diagnostics include bind status.** Why?, Decision History, Settings Report, and Process Bags Diagnostic now show recipe BoE/BoP state and toggle status.
+
 ## [3.28] - 2026-06-26
 
 ### Changed
@@ -124,7 +143,7 @@ All notable changes to this project will be documented in this file.
 - **Learned Affixes tabs.** The Scan Learned Affixes window now has Learned and Unlearned tabs so you can see which Project Ebonhold affixes are still missing.
 - **Clickable affix names.** Click an affix in the Learned Affixes window to select that name in a copy-only field for Ctrl+C. The field restores the affix text if typed into; Enter or Escape clears it.
 - **Affix Tools labels.** The Affix tab now names its tools Refresh List and Update Affix List.
-- **Affix shortcut.** `/del affix` now opens the Learned / Unlearned affix list directly.
+- **Affix shortcut.** `/del affix` now opens the PEEv1-style affix mirror directly.
 - **Slash command cleanup.** Removed `/del collection`; use the Affix tab's Show/Keep Missing Affix toggle instead.
 
 ### Fixed

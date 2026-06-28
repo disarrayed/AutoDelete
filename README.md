@@ -53,7 +53,8 @@ Quest items are protected from every auto-rule, regardless of list state.
 
 Four independent categories.
 - Sell Known Recipes (only recipes whose tooltip says Already known; unknown or unreadable recipes stay kept from automatic sell rules while this rule is on)
-- Recipe decisions appear in **Why?**, `/del history`, `/del report`, and `/del processdebug` with knowledge state and quality-toggle status
+- Sell Known Recipes has BoE / BoP and white / green / blue / purple toggles, so soulbound and non-soulbound known recipes can be controlled separately
+- Recipe decisions appear in **Why?**, `/del history`, `/del report`, and `/del processdebug` with knowledge state, quality-toggle status, and BoE/BoP status
 - BoE Armor (bind-on-equip gear)
 - BoP (bind-on-pickup gear)
 - BoE Weapons (bind-on-equip weapon-slot items, priority over BoE Armor)
@@ -70,14 +71,16 @@ Four independent categories.
 **Affix Protection** (Affix tab)
 - Tier I-V checkboxes protect matching affix tiers before Delete, Sell, or One-Key Disenchant rules
 - "Refresh List" scans your Delete / Sell lists for items the filter would now save
-- "Update Affix List" opens a scrollable window with Learned and Unlearned tabs, grouped by tier. Click an affix name to select it for Ctrl+C; Enter or Escape clears the copy box.
+- "Update Affix List" asks the server for your learned affixes and opens AutoDelete's PEEv1-style affix mirror with Armor, Weapon, and Learned filters, search, family selection, tier icons, descriptions, and learned/locked states. It does not depend on PEE being loaded.
 - **Show/Keep Missing Affix**: only show the affix dot on items whose affixes you haven't learned yet and protect those missing affixes from Delete, Sell, and One-Key Disenchant cleanup.
 - **Missing Affix Color**: choose the dot color for affixes your account has not learned. Defaults to `#ff3b41`.
 - **KeepOne Missing Affix**: protect one gear item for each missing affix from Delete, Sell, and One-Key Disenchant rules. Duplicate missing-affix gear can still clear through normal cleanup rules. It is a toggle, not a list, and learned affixes are ignored.
 
 **Companion management**
 - Auto-summon Greedy Scavenger and Goblin Merchant
+- **Auto-Close after sell** is on the Pets tab in the Summon Merchant card: checked closes the vendor after AutoDelete finishes selling, unchecked leaves the vendor open.
 - **Only in Combat** gates every automatic Greedy Scavenger summon, including After sell and After vendor close
+- **No Group Summons** blocks automatic Greedy Scavenger and Goblin Merchant summons while you are in a party or raid
 - Mount-aware dismiss and re-summon
 - Stuck detection via loot-event tracking
 - Three-state Goblin defer: won't summon until AutoDelete has had a chance to clear bags
@@ -110,11 +113,12 @@ Four independent categories.
 - The Help tab has topic buttons with practical how-to guidance for each main area
 
 **Quality of life**
-- Minimap button: square AD mark; left-click opens or closes settings, right-click opens a quick menu for safe panels and reports, and drag moves the button
+- Minimap button: square AD mark; left-click opens or closes settings, right-click opens a quick menu with Enable/Disable plus safe panels and reports, and drag moves the button
+- Enable Addon on the General tab and the minimap menu are synced. Turning it off stops automatic delete, sell, repair, summon, invite, spam hiding, and equipped-item sync actions.
 - Bags stay open when the vendor closes
 - Auto-repair dropdown with None, Player, and Guild choices
-- Hide Greedy Scavenger spam
-- Auto-invite on whisper keyword, with loot rule and raid conversion options
+- Hide Greedy Scavenger spam while AutoDelete is enabled
+- Auto-invite on whisper keyword while AutoDelete is enabled, with loot rule and raid conversion options
 - Per-character stats: gold earned, items sold or deleted, repairs, average inventory worth
 - Welcome popup walks new users through setup. Reopen with `/del setup`.
 
@@ -143,7 +147,7 @@ Four independent categories.
 /del history       Open searchable recent sell / delete / keep decisions, including recipes
 /del audit         Open a copyable item-list audit
 /del audit fix     Apply safe list cleanup only
-/del affix         Open the Learned / Unlearned affix list
+/del affix         Open AutoDelete's server-fed PEEv1-style affix mirror
 /del debug         Toggle the auto-sell / auto-delete debug trace
 /del bench         Run a loot-burst performance benchmark (diagnostic)
 /del spike         Capture frame-level performance spikes (diagnostic)
@@ -165,7 +169,7 @@ Feature ideas and patterns from the community.
 - **Auto-Sell options for Junk and Common** (Filters tab), suggested by Sanavesa on 5/21/26 at 8:48 AM:
   > thanks for this addon. is it possible to add auto-sell junk/common? currently i see there is auto-delete options
 - **KeepStack**, credited to @lazzat as the inspiration for the KeepStack list name and keep-one-stack cleanup idea. AutoDelete's KeepStack code is an original implementation for this addon.
-- **Sell Known Recipes**, suggested by @Lazzat: auto-sell already-known recipes while keeping unknown recipes safe from automatic sell rules, with white/green/blue/purple filters.
+- **Sell Known Recipes**, suggested by @Lazzat: auto-sell already-known recipes while keeping unknown recipes safe from automatic sell rules, with BoE/BoP and white/green/blue/purple filters.
 
 ---
 

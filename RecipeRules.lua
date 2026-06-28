@@ -69,6 +69,21 @@ function _G.AutoDelete_GetRecipeQualityLabel(itemQuality)
 	return tostring(itemQuality or "unknown")
 end
 
+function _G.AutoDelete_IsKnownRecipeBindEnabled(profile, bindState)
+	if not profile then return false end
+	if bindState == nil or bindState == "unknown" then return false end
+	if bindState == "bop" or bindState == "soulbound" then
+		return profile.knownRecipeSellBoP ~= false
+	end
+	return profile.knownRecipeSellBoE ~= false
+end
+
+function _G.AutoDelete_GetRecipeBindLabel(bindState)
+	if bindState == "bop" or bindState == "soulbound" then return "BoP" end
+	if bindState == nil or bindState == "unknown" then return "unknown" end
+	return "BoE"
+end
+
 function _G.AutoDelete_DetectRecipeKnowledgeFromTooltipLines(lines, knownToken)
 	if type(knownToken) ~= "string" or knownToken == "" then
 		knownToken = "Already known"
@@ -97,7 +112,7 @@ function _G.AutoDelete_RememberRecipeKnowledgeState(cache, link, state)
 	end
 end
 
-function _G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, link, itemClass, itemSubType, itemQuality, isQuestItem, onExplicitSell, itemName)
+function _G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, link, itemClass, itemSubType, itemQuality, isQuestItem, onExplicitSell, itemName, bindState)
 	if not profile or profile.knownRecipeSellEnabled ~= true then return nil end
 	if not itemName and link and type(GetItemInfo) == "function" then
 		itemName = GetItemInfo(link)
@@ -110,20 +125,24 @@ function _G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, link, item
 
 	local state = _G.AutoDelete_GetRecipeKnowledgeState(bag, slot, link)
 	local qualityEnabled = _G.AutoDelete_IsKnownRecipeQualityEnabled(profile, itemQuality)
+	local bindEnabled = _G.AutoDelete_IsKnownRecipeBindEnabled(profile, bindState)
 	if state == "known" then
 		if isQuestItem then
-			return "protect", "Quest recipe protected", "Known Recipe Protection", state, qualityEnabled
+			return "protect", "Quest recipe protected", "Known Recipe Protection", state, qualityEnabled, bindEnabled
 		end
-		if not isQuestItem and qualityEnabled then
-			return "sell", "knownRecipe", "Sell Filters: Sell Known Recipes", state, qualityEnabled
+		if not qualityEnabled then
+			return "protect", "Known recipe quality not enabled", "Known Recipe Protection", state, qualityEnabled, bindEnabled
 		end
-		return "protect", "Known recipe quality not enabled", "Known Recipe Protection", state, qualityEnabled
+		if not bindEnabled then
+			return "protect", "Known recipe bind type not enabled", "Known Recipe Protection", state, qualityEnabled, bindEnabled
+		end
+		return "sell", "knownRecipe", "Sell Filters: Sell Known Recipes", state, qualityEnabled, bindEnabled
 	end
 
 	if state == "uncertain" then
-		return "protect", "Recipe knowledge unknown; kept safe", "Unknown Recipe Protection", state, qualityEnabled
+		return "protect", "Recipe knowledge unknown; kept safe", "Unknown Recipe Protection", state, qualityEnabled, bindEnabled
 	end
-	return "protect", "Unknown recipe protected", "Unknown Recipe Protection", state, qualityEnabled
+	return "protect", "Unknown recipe protected", "Unknown Recipe Protection", state, qualityEnabled, bindEnabled
 end
 
 function _G.AutoDelete_IsRecipeDeleteProtected(profile, itemClass, itemSubType, sourceRule, itemName)

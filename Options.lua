@@ -134,7 +134,7 @@ local function AttachSimpleTooltip(frame, title, body, warning)
 	frame:SetScript("OnLeave", function() GameTooltip:Hide() end)
 end
 
--- PEADAR-style toggle: 16x16 box + 8x8 indicator
+-- PEADAR-style toggle: 14x14 box + 14x14 checkmark indicator
 local function MakeToggle(parent, label, color, tooltip, tooltipTitle, indicatorColor)
 	local row = CreateFrame("Button", nil, parent)
 	row:SetSize(290, 20)
@@ -927,6 +927,9 @@ local DEFAULT_PROFILE = {
 	knownRecipeSellUncommon = true,
 	knownRecipeSellRare     = false,
 	knownRecipeSellEpic     = false,
+	knownRecipeSellBoE      = true,
+	knownRecipeSellBoP      = true,
+	autoCloseMerchantAfterSell = true,
 	protectAffixFromSell = false, -- legacy migration source
 	affixIlvlMin         = 0,     -- legacy; no longer used
 	protectAffixTier1    = false,
@@ -940,7 +943,8 @@ local DEFAULT_PROFILE = {
 	missingAffixColorR   = 1.00,
 	missingAffixColorG   = 0.231,
 	missingAffixColorB   = 0.255,
-	summonScavenger   = false,
+	summonScavenger      = false,
+	summonDisableInGroup = false,
 }
 
 local function GetCharKey()
@@ -1224,7 +1228,9 @@ end
 -- ============================================================================
 
 local frame = CreateFrame("Frame", "AutoDeleteFrame", UIParent)
-frame:SetSize(580, 882)   -- 840 + 42px for the taller Sell-tab gear cards
+frame:SetSize(
+	(_G.AutoDelete_OptionsLayout and _G.AutoDelete_OptionsLayout.FRAME_W) or 580,
+	(_G.AutoDelete_OptionsLayout and _G.AutoDelete_OptionsLayout.FRAME_H) or 906)
 frame:SetPoint("CENTER")
 frame:SetFrameStrata("DIALOG")
 frame:SetFrameLevel(100)
@@ -1241,7 +1247,7 @@ RegisterSpecialFrame("AutoDeleteFrame")
 local titleBar = CreateFrame("Frame", nil, frame)
 titleBar:SetPoint("TOPLEFT"); titleBar:SetPoint("TOPRIGHT")
 titleBar:SetHeight(24)
-ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
+ApplyBackdrop(titleBar, C_BG, C_BG)
 titleBar:EnableMouse(true)
 titleBar:SetScript("OnMouseDown", function() frame:StartMoving() end)
 titleBar:SetScript("OnMouseUp", function()
@@ -1848,33 +1854,60 @@ end  -- end of Process Bags Panel `do` block
 -- ============================================================================
 -- Learned Affixes Popup
 -- ============================================================================
--- Scrollable read-only window that displays the player's learned and unlearned affixes,
--- populated by the Update Affix List button on the Affix Display card.
--- Same draggable-frame pattern as the Process Bags panel: dark body,
--- dark gray border, dark title bar with orange text, dim close X that
--- turns red on hover.
---
--- Body is a ScrollFrame with pooled rows so affix names can be clicked.
--- Clicking an affix opens a selected copy field because WoW addons cannot
--- silently write to the OS clipboard.
+-- PEEv1 Affix Book-style window that displays AutoDelete's affix mirror.
+-- This stays AutoDelete-owned; it does not open PEE's panel.
 
 do
 
-local POPUP_W = 320
-local POPUP_H = 428
+local SIDE_PANEL_WIDTH = 260
+local SIDE_PANEL_HEIGHT = 430
 local TITLE_H = 24
-local TAB_H = 30
-local BODY_PAD_X = 10
-local BODY_PAD_TOP = 4
-local FOOTER_H = 42
-local BODY_PAD_BOT = FOOTER_H
--- Scrollbar built into UIPanelScrollFrameTemplate reserves ~22px on the
--- right edge of the scroll frame; pad accordingly so text doesn't slide
--- under the bar.
-local SCROLLBAR_W = 22
+local PANEL_INSET = 12
+local SEARCH_H = 22
+local AFFIX_LIST_PAD = 4
+local AFFIX_LIST_ROW_HEIGHT = 20
+local AFFIX_LIST_VISIBLE_ROWS = 9
+local AFFIX_LIST_SCROLLBAR_WIDTH = 8
+local AFFIX_LIST_HEIGHT = AFFIX_LIST_ROW_HEIGHT * AFFIX_LIST_VISIBLE_ROWS + AFFIX_LIST_PAD * 2
+local AFFIX_SEARCH_W = SIDE_PANEL_WIDTH - PANEL_INSET * 2
+local TIER_ICON_SIZE = 40
+local TIER_GAP = 8
+local TIER_ROMANS = { "I", "II", "III", "IV", "V" }
+local TIER_COLORS = {
+	[1] = { 1, 1, 1 },
+	[2] = { 0.1, 1.0, 0.1 },
+	[3] = { 0.0, 0.4, 1.0 },
+	[4] = { 0.6, 0.2, 1.0 },
+	[5] = { 1.0, 0.5, 0.0 },
+}
+local TIER_COUNT = #TIER_ROMANS
+local TIER_TOTAL_W = TIER_ICON_SIZE * TIER_COUNT + TIER_GAP * (TIER_COUNT - 1)
+local TIER_START_X = -(TIER_TOTAL_W / 2) + (TIER_ICON_SIZE / 2)
+local AFFIX_PURPLE_COLOR = { 0.69, 0.28, 0.97, 1 }
+local UNAVAILABLE_AFFIX_TIERS = {
+	["spell mastery"] = {
+		[5] = "Spell Mastery V is not available in-game.",
+	},
+}
+
+_G.AutoDelete_AffixBookLayout = {
+	POPUP_W = SIDE_PANEL_WIDTH,
+	POPUP_H = SIDE_PANEL_HEIGHT,
+	SIDE_PANEL_WIDTH = SIDE_PANEL_WIDTH,
+	SIDE_PANEL_HEIGHT = SIDE_PANEL_HEIGHT,
+	PANEL_INSET = PANEL_INSET,
+	ROW_H = AFFIX_LIST_ROW_HEIGHT,
+	VISIBLE_ROWS = AFFIX_LIST_VISIBLE_ROWS,
+	LIST_PAD = AFFIX_LIST_PAD,
+	LIST_H = AFFIX_LIST_HEIGHT,
+	SEARCH_W = AFFIX_SEARCH_W,
+	SCROLLBAR_W = AFFIX_LIST_SCROLLBAR_WIDTH,
+	TIER_ICON_SIZE = TIER_ICON_SIZE,
+	TIER_COUNT = TIER_COUNT,
+}
 
 local popup = CreateFrame("Frame", "AutoDeleteLearnedAffixesPopup", UIParent)
-popup:SetSize(POPUP_W, POPUP_H)
+popup:SetSize(SIDE_PANEL_WIDTH, SIDE_PANEL_HEIGHT)
 popup:SetFrameStrata("DIALOG")
 popup:SetFrameLevel(120)
 popup:SetMovable(true)
@@ -1882,14 +1915,25 @@ popup:EnableMouse(true)
 popup:SetClampedToScreen(true)
 popup:Hide()
 ApplyPopupChrome(popup)
+if popup.SetBackdrop then
+	popup:SetBackdrop({
+		bgFile = WHITE8x8,
+		edgeFile = WHITE8x8,
+		tile = true,
+		tileSize = 16,
+		edgeSize = 4,
+		insets = { left = 4, right = 4, top = 4, bottom = 4 },
+	})
+	popup:SetBackdropColor(unpack(C_BG))
+	popup:SetBackdropBorderColor(0, 0, 0, 1)
+end
 
--- Title bar: drag handle + window title + close X. Mirrors the canonical
--- look used by the Process Bags panel.
+-- Drag handle + centered title, matching PEEv1's compact Affix Book panel.
 local titleBar = CreateFrame("Frame", nil, popup)
 titleBar:SetPoint("TOPLEFT", popup, "TOPLEFT", 0, 0)
 titleBar:SetPoint("TOPRIGHT", popup, "TOPRIGHT", 0, 0)
 titleBar:SetHeight(TITLE_H)
-ApplyBackdrop(titleBar, C_TITLEBAR, C_BORDER)
+ApplyBackdrop(titleBar, C_BG, C_BG)
 titleBar:EnableMouse(true)
 titleBar:RegisterForDrag("LeftButton")
 titleBar:SetScript("OnDragStart", function()
@@ -1898,9 +1942,9 @@ titleBar:SetScript("OnDragStart", function()
 end)
 titleBar:SetScript("OnDragStop", function() popup:StopMovingOrSizing() end)
 
-local titleText = MakeText(titleBar, 12, C_TITLE, "OUTLINE")
-titleText:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
-titleText:SetText("Learned Affixes")
+local titleText = MakeText(titleBar, 11, C_TITLE, "OUTLINE", "CENTER")
+titleText:SetPoint("TOP", popup, "TOP", 0, -8)
+titleText:SetText("Affix Book")
 
 local closeX = CreateFrame("Button", nil, titleBar)
 closeX:SetSize(24, 24)
@@ -1912,180 +1956,288 @@ closeX:SetScript("OnEnter", function() closeXText:SetTextColor(1, 0.3, 0.3) end)
 closeX:SetScript("OnLeave", function() closeXText:SetTextColor(unpack(C_DIM)) end)
 closeX:SetScript("OnClick", function() popup:Hide() end)
 
-local currentTab = "learned"
-local tabData = {
-	learned = "",
-	unlearned = "",
-}
-local tabRows = {}
-local tabCounts = {}
-local tabButtons = {}
-local RefreshLearnedAffixesTabs
-
-local function FormatAffixTabLabel(label, count)
-	if count ~= nil then
-		return string.format("%s (%d)", label, count)
-	end
-	return label
+local affixBookRows = {}
+local affixFallbackText = ""
+local function GetAffixBookFilters()
+	local db = GetDB()
+	db.affixBookFilters = db.affixBookFilters or { armor = true, weapon = true, learned = true }
+	if db.affixBookFilters.armor == nil then db.affixBookFilters.armor = true end
+	if db.affixBookFilters.weapon == nil then db.affixBookFilters.weapon = true end
+	if db.affixBookFilters.learned == nil then db.affixBookFilters.learned = true end
+	return db.affixBookFilters
 end
+local affixFilterState = GetAffixBookFilters()
+local filterButtons = {}
+local affixSearchText = ""
+local RefreshAffixBook
+local SelectSearchResult
+local affixScrollOffset = 0
+local affixVisibleRows = {}
+local selectedAffixFamilyKey = nil
+local selectedAffixTier = nil
 
-local tabRow = CreateFrame("Frame", nil, popup)
-tabRow:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, -2)
-tabRow:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT", 0, -2)
-tabRow:SetHeight(TAB_H)
-
-local function RefreshAffixTabButtons()
-	for key, btn in pairs(tabButtons) do
-		if key == currentTab then
-			ApplyBackdrop(btn, { C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.9 }, C_ACCENT)
-			btn._text:SetFont(FONT, 12, "")
-			btn._text:SetTextColor(0.05, 0.05, 0.05, 1)
-		else
-			ApplyBackdrop(btn, { 0.07, 0.07, 0.07, 1 }, { 0.20, 0.20, 0.20, 1 })
-			btn._text:SetFont(FONT, 11, "OUTLINE")
-			btn._text:SetTextColor(1, 1, 1, 1)
-		end
+local function RefreshAffixFilterButtons()
+	for key, btn in pairs(filterButtons) do
+		btn:SetChecked(affixFilterState[key] == true)
+		btn._text:SetTextColor(unpack(C_TEXT))
 	end
 end
 
-local TAB_PAD_X = 8
-local TAB_GAP = 6
-local TAB_BTN_W = math.floor((POPUP_W - TAB_PAD_X * 2 - TAB_GAP) / 2)
-local TAB_BTN_H = 22
+local FILTER_BTN_W = 18
+local FILTER_BTN_H = 18
 
-local function CreateAffixTabButton(key, label, x)
-	local btn = CreateFrame("Button", nil, tabRow)
-	btn:SetSize(TAB_BTN_W, TAB_BTN_H)
-	btn:SetPoint("TOPLEFT", tabRow, "TOPLEFT", x, -4)
-	ApplyBackdrop(btn, C_ROW_ODD, C_BORDER)
-	local txt = MakeText(btn, 11, C_TEXT, "OUTLINE")
-	txt:SetPoint("CENTER")
-	txt:SetWidth(TAB_BTN_W - 8)
-	txt:SetJustifyH("CENTER")
+local function CreateAffixFilterButton(key, label, x)
+	local btn = CreateFrame("CheckButton", nil, popup, "UICheckButtonTemplate")
+	btn:SetSize(FILTER_BTN_W, FILTER_BTN_H)
+	btn:SetPoint("TOPLEFT", popup, "TOPLEFT", PANEL_INSET + x, -28)
+	local txt = MakeText(popup, 10, C_TEXT, "OUTLINE")
+	txt:SetPoint("LEFT", btn, "RIGHT", 2, 0)
+	txt:SetWidth(70)
+	txt:SetJustifyH("LEFT")
 	txt:SetWordWrap(false)
 	txt:SetNonSpaceWrap(false)
 	txt:SetText(label)
 	btn._text = txt
-	btn._baseLabel = label
 	btn:SetScript("OnClick", function()
-		currentTab = key
-		if RefreshLearnedAffixesTabs then RefreshLearnedAffixesTabs(true) end
+		affixFilterState[key] = (btn:GetChecked() == 1 or btn:GetChecked() == true)
+		if RefreshAffixBook then RefreshAffixBook(true) end
 	end)
 	btn:SetScript("OnEnter", function(self)
-		if currentTab ~= key then
-			ApplyBackdrop(self, C_ROW_HOVER, C_BORDER)
-			self._text:SetTextColor(1, 1, 1, 1)
-		end
+		self._text:SetTextColor(1, 1, 1, 1)
 	end)
-	btn:SetScript("OnLeave", RefreshAffixTabButtons)
-	tabButtons[key] = btn
+	btn:SetScript("OnLeave", RefreshAffixFilterButtons)
+	filterButtons[key] = btn
 end
 
-CreateAffixTabButton("learned", "Learned", TAB_PAD_X)
-CreateAffixTabButton("unlearned", "Unlearned", TAB_PAD_X + TAB_BTN_W + TAB_GAP)
-RefreshAffixTabButtons()
+CreateAffixFilterButton("armor", "Armor", 0)
+CreateAffixFilterButton("weapon", "Weapon", 75)
+CreateAffixFilterButton("learned", "Learned", 150)
+RefreshAffixFilterButtons()
 
--- Scroll frame fills the body below the title bar. Use Blizzard's stock
--- UIPanelScrollFrameTemplate so we get a usable scrollbar with up/down
--- arrows that match the rest of the WoW UI on 3.3.5a.
-local scroll = CreateFrame("ScrollFrame", "AutoDeleteLearnedAffixesScroll", popup,
-	"UIPanelScrollFrameTemplate")
-scroll:SetPoint("TOPLEFT", popup, "TOPLEFT", BODY_PAD_X, -(TITLE_H + TAB_H + BODY_PAD_TOP))
-scroll:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -SCROLLBAR_W, BODY_PAD_BOT)
+local searchFrame = CreateFrame("Frame", nil, popup)
+searchFrame:SetPoint("TOPLEFT", popup, "TOPLEFT", PANEL_INSET, -50)
+searchFrame:SetSize(AFFIX_SEARCH_W, SEARCH_H)
+searchFrame:SetHeight(SEARCH_H)
+ApplyBackdrop(searchFrame, { 0.02, 0.02, 0.02, 1 }, { 0, 0, 0, 1 })
 
--- Scroll child: a Frame holding the body FontString. UIPanelScrollFrameTemplate
--- needs an explicit child whose height drives how much can be scrolled. After
--- setting text we measure GetStringHeight() and resize the child to match.
-local content = CreateFrame("Frame", nil, scroll)
-content:SetSize(POPUP_W - BODY_PAD_X - SCROLLBAR_W, 1) -- height set dynamically on Show
-scroll:SetScrollChild(content)
+local searchEdit = CreateFrame("EditBox", "AutoDeleteLearnedAffixesSearch", searchFrame)
+searchEdit:SetFont(FONT, 11, "OUTLINE")
+searchEdit:SetTextColor(unpack(C_TEXT))
+searchEdit:SetAutoFocus(false)
+searchEdit:EnableKeyboard(true)
+searchEdit:SetPoint("LEFT", searchFrame, "LEFT", 8, 0)
+searchEdit:SetPoint("RIGHT", searchFrame, "RIGHT", -6, 0)
+searchEdit:SetHeight(SEARCH_H - 4)
+if searchEdit.SetTextInsets then
+	searchEdit:SetTextInsets(0, 0, 0, 0)
+end
 
-local bodyFS = content:CreateFontString(nil, "OVERLAY")
-bodyFS:SetFont(FONT, 11, "OUTLINE")
-bodyFS:SetTextColor(unpack(C_TEXT))
-bodyFS:SetJustifyH("LEFT")
-bodyFS:SetJustifyV("TOP")
-bodyFS:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
--- Fixed width so the FontString wraps cleanly within the scroll child.
--- Per AGENTS.md FontString rule §10.9: width MUST come from SetWidth(N),
--- never from a RIGHT-anchor SetPoint. SetWordWrap + SetNonSpaceWrap
--- explicit per the same rule.
-local CONTENT_FS_W = POPUP_W - BODY_PAD_X - SCROLLBAR_W
-bodyFS:SetWidth(CONTENT_FS_W)
-bodyFS:SetWordWrap(true)
-bodyFS:SetNonSpaceWrap(false)
+local searchPlaceholder = MakeText(searchFrame, 10, C_DIM, "OUTLINE")
+searchPlaceholder:SetPoint("LEFT", searchFrame, "LEFT", 8, 0)
+searchPlaceholder:SetText("Search affixes...")
 
-local copyFrame = CreateFrame("Frame", nil, popup)
-copyFrame:SetPoint("BOTTOMLEFT", popup, "BOTTOMLEFT", BODY_PAD_X, FOOTER_H + 4)
-copyFrame:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -BODY_PAD_X, FOOTER_H + 4)
-copyFrame:SetHeight(28)
-copyFrame:SetFrameLevel(popup:GetFrameLevel() + 4)
-copyFrame:Hide()
-ApplyBackdrop(copyFrame, C_DROP_BG, C_DROP_BORDER)
-
-local copyHint = MakeText(copyFrame, 9, C_DIM, "OUTLINE")
-copyHint:SetPoint("LEFT", copyFrame, "LEFT", 6, 0)
-copyHint:SetText("Ctrl+C")
-
-local copyEdit = CreateFrame("EditBox", nil, copyFrame)
-copyEdit:SetFont(FONT, 11, "OUTLINE")
-copyEdit:SetTextColor(unpack(C_TEXT))
-copyEdit:SetAutoFocus(false)
-copyEdit:EnableKeyboard(true)
-copyEdit:SetPoint("LEFT", copyHint, "RIGHT", 8, 0)
-copyEdit:SetPoint("RIGHT", copyFrame, "RIGHT", -6, 0)
-copyEdit:SetHeight(20)
-copyEdit._copyText = ""
-copyEdit._settingText = false
-copyEdit:SetScript("OnEscapePressed", function(s)
-	s:ClearFocus()
-	copyFrame:Hide()
-end)
-copyEdit:SetScript("OnEnterPressed", function(s)
-	s:ClearFocus()
-	copyFrame:Hide()
-end)
-copyEdit:SetScript("OnTextChanged", function(s)
-	if s._settingText then return end
-	if s:GetText() ~= (s._copyText or "") then
-		s._settingText = true
-		s:SetText(s._copyText or "")
-		s._settingText = false
-		s:HighlightText()
+searchEdit:SetScript("OnEditFocusGained", function(s)
+	s._focused = true
+	searchPlaceholder:Hide()
+	if searchFrame.SetBackdropBorderColor then
+		searchFrame:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
 	end
 end)
-
-local copyDefocusFrame = CreateFrame("Frame")
-copyDefocusFrame:Hide()
-copyDefocusFrame:SetScript("OnUpdate", function(self)
-	self:Hide()
-	copyEdit:ClearFocus()
-	copyFrame:Hide()
+searchEdit:SetScript("OnEditFocusLost", function(s)
+	s._focused = false
+	if (s:GetText() or "") == "" then searchPlaceholder:Show() end
+	if searchFrame.SetBackdropBorderColor then
+		searchFrame:SetBackdropBorderColor(C_DROP_BORDER[1], C_DROP_BORDER[2], C_DROP_BORDER[3], C_DROP_BORDER[4])
+	end
 end)
-copyEdit:SetScript("OnKeyDown", function(s, key)
-	if (key == "C" or key == "c") and IsControlKeyDown and IsControlKeyDown() then
-		copyDefocusFrame:Show()
+searchEdit:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
+searchEdit:SetScript("OnEnterPressed", function(s)
+	if SelectSearchResult then SelectSearchResult() end
+	s:ClearFocus()
+end)
+searchEdit:SetScript("OnTextChanged", function(s)
+	affixSearchText = s:GetText() or ""
+	affixScrollOffset = 0
+	if affixSearchText == "" then
+		if not s._focused then searchPlaceholder:Show() end
 	else
-		s:HighlightText()
+		searchPlaceholder:Hide()
 	end
+	if RefreshAffixBook then RefreshAffixBook(false) end
 end)
+
+local scroll = CreateFrame("Frame", "AutoDeleteLearnedAffixesListBox", popup)
+scroll:SetPoint("TOPLEFT", searchFrame, "BOTTOMLEFT", 0, -6)
+scroll:SetSize(AFFIX_SEARCH_W, AFFIX_LIST_HEIGHT)
+scroll:EnableMouse(true)
+scroll:EnableMouseWheel(true)
+ApplyBackdrop(scroll, { 0.018, 0.018, 0.018, 1 }, { 0.16, 0.16, 0.16, 1 })
+
+local content = scroll
+
+local descriptionText = MakeText(popup, 10, C_DIM, "OUTLINE")
+descriptionText:SetPoint("TOPLEFT", scroll, "BOTTOMLEFT", 0, -6)
+descriptionText:SetWidth(SIDE_PANEL_WIDTH - PANEL_INSET * 2)
+descriptionText:SetHeight(34)
+descriptionText:SetWordWrap(true)
+descriptionText:SetNonSpaceWrap(false)
+descriptionText:SetJustifyH("LEFT")
+descriptionText:SetJustifyV("TOP")
+descriptionText:SetText("")
+
+local tierFrame = CreateFrame("Frame", nil, popup)
+tierFrame:SetSize(SIDE_PANEL_WIDTH - 16, 70)
+tierFrame:SetPoint("TOP", descriptionText, "BOTTOM", 0, -6)
+
+local spellTip = CreateFrame("GameTooltip", "AutoDelete_AffixBookSpellTip", UIParent, "GameTooltipTemplate")
+spellTip:SetOwner(UIParent, "ANCHOR_NONE")
+
+local tierButtons = {}
+local function SetEdgeColor(button, r, g, b, a)
+	button._borderTop:SetVertexColor(r, g, b, a or 1)
+	button._borderBottom:SetVertexColor(r, g, b, a or 1)
+	button._borderLeft:SetVertexColor(r, g, b, a or 1)
+	button._borderRight:SetVertexColor(r, g, b, a or 1)
+end
+local function SetGlow(button, show)
+	if show then
+		button._glowTop:Show()
+		button._glowBottom:Show()
+		button._glowLeft:Show()
+		button._glowRight:Show()
+	else
+		button._glowTop:Hide()
+		button._glowBottom:Hide()
+		button._glowLeft:Hide()
+		button._glowRight:Hide()
+	end
+end
+local function SetSelected(button, show)
+	if show then
+		button._selectionFrame:Show()
+	else
+		button._selectionFrame:Hide()
+	end
+end
+local function MakeTierEdge(parent, layer, r, g, b, a)
+	local t = parent:CreateTexture(nil, layer or "OVERLAY")
+	t:SetTexture(WHITE8x8)
+	t:SetVertexColor(r, g, b, a or 1)
+	return t
+end
+
+for tier = 1, TIER_COUNT do
+	local btn = CreateFrame("Button", nil, tierFrame)
+	btn:SetSize(TIER_ICON_SIZE, TIER_ICON_SIZE)
+	local xOff = TIER_START_X + (tier - 1) * (TIER_ICON_SIZE + TIER_GAP)
+	btn:SetPoint("CENTER", tierFrame, "CENTER", xOff, 0)
+	btn._tier = tier
+
+	btn._bg = btn:CreateTexture(nil, "BACKGROUND")
+	btn._bg:SetAllPoints()
+	btn._bg:SetTexture(WHITE8x8)
+	btn._bg:SetVertexColor(0.06, 0.06, 0.06, 1)
+
+	btn._icon = btn:CreateTexture(nil, "ARTWORK")
+	btn._icon:SetPoint("TOPLEFT", 2, -2)
+	btn._icon:SetPoint("BOTTOMRIGHT", -2, 2)
+	btn._icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+
+	btn._lockOverlay = btn:CreateTexture(nil, "OVERLAY")
+	btn._lockOverlay:SetAllPoints()
+	btn._lockOverlay:SetTexture(WHITE8x8)
+	btn._lockOverlay:SetVertexColor(0, 0, 0, 0.65)
+	btn._lockOverlay:Hide()
+
+	btn._lockIcon = btn:CreateTexture(nil, "OVERLAY")
+	btn._lockIcon:SetSize(20, 20)
+	btn._lockIcon:SetPoint("CENTER")
+	btn._lockIcon:SetTexture("Interface\\LFGFrame\\UI-LFG-ICON-LOCK")
+	btn._lockIcon:Hide()
+
+	btn._borderTop = MakeTierEdge(btn)
+	btn._borderBottom = MakeTierEdge(btn)
+	btn._borderLeft = MakeTierEdge(btn)
+	btn._borderRight = MakeTierEdge(btn)
+	btn._borderTop:SetPoint("TOPLEFT", btn, "TOPLEFT", 0, 0)
+	btn._borderTop:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 0, 0)
+	btn._borderTop:SetHeight(1)
+	btn._borderBottom:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 0, 0)
+	btn._borderBottom:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
+	btn._borderBottom:SetHeight(1)
+	btn._borderLeft:SetPoint("TOPLEFT", btn, "TOPLEFT", 0, 0)
+	btn._borderLeft:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 0, 0)
+	btn._borderLeft:SetWidth(1)
+	btn._borderRight:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 0, 0)
+	btn._borderRight:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
+	btn._borderRight:SetWidth(1)
+
+	btn._glowTop = MakeTierEdge(btn, "OVERLAY", 0.2, 1, 0.2, 0.9)
+	btn._glowBottom = MakeTierEdge(btn, "OVERLAY", 0.2, 1, 0.2, 0.9)
+	btn._glowLeft = MakeTierEdge(btn, "OVERLAY", 0.2, 1, 0.2, 0.9)
+	btn._glowRight = MakeTierEdge(btn, "OVERLAY", 0.2, 1, 0.2, 0.9)
+	btn._glowTop:SetPoint("TOPLEFT", btn, "TOPLEFT", -2, 2)
+	btn._glowTop:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 2, 2)
+	btn._glowTop:SetHeight(3)
+	btn._glowBottom:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", -2, -2)
+	btn._glowBottom:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 2, -2)
+	btn._glowBottom:SetHeight(3)
+	btn._glowLeft:SetPoint("TOPLEFT", btn, "TOPLEFT", -2, 2)
+	btn._glowLeft:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", -2, -2)
+	btn._glowLeft:SetWidth(3)
+	btn._glowRight:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 2, 2)
+	btn._glowRight:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 2, -2)
+	btn._glowRight:SetWidth(3)
+	SetGlow(btn, false)
+
+	btn._selectionFrame = CreateFrame("Frame", nil, btn)
+	btn._selectionFrame:SetAllPoints(btn)
+	btn._selectionFrame:SetFrameLevel(btn:GetFrameLevel() + 5)
+	btn._selectionFrame:Hide()
+	btn._selectionTop = MakeTierEdge(btn._selectionFrame, "OVERLAY",
+		AFFIX_PURPLE_COLOR[1], AFFIX_PURPLE_COLOR[2], AFFIX_PURPLE_COLOR[3], AFFIX_PURPLE_COLOR[4])
+	btn._selectionBottom = MakeTierEdge(btn._selectionFrame, "OVERLAY",
+		AFFIX_PURPLE_COLOR[1], AFFIX_PURPLE_COLOR[2], AFFIX_PURPLE_COLOR[3], AFFIX_PURPLE_COLOR[4])
+	btn._selectionLeft = MakeTierEdge(btn._selectionFrame, "OVERLAY",
+		AFFIX_PURPLE_COLOR[1], AFFIX_PURPLE_COLOR[2], AFFIX_PURPLE_COLOR[3], AFFIX_PURPLE_COLOR[4])
+	btn._selectionRight = MakeTierEdge(btn._selectionFrame, "OVERLAY",
+		AFFIX_PURPLE_COLOR[1], AFFIX_PURPLE_COLOR[2], AFFIX_PURPLE_COLOR[3], AFFIX_PURPLE_COLOR[4])
+	btn._selectionTop:SetPoint("TOPLEFT", btn._selectionFrame, "TOPLEFT", -2, 2)
+	btn._selectionTop:SetPoint("TOPRIGHT", btn._selectionFrame, "TOPRIGHT", 2, 2)
+	btn._selectionTop:SetHeight(3)
+	btn._selectionBottom:SetPoint("BOTTOMLEFT", btn._selectionFrame, "BOTTOMLEFT", -2, -2)
+	btn._selectionBottom:SetPoint("BOTTOMRIGHT", btn._selectionFrame, "BOTTOMRIGHT", 2, -2)
+	btn._selectionBottom:SetHeight(3)
+	btn._selectionLeft:SetPoint("TOPLEFT", btn._selectionFrame, "TOPLEFT", -2, 2)
+	btn._selectionLeft:SetPoint("BOTTOMLEFT", btn._selectionFrame, "BOTTOMLEFT", -2, -2)
+	btn._selectionLeft:SetWidth(3)
+	btn._selectionRight:SetPoint("TOPRIGHT", btn._selectionFrame, "TOPRIGHT", 2, 2)
+	btn._selectionRight:SetPoint("BOTTOMRIGHT", btn._selectionFrame, "BOTTOMRIGHT", 2, -2)
+	btn._selectionRight:SetWidth(3)
+
+	btn._tierLabel = MakeText(btn, 11, TIER_COLORS[tier], "OUTLINE")
+	btn._tierLabel:SetPoint("BOTTOM", btn, "BOTTOM", 0, -14)
+	btn._tierLabel:SetText(TIER_ROMANS[tier])
+
+	tierButtons[tier] = btn
+end
 
 -- Footer action: same bottom action-row pattern as Import Raw.
-local FOOTER_BTN_W = 85
-local FOOTER_BTN_H = 24
+local FOOTER_BTN_W = 190
+local FOOTER_BTN_H = 30
 local refreshBtn = MakeActionButton(popup, "Refresh", C_BLUE, function()
 	if _G.AutoDelete_ScanLearnedAffixes then
 		_G.AutoDelete_ScanLearnedAffixes()
 	end
 end, FOOTER_BTN_W, FOOTER_BTN_H)
-refreshBtn:SetPoint("BOTTOMRIGHT", popup, "BOTTOMRIGHT", -BODY_PAD_X, 12)
+refreshBtn:SetPoint("BOTTOM", popup, "BOTTOM", 0, 8)
 refreshBtn:SetScript("OnEnter", function(btn)
 	btn:SetBackdropColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.3)
 	btn:SetBackdropBorderColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
 	btn._text:SetTextColor(1, 1, 1)
 	GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 	GameTooltip:SetText("Refresh", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-	GameTooltip:AddLine("Scans Project Ebonhold's current affix data again.",
+	GameTooltip:AddLine("Asks the server for the latest learned affix data again.",
 		C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
 	GameTooltip:Show()
 end)
@@ -2095,19 +2247,10 @@ refreshBtn:SetScript("OnLeave", function(btn)
 	GameTooltip:Hide()
 end)
 
-local function ShowAffixCopyBox(text)
-	copyEdit._copyText = text or ""
-	copyEdit._settingText = true
-	copyEdit:SetText(copyEdit._copyText)
-	copyEdit._settingText = false
-	copyFrame:Show()
-	copyEdit:SetFocus()
-	copyEdit:HighlightText()
-end
-
-local ROW_H = 17
-local BLANK_ROW_H = 8
 local rowPool = {}
+local scrollbar
+local SelectAffixFamily
+local GetBestFamilyDescription
 
 local function HideAffixRows()
 	for _, row in ipairs(rowPool) do
@@ -2119,37 +2262,57 @@ local function GetAffixRow(index)
 	local row = rowPool[index]
 	if row then return row end
 	row = CreateFrame("Button", nil, content)
-	row:SetHeight(ROW_H)
-	row:SetWidth(CONTENT_FS_W)
+	row:SetHeight(AFFIX_LIST_ROW_HEIGHT)
+	row:SetPoint("TOPLEFT", content, "TOPLEFT", AFFIX_LIST_PAD,
+		-(AFFIX_LIST_PAD + (index - 1) * AFFIX_LIST_ROW_HEIGHT))
+	if scrollbar then
+		row:SetPoint("RIGHT", scrollbar, "LEFT", -2, 0)
+	else
+		row:SetWidth(AFFIX_SEARCH_W - AFFIX_LIST_PAD * 2 - AFFIX_LIST_SCROLLBAR_WIDTH - 2)
+	end
 	row:EnableMouse(true)
 
 	local hover = row:CreateTexture(nil, "BACKGROUND")
 	hover:SetAllPoints(row)
 	hover:SetTexture(WHITE8x8)
-	hover:SetVertexColor(C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.16)
+	hover:SetVertexColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 0.35)
 	hover:Hide()
 	row._hover = hover
 
-	local text = MakeText(row, 11, C_TEXT, "OUTLINE")
-	text:SetPoint("LEFT", row, "LEFT", 0, 0)
-	text:SetWidth(CONTENT_FS_W)
+	local selected = row:CreateTexture(nil, "BACKGROUND")
+	selected:SetAllPoints(row)
+	selected:SetTexture(WHITE8x8)
+	selected:SetVertexColor(C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.38)
+	selected:Hide()
+	row._selected = selected
+
+	local text = MakeText(row, 10, C_TEXT, "OUTLINE")
+	text:SetPoint("LEFT", row, "LEFT", 4, 0)
+	text:SetPoint("RIGHT", row, "RIGHT", -2, 0)
 	text:SetJustifyH("LEFT")
 	text:SetWordWrap(false)
 	text:SetNonSpaceWrap(false)
 	row._text = text
 
 	row:SetScript("OnClick", function(self)
-		if self._copyText then
-			ShowAffixCopyBox(self._copyText)
+		if self._family and SelectAffixFamily then
+			SelectAffixFamily(self._family)
 		end
 	end)
 	row:SetScript("OnEnter", function(self)
-		if self._copyText then
+		if self._family then
 			self._hover:Show()
 			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-			GameTooltip:SetText("Copy Affix Name", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			GameTooltip:AddLine("Click to select this affix name for Ctrl+C.",
-				C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
+			GameTooltip:SetText(self._family.prettyName or "Affix", C_TITLE[1], C_TITLE[2], C_TITLE[3], 1)
+			if self._family.weaponOnly then
+				GameTooltip:AddLine("Weapon affix", 1.0, 0.53, 0.0)
+			else
+				GameTooltip:AddLine("Armor affix", 0.7, 0.7, 0.7)
+			end
+			local desc = GetBestFamilyDescription and GetBestFamilyDescription(self._family) or ""
+			if desc and desc ~= "" then
+				GameTooltip:AddLine(desc, 1, 1, 1, true)
+			end
 			GameTooltip:Show()
 		end
 	end)
@@ -2157,95 +2320,512 @@ local function GetAffixRow(index)
 		self._hover:Hide()
 		GameTooltip:Hide()
 	end)
+	row:SetScript("OnMouseWheel", function(_, delta)
+		if delta and delta > 0 then
+			affixScrollOffset = affixScrollOffset - 1
+		else
+			affixScrollOffset = affixScrollOffset + 1
+		end
+		if RefreshAffixBook then RefreshAffixBook(false) end
+	end)
 
 	rowPool[index] = row
 	return row
 end
 
-local function ResizeLearnedAffixesContent()
-	-- Measure rendered height and size the scroll child to match so the
-	-- scrollbar's range is correct. Add a small bottom pad so the last line
-	-- isn't flush against the frame edge.
-	local h = bodyFS:GetStringHeight() + 8
-	if h < 1 then h = 1 end
-	content:SetHeight(h)
+scrollbar = CreateFrame("Frame", nil, scroll)
+scrollbar:SetPoint("TOPRIGHT", scroll, "TOPRIGHT", -4, -AFFIX_LIST_PAD)
+scrollbar:SetPoint("BOTTOMRIGHT", scroll, "BOTTOMRIGHT", -4, AFFIX_LIST_PAD)
+scrollbar:SetWidth(AFFIX_LIST_SCROLLBAR_WIDTH)
+scrollbar.thumb = scrollbar:CreateTexture(nil, "OVERLAY")
+scrollbar.thumb:SetTexture(WHITE8x8)
+scrollbar.thumb:SetVertexColor(C_BLUE[1], C_BLUE[2], C_BLUE[3], 1)
+scrollbar.thumb:SetWidth(AFFIX_LIST_SCROLLBAR_WIDTH)
+
+scroll:SetScript("OnMouseWheel", function(_, delta)
+	if delta and delta > 0 then
+		affixScrollOffset = affixScrollOffset - 1
+	else
+		affixScrollOffset = affixScrollOffset + 1
+	end
+	if RefreshAffixBook then RefreshAffixBook(false) end
+end)
+
+local function PlainAffixText(text)
+	text = tostring(text or "")
+	text = text:gsub("|c%x%x%x%x%x%x%x%x", "")
+	text = text:gsub("|r", "")
+	text = text:gsub("^%s+", "")
+	text = text:gsub("%s+$", "")
+	return text
+end
+
+local function NormalizeAffixSearchText(text)
+	text = string.lower(PlainAffixText(text))
+	text = text:gsub("^%s+", ""):gsub("%s+$", "")
+	return text
+end
+
+local function GetSpellDescription(spellId)
+	if not spellId then return "" end
+	spellTip:Hide()
+	spellTip:SetOwner(UIParent, "ANCHOR_NONE")
+	spellTip:ClearLines()
+	spellTip:SetHyperlink("spell:" .. tostring(spellId))
+	local lines = {}
+	for i = 2, spellTip:NumLines() do
+		local lineObj = _G["AutoDelete_AffixBookSpellTipTextLeft" .. i]
+		local text = lineObj and lineObj:GetText()
+		if text and text ~= "" then
+			table.insert(lines, text)
+		end
+	end
+	spellTip:Hide()
+	return table.concat(lines, "\n")
+end
+
+GetBestFamilyDescription = function(family)
+	if not family or not family.tiers then return "" end
+	for tier = TIER_COUNT, 1, -1 do
+		local affix = family.tiers[tier]
+		if affix and affix.learned then
+			return GetSpellDescription(affix.id)
+		end
+	end
+	for tier = TIER_COUNT, 1, -1 do
+		local affix = family.tiers[tier]
+		if affix then
+			return GetSpellDescription(affix.id)
+		end
+	end
+	return ""
+end
+
+local function SetTierButtonSelected(tier)
+	for i = 1, TIER_COUNT do
+		SetSelected(tierButtons[i], i == tier)
+	end
+end
+
+local function SelectAffixTier(family, tier)
+	local affix = family and family.tiers and family.tiers[tier]
+	if not affix then return false end
+	selectedAffixTier = tier
+	SetTierButtonSelected(tier)
+	descriptionText:SetText(GetSpellDescription(affix.id))
+	return true
+end
+
+local function ResetTierButton(btn)
+	SetEdgeColor(btn, 0.2, 0.2, 0.2, 1)
+	SetGlow(btn, false)
+	SetSelected(btn, false)
+	btn._icon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
+	btn._icon:SetDesaturated(true)
+	btn._icon:Show()
+	btn._lockOverlay:Show()
+	btn._lockIcon:Show()
+	btn:Disable()
+	btn:SetScript("OnEnter", nil)
+	btn:SetScript("OnLeave", nil)
+	btn:SetScript("OnClick", nil)
+end
+
+local function ShowAffixFamily(family)
+	if not family then
+		descriptionText:SetText("")
+		for tier = 1, TIER_COUNT do
+			local btn = tierButtons[tier]
+			ResetTierButton(btn)
+			btn:Hide()
+			if btn._tierLabel then btn._tierLabel:Hide() end
+		end
+		return
+	end
+
+	descriptionText:SetText(GetBestFamilyDescription(family))
+	local unavailableTiers = UNAVAILABLE_AFFIX_TIERS[family.baseName] or {}
+
+	for tier = 1, TIER_COUNT do
+		local btn = tierButtons[tier]
+		local affix = family.tiers and family.tiers[tier]
+		ResetTierButton(btn)
+		btn:ClearAllPoints()
+		if family.weaponOnly then
+			if tier > 1 then
+				btn:Hide()
+				if btn._tierLabel then btn._tierLabel:Hide() end
+			else
+				btn:SetPoint("CENTER", tierFrame, "CENTER", 0, 0)
+				btn:Show()
+				if btn._tierLabel then btn._tierLabel:Hide() end
+			end
+		else
+			local xOff = TIER_START_X + (tier - 1) * (TIER_ICON_SIZE + TIER_GAP)
+			btn:SetPoint("CENTER", tierFrame, "CENTER", xOff, 0)
+			btn:Show()
+			if btn._tierLabel then btn._tierLabel:Show() end
+		end
+
+		if affix then
+			btn:Enable()
+			btn._icon:SetTexture((affix.icon and affix.icon ~= "" and affix.icon)
+				or "Interface\\Icons\\INV_Misc_QuestionMark")
+			btn._icon:SetDesaturated(not affix.learned)
+			if affix.learned then
+				btn._lockOverlay:Hide()
+				btn._lockIcon:Hide()
+			else
+				btn._lockOverlay:Show()
+				btn._lockIcon:Show()
+			end
+			SetGlow(btn, (affix.appliedCount or 0) > 0)
+			btn:SetScript("OnEnter", function(self)
+				GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+				GameTooltip:SetSpellByID(affix.id)
+				if affix.learned then
+					local count = affix.appliedCount or 0
+					if count > 0 then
+						GameTooltip:AddLine(" ")
+						GameTooltip:AddLine("Equipped/applied count: " .. count, 0.3, 1, 0.3)
+					end
+				else
+					GameTooltip:AddLine(" ")
+					GameTooltip:AddLine("Not yet learned", 0.6, 0.6, 0.6)
+					GameTooltip:AddLine("Extract from gear to learn this tier.", 0.5, 0.5, 0.5, true)
+				end
+				GameTooltip:Show()
+			end)
+			btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+			btn:SetScript("OnClick", function() SelectAffixTier(family, tier) end)
+		else
+			local unavailableNote = unavailableTiers[tier]
+			if unavailableNote then
+				btn:Enable()
+			end
+			btn:SetScript("OnEnter", function(self)
+				GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+				if unavailableNote then
+					GameTooltip:SetText("Tier " .. (TIER_ROMANS[tier] or tier), 0.7, 0.7, 0.7)
+					GameTooltip:AddLine(unavailableNote, 0.8, 0.55, 1, true)
+				else
+					GameTooltip:SetText("Tier " .. (TIER_ROMANS[tier] or tier) .. " not learned", 0.7, 0.7, 0.7)
+					GameTooltip:AddLine("Extract from gear to learn this tier", 0.5, 0.5, 0.5, true)
+				end
+				GameTooltip:Show()
+			end)
+			btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+		end
+	end
+end
+
+local function ApplyAffixFamilySelection(family, tier)
+	if not family then return false end
+	selectedAffixFamilyKey = family.baseName or family.prettyName
+	selectedAffixTier = nil
+	ShowAffixFamily(family)
+	if tier and family.tiers and family.tiers[tier] then
+		SelectAffixTier(family, tier)
+	elseif family.weaponOnly and family.tiers and family.tiers[1] then
+		SelectAffixTier(family, 1)
+	end
+	return true
+end
+
+SelectAffixFamily = function(family, tier)
+	if not ApplyAffixFamilySelection(family, tier) then return false end
+	if RefreshAffixBook then RefreshAffixBook(false) end
+	return true
+end
+
+local function RowsFromBodyText(text)
+	local built = {}
+	local firstLine = true
+	for line in string.gmatch(tostring(text or "") .. "\n", "(.-)\n") do
+		if line == "" then
+			table.insert(built, { kind = "blank", text = "" })
+		else
+			table.insert(built, { kind = firstLine and "header" or "summary", text = line })
+		end
+		firstLine = false
+	end
+	if #built == 0 then
+		table.insert(built, { kind = "empty", text = "No affix data available" })
+	end
+	return built
+end
+
+local function FilterAffixRows(rows)
+	local needle = NormalizeAffixSearchText(affixSearchText)
+	local filtered = {}
+	local matches = 0
+	for _, data in ipairs(rows or {}) do
+		local include = true
+		if data.kind == "affix" then
+			if data.weaponOnly then
+				include = affixFilterState.weapon == true
+			else
+				include = affixFilterState.armor == true
+			end
+			if include and affixFilterState.learned and not data.learned then
+				include = false
+			end
+		end
+		if include and data.kind == "affix" then
+			local hay = NormalizeAffixSearchText((data.searchText or "") .. " " .. (data.copyText or "") .. " " .. (data.text or ""))
+			if needle == "" or string.find(hay, needle, 1, true) then
+				table.insert(filtered, data)
+				matches = matches + 1
+			end
+		elseif include and data.kind ~= "blank" then
+			local hay = string.lower(PlainAffixText(data.text))
+			if needle == "" or string.find(hay, needle, 1, true) then
+				table.insert(filtered, data)
+				matches = matches + 1
+			end
+		end
+	end
+	if matches == 0 then
+		filtered = { { kind = "empty", text = "No matching affixes" } }
+	end
+	return filtered, matches, true
+end
+
+local function AffixMaxScroll()
+	local maxScroll = #affixVisibleRows - AFFIX_LIST_VISIBLE_ROWS
+	if maxScroll < 0 then maxScroll = 0 end
+	return maxScroll
+end
+
+local function ClampAffixScroll()
+	local maxScroll = AffixMaxScroll()
+	if affixScrollOffset < 0 then affixScrollOffset = 0 end
+	if affixScrollOffset > maxScroll then affixScrollOffset = maxScroll end
+end
+
+local function UpdateAffixScrollbar()
+	local trackH = AFFIX_LIST_HEIGHT - AFFIX_LIST_PAD * 2
+	if #affixVisibleRows <= AFFIX_LIST_VISIBLE_ROWS then
+		scrollbar.thumb:SetHeight(trackH)
+		scrollbar.thumb:ClearAllPoints()
+		scrollbar.thumb:SetPoint("TOP", scrollbar, "TOP", 0, 0)
+		return
+	end
+	local thumbH = math.floor(trackH * (AFFIX_LIST_VISIBLE_ROWS / #affixVisibleRows))
+	if thumbH < 18 then thumbH = 18 end
+	local maxScroll = AffixMaxScroll()
+	local travel = trackH - thumbH
+	local top = 0
+	if maxScroll > 0 then
+		top = math.floor(travel * (affixScrollOffset / maxScroll) + 0.5)
+	end
+	scrollbar.thumb:SetHeight(thumbH)
+	scrollbar.thumb:ClearAllPoints()
+	scrollbar.thumb:SetPoint("TOP", scrollbar, "TOP", 0, -top)
 end
 
 local function RenderAffixRows(rows)
-	bodyFS:Hide()
 	HideAffixRows()
-	local y = 0
-	for i, data in ipairs(rows or {}) do
+	affixVisibleRows = rows or {}
+	ClampAffixScroll()
+	for i = 1, AFFIX_LIST_VISIBLE_ROWS do
+		local data = affixVisibleRows[affixScrollOffset + i]
 		local row = GetAffixRow(i)
-		local isBlank = data.kind == "blank"
-		local h = isBlank and BLANK_ROW_H or ROW_H
-		row:SetHeight(h)
-		row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-		row:SetPoint("RIGHT", content, "RIGHT", 0, 0)
-		row._copyText = data.copyText
-		row._hover:Hide()
-		row._text:SetText(data.text or "")
-		if isBlank then row._text:Hide() else row._text:Show() end
-		if data.kind == "header" then
-			row._text:SetFont(FONT, 11, "OUTLINE")
-			row._text:SetTextColor(unpack(C_TITLE))
-		elseif data.kind == "affix" then
-			row._text:SetFont(FONT, 11, "OUTLINE")
-			row._text:SetTextColor(unpack(C_TEXT))
+		if not data then
+			row._family = nil
+			row._hover:Hide()
+			row._selected:Hide()
+			row:Hide()
 		else
-			row._text:SetFont(FONT, 11, "OUTLINE")
-			row._text:SetTextColor(unpack(C_DIM))
+			local isBlank = data.kind == "blank"
+			local displayText = data.text or ""
+			row:SetHeight(AFFIX_LIST_ROW_HEIGHT)
+			row:ClearAllPoints()
+			row:SetPoint("TOPLEFT", content, "TOPLEFT", AFFIX_LIST_PAD,
+				-(AFFIX_LIST_PAD + (i - 1) * AFFIX_LIST_ROW_HEIGHT))
+			row:SetPoint("RIGHT", scrollbar, "LEFT", -2, 0)
+			row._family = (data.kind == "affix") and data or nil
+			row._hover:Hide()
+			row._selected:Hide()
+			if data.kind == "affix" and data.baseName and data.baseName == selectedAffixFamilyKey then
+				row._selected:Show()
+			end
+			row._text:SetJustifyH(data.kind == "empty" and "CENTER" or "LEFT")
+			row._text:SetText(displayText)
+			if isBlank then row._text:Hide() else row._text:Show() end
+			if data.kind == "header" then
+				row._text:SetFont(FONT, 11, "OUTLINE")
+				row._text:SetTextColor(unpack(C_TITLE))
+			elseif data.kind == "affix" then
+				row._text:SetFont(FONT, 10, "OUTLINE")
+				row._text:SetTextColor(unpack(C_TEXT))
+			elseif data.kind == "summary" then
+				row._text:SetFont(FONT, 10, "OUTLINE")
+				row._text:SetTextColor(unpack(C_DIM))
+			elseif data.kind == "empty" then
+				row._text:SetFont(FONT, 10, "OUTLINE")
+				row._text:SetTextColor(unpack(C_DIM))
+			else
+				row._text:SetFont(FONT, 10, "OUTLINE")
+				row._text:SetTextColor(unpack(C_DIM))
+			end
+			row:EnableMouse(true)
+			row:Show()
 		end
-		row:EnableMouse(data.copyText ~= nil)
-		row:Show()
-		y = y + h
 	end
-	content:SetHeight(math.max(1, y + 8))
+	UpdateAffixScrollbar()
 end
 
-RefreshLearnedAffixesTabs = function(resetScroll)
-	for key, btn in pairs(tabButtons) do
-		btn._text:SetText(FormatAffixTabLabel(btn._baseLabel, tabCounts[key]))
+local function EnsureAffixSelection()
+	local firstFamily
+	local selectedFamily
+	for _, data in ipairs(affixVisibleRows or {}) do
+		if data.kind == "affix" then
+			if not firstFamily then firstFamily = data end
+			if selectedAffixFamilyKey and data.baseName == selectedAffixFamilyKey then
+				selectedFamily = data
+				break
+			end
+		end
 	end
-	RefreshAffixTabButtons()
-	copyFrame:Hide()
-	if tabRows[currentTab] then
-		RenderAffixRows(tabRows[currentTab])
+	if selectedFamily then
+		ApplyAffixFamilySelection(selectedFamily, selectedAffixTier)
+	elseif firstFamily then
+		ApplyAffixFamilySelection(firstFamily)
+	else
+		selectedAffixFamilyKey = nil
+		selectedAffixTier = nil
+		ShowAffixFamily(nil)
+	end
+	for _, row in ipairs(rowPool) do
+		if row._selected then
+			if row._family and row._family.baseName == selectedAffixFamilyKey then
+				row._selected:Show()
+			else
+				row._selected:Hide()
+			end
+		end
+	end
+end
+
+local function FindTierForSearch(family, needle, exactOnly)
+	if not family or needle == "" then return nil end
+	for tier = 1, TIER_COUNT do
+		local affix = family.tiers and family.tiers[tier]
+		if affix and affix.name then
+			local tierText = NormalizeAffixSearchText((affix.name or "") .. " "
+				.. (family.baseName or "") .. " " .. (TIER_ROMANS[tier] or ""))
+			if exactOnly then
+				if tierText == needle or NormalizeAffixSearchText(affix.name) == needle then
+					return tier
+				end
+			elseif string.find(tierText, needle, 1, true) then
+				return tier
+			end
+		end
+	end
+	local unavailableTiers = UNAVAILABLE_AFFIX_TIERS[family.baseName] or {}
+	for tier = 1, TIER_COUNT do
+		if unavailableTiers[tier] then
+			local tierText = NormalizeAffixSearchText((family.baseName or "") .. " " .. (TIER_ROMANS[tier] or ""))
+			if exactOnly then
+				if tierText == needle then return tier end
+			elseif string.find(tierText, needle, 1, true) then
+				return tier
+			end
+		end
+	end
+	return nil
+end
+
+local function FindSearchFamily(exactOnly)
+	local needle = NormalizeAffixSearchText(affixSearchText)
+	if needle == "" then return nil end
+	for _, data in ipairs(affixVisibleRows or {}) do
+		if data.kind == "affix" then
+			local rowText = NormalizeAffixSearchText((data.prettyName or "") .. " "
+				.. (data.baseName or "") .. " " .. (data.searchText or ""))
+			if exactOnly then
+				if NormalizeAffixSearchText(data.prettyName) == needle
+					or NormalizeAffixSearchText(data.baseName) == needle then
+					return data, FindTierForSearch(data, needle, true)
+				end
+			elseif string.find(rowText, needle, 1, true) then
+				return data, FindTierForSearch(data, needle, false)
+			end
+			local tier = FindTierForSearch(data, needle, exactOnly)
+			if tier then return data, tier end
+		end
+	end
+	return nil
+end
+
+SelectSearchResult = function()
+	local family, tier = FindSearchFamily(true)
+	if not family then
+		for _, data in ipairs(affixVisibleRows or {}) do
+			if data.kind == "affix" and data.baseName == selectedAffixFamilyKey then
+				family = data
+				break
+			end
+		end
+	end
+	if not family then
+		family, tier = FindSearchFamily(false)
+	end
+	if not family then
+		for _, data in ipairs(affixVisibleRows or {}) do
+			if data.kind == "affix" then
+				family = data
+				break
+			end
+		end
+	end
+	if family then
+		SelectAffixFamily(family, tier)
+	end
+end
+
+RefreshAffixBook = function(resetScroll)
+	RefreshAffixFilterButtons()
+	if resetScroll then
+		affixScrollOffset = 0
+	end
+	if affixBookRows and #affixBookRows > 0 then
+		local rows = FilterAffixRows(affixBookRows)
+		RenderAffixRows(rows)
+		EnsureAffixSelection()
 	else
 		HideAffixRows()
-		bodyFS:Show()
-		bodyFS:SetText(tabData[currentTab] or "")
-		ResizeLearnedAffixesContent()
-	end
-	if resetScroll then
-		scroll:SetVerticalScroll(0)
+		RenderAffixRows(FilterAffixRows(RowsFromBodyText(affixFallbackText)))
+		EnsureAffixSelection()
 	end
 end
 
--- Show the popup with the given body text. Resizes the scroll child so the
--- scrollbar reflects the actual content height. Text may include WoW color
--- escapes (|cffRRGGBB...|r) which FontString renders natively.
+-- Show the popup with structured affix data or a fallback message. Text may
+-- include WoW color escapes (|cffRRGGBB...|r), which FontString renders.
 local function ShowLearnedAffixesWindow(bodyTextOrData)
+	local preserveSearch = false
 	if type(bodyTextOrData) == "table" then
-		tabData.learned = bodyTextOrData.learned or ""
-		tabData.unlearned = bodyTextOrData.unlearned or ""
-		tabRows.learned = bodyTextOrData.learnedRows
-		tabRows.unlearned = bodyTextOrData.unlearnedRows
-		tabCounts.learned = bodyTextOrData.learnedCount
-		tabCounts.unlearned = bodyTextOrData.unlearnedCount
-		if bodyTextOrData.defaultTab == "learned" or bodyTextOrData.defaultTab == "unlearned" then
-			currentTab = bodyTextOrData.defaultTab
-		end
+		affixFallbackText = bodyTextOrData.learned or bodyTextOrData.unlearned or ""
+		affixBookRows = bodyTextOrData.affixRows or {}
+		preserveSearch = bodyTextOrData.preserveSearch == true
 	else
-		tabData.learned = bodyTextOrData or ""
-		tabData.unlearned = "|cffff8000No unlearned-affix list available.|r"
-		tabRows.learned = nil
-		tabRows.unlearned = nil
-		tabCounts.learned = nil
-		tabCounts.unlearned = nil
-		currentTab = "learned"
+		affixFallbackText = bodyTextOrData or ""
+		affixBookRows = {}
 	end
-	RefreshLearnedAffixesTabs(true)
+	if preserveSearch then
+		affixSearchText = searchEdit:GetText() or ""
+	else
+		affixSearchText = ""
+		if searchEdit:GetText() ~= "" then
+			searchEdit:SetText("")
+		else
+			searchPlaceholder:Show()
+		end
+		searchEdit:ClearFocus()
+	end
+	RefreshAffixBook(not preserveSearch)
 	-- Anchor centered on first show; user can drag it after.
 	if not popup._everShown then
 		popup:ClearAllPoints()
@@ -3788,7 +4368,7 @@ local function BuildUI(self)
 	--   Row 3: Delete Junk
 
 	local tglEnable = MakeToggle(card1, "Enable Addon", C_ACCENT,
-		"Turns AutoDelete on. When this is off, it will not sell or delete items. Auto-Invite and Hide Greedy Spam still work.")
+		"Turns AutoDelete on. When this is off, automatic delete, sell, repair, summon, invite, spam hiding, and equipped-item sync actions stop.")
 	tglEnable:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglEnable:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglEnable = tglEnable
@@ -3945,12 +4525,12 @@ local function BuildUI(self)
 				label = "General",
 				title = "General",
 				sections = {
-					{ icon = "Interface\\Icons\\INV_Misc_Gear_01", title = "Enable Addon", body = "The master switch on the General tab. While it is off, nothing is auto-deleted or auto-sold. Auto-Invite and Hide Greedy Spam keep working either way." },
+					{ icon = "Interface\\Icons\\INV_Misc_Gear_01", title = "Enable Addon", body = "The master switch on the General tab and minimap menu. While it is off, AutoDelete runs no automatic delete, sell, repair, summon, invite, spam hiding, or equipped-item sync actions." },
 					{ icon = "Interface\\Icons\\Ability_Defend", title = "Auto-Add Equipped", body = "Adds gear you equip and Blizzard equipment set items to your Keep list so they are never sold or deleted by mistake. Shirts and tabards are skipped." },
 					{ icon = "Interface\\Icons\\Ability_Repair", title = "Auto-Repair", body = "Repairs your gear whenever you talk to a vendor. Choose None to disable it, Player to use your own gold, or Guild to use guild repair funds when available." },
 					{ icon = "Interface\\Icons\\INV_Misc_Bag_10_Black", title = "Process Bags", body = "Open Panel opens the Process Bags window, a separate list of every bag item ready for One-Key Disenchant, Mill, Prospect, or Open. The card also shows a live count." },
-					{ icon = "Interface\\Icons\\INV_Misc_PocketWatch_01", title = "Scan Speed", body = "How often your bags are checked against the Delete and Sell lists. Fast clears matches almost instantly, slow is quieter in the background. Vendor selling always runs when a merchant opens." },
-					{ icon = "Interface\\Icons\\INV_Scroll_06", title = "Recipe Safety", body = "Sell Known Recipes lives on the Sell Filters tab. When enabled, recipe-like items are checked with their bag tooltip; only Already known recipes whose quality toggle is on can auto-sell." },
+					{ icon = "Interface\\Icons\\INV_Misc_PocketWatch_01", title = "Scan Speed", body = "How often your bags are checked against the Delete and Sell lists. Fast clears matches almost instantly, slow is quieter in the background. While AutoDelete is enabled, vendor selling checks when a merchant opens." },
+					{ icon = "Interface\\Icons\\INV_Scroll_06", title = "Recipe Safety", body = "Sell Known Recipes lives on the Sell Filters tab. When enabled, recipe-like items are checked with their bag tooltip; only Already known recipes whose quality and BoE/BoP toggles are on can auto-sell." },
 				}
 			},
 			{
@@ -3958,9 +4538,10 @@ local function BuildUI(self)
 				title = "Pets",
 				sections = {
 					{ icon = "Interface\\Icons\\Ability_Hunter_BeastCall", title = "Summon Scavenger", body = "Manages your Greedy Scavenger pet and brings it back when it gets stuck or after you mount. The sub-toggles pick when to resummon: After sell, After vendor close, and Only in Combat." },
-					{ icon = "Interface\\Icons\\INV_Misc_Coin_16", title = "Summon Merchant", body = "Summons your Goblin Merchant once your bags stay full for two seconds. Target the merchant and press your Interact key to open the shop." },
-					{ icon = "Interface\\Icons\\INV_Misc_Bell_01", title = "Bag warning", body = "Warns you in chat when free bag slots drop to the number in Free slots. It warns once, then stays quiet until your bags fill up again." },
-					{ icon = "Interface\\Icons\\Ability_Vanish", title = "Hide Greedy Spam", body = "Hides the Greedy Scavenger chat messages and speech bubbles. It only quiets the noise, it does not change any cleanup rules." },
+					{ icon = "Interface\\Icons\\INV_Misc_Coin_16", title = "Summon Merchant", body = "Summons your Goblin Merchant once your bags stay nearly full for the configured delay. Target the merchant and press your Interact key to open the shop." },
+					{ icon = "Interface\\Icons\\INV_Misc_Coin_01", title = "Auto-Close after sell", body = "On the Summon Merchant card, this closes the vendor after AutoDelete finishes selling. Turn it off if you want the vendor to stay open." },
+					{ icon = "Interface\\Icons\\INV_Misc_GroupLooking", title = "No Group Summons", body = "Blocks AutoDelete from auto-summoning Greedy Scavenger or Goblin Merchant while you are in a party or raid." },
+					{ icon = "Interface\\Icons\\Ability_Vanish", title = "Hide Greedy Spam", body = "Hides the Greedy Scavenger chat messages and speech bubbles while AutoDelete is enabled. It only quiets the noise, it does not change cleanup rules." },
 				}
 			},
 			{
@@ -3970,16 +4551,16 @@ local function BuildUI(self)
 					{ icon = "Interface\\Icons\\Spell_Holy_DivineProtection", title = "Affix Protection", body = "No Auto-Sell protects the checked tiers I-V before Delete, Sell, or One-Key Disenchant rules. Keep still wins first. Checked tiers are a hard stop for matching affix items." },
 					{ icon = "Interface\\Icons\\Spell_Nature_WispSplode", title = "Affix Display", body = "Show affix dot marks affixed bag items by tier. The selected missing-affix color means the account has not learned that affix. Show/Keep Missing Affix hides learned affixes and shows only missing-affix dots." },
 					{ icon = "Interface\\Icons\\INV_Misc_Gem_Amethyst_03", title = "KeepOne Missing Affix", body = "Protects one gear item for each missing affix from Delete, Sell, or One-Key Disenchant rules. Duplicate missing-affix gear can still clear through normal cleanup rules. It is a toggle, not a list, and it ignores learned affixes." },
-					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_02", title = "Affix Tools", body = "Refresh List checks your Delete and Sell lists for affixed items and prints what it finds without changing anything. Update Affix List opens Learned and Unlearned tabs from PE's account-bound affix data. Missing Affix Color opens a color picker for affixes your account has not learned." },
+					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_02", title = "Affix Tools", body = "Refresh List checks your Delete and Sell lists for affixed items and prints what it finds without changing anything. Update Affix List asks the server for learned affixes and opens AutoDelete's server-fed PEEv1-style affix mirror with Armor, Weapon, and Learned filters. Missing Affix Color opens a color picker for affixes your account has not learned." },
 				}
 			},
 			{
 				label = "Invites",
 				title = "Invites",
 				sections = {
-					{ icon = "Interface\\Icons\\INV_Misc_GroupLooking", title = "Auto-Invite", body = "When someone whispers one of your Keywords, you invite them to your group. You must be the leader or a raid assistant. Set the Keywords first, then turn the toggle on." },
-					{ icon = "Interface\\Icons\\INV_Misc_Dice_01", title = "Apply loot rule", body = "After an auto-invite, sets the party loot rule to the one you pick in the dropdown. Leave it off when a raid lead or another addon controls loot." },
-					{ icon = "Interface\\Icons\\Ability_Warrior_BattleShout", title = "Convert to raid when full", body = "When the sixth player joins, the party becomes a raid automatically. Leave it off for normal five-person parties." },
+					{ icon = "Interface\\Icons\\INV_Misc_GroupLooking", title = "Auto-Invite", body = "While AutoDelete is enabled, whispers matching one of your Keywords invite the sender to your group. You must be solo, leader, or raid assistant." },
+					{ icon = "Interface\\Icons\\INV_Misc_Dice_01", title = "Apply loot rule", body = "After an auto-invite, and only while AutoDelete is enabled, sets the party loot rule to the one you pick in the dropdown. Leave it off when a raid lead or another addon controls loot." },
+					{ icon = "Interface\\Icons\\Ability_Warrior_BattleShout", title = "Convert to raid when full", body = "While AutoDelete is enabled, the party becomes a raid automatically when the sixth player joins. Leave it off for normal five-person parties." },
 				}
 			},
 			{
@@ -4031,7 +4612,7 @@ local function BuildUI(self)
 				label = "Sell Filters",
 				title = "Sell Filters",
 				sections = {
-					{ icon = "Interface\\Icons\\INV_Scroll_06", title = "Sell Known Recipes", body = "Sells recipes only when their tooltip says Already known. Unknown or unreadable recipes stay kept from automatic sell rules while this rule is on. Why?, /del history, /del report, and /del processdebug show the recipe knowledge state used." },
+					{ icon = "Interface\\Icons\\INV_Scroll_06", title = "Sell Known Recipes", body = "Sells recipes only when their tooltip says Already known and their quality plus BoE/BoP toggles are enabled. Unknown or unreadable recipes stay kept from automatic sell rules while this rule is on. Why?, /del history, /del report, and /del processdebug show the recipe state used." },
 					{ icon = "Interface\\Icons\\INV_Chest_Chain", title = "BoE Armor", body = "Sells Bind-on-Equip armor and accessories that match the Rare and Epic toggles and the iLvl range on the card. Weapons belong to BoE Weapons. Keep-list and quest items stay safe." },
 					{ icon = "Interface\\Icons\\INV_Helmet_06", title = "BoP", body = "Sells Bind-on-Pickup gear in any slot, including weapons, that matches the Rare and Epic toggles and the iLvl range. Keep-list and quest items stay safe." },
 					{ icon = "Interface\\Icons\\INV_Sword_27", title = "BoE Weapons", body = "Sells Bind-on-Equip weapons, shields, ranged, thrown, and relics in range. It wins over BoE Armor when an item could fit both. Use Why? if a sale surprises you." },
@@ -4119,7 +4700,7 @@ local function BuildUI(self)
 	local gCard2 = MakeGoblinCard(cardW + CARD_GAP)
 	local gCard3 = MakeGoblinCard((cardW + CARD_GAP) * 2)
 
-	-- Sub-toggle indent shared by Scavenger and Bag Warning rows below.
+	-- Sub-toggle indent shared by Scavenger rows below.
 	-- Lines up the sub-toggle's checkbox with the parent toggle's label text:
 	-- parent x=10, parent box=14, gap=8 -> text starts at 32.
 	local SUBTGL_INDENT = CARD_INNER_PAD_X + 14 + 8   -- 32
@@ -4161,38 +4742,50 @@ local function BuildUI(self)
 		"Summons Goblin Merchant when your bags are full. Target it and use Interact to open the shop.")
 	tglSummonMerchant:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
 	tglSummonMerchant:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	AddToggleDescription(tglSummonMerchant,
-		"Summons the Goblin Merchant when bags are full.",
-		cardW - CARD_INNER_PAD_X * 2 - 26)
 	self._tglSummonMerchant = tglSummonMerchant
 
-	-- CARD 3 (Pets): Bag Warning + Hide Greedy Spam. Two notification-style
-	-- toggles. Bag Warning fires a chat line when free slots fall below the
-	-- threshold (one-shot per low cycle). Hide Greedy Spam suppresses the
-	-- Scavenger's chat / speech-bubble strings. Threshold here also gates
-	-- the chat notification only; Goblin Merchant summon triggers at zero
-	-- free slots independently.
-	local tglBagSpaceWarn = MakeToggle(gCard3, "Bag warning", C_ACCENT,
-		"Shows a chat warning when your free bag slots drop to the number below.")
-	tglBagSpaceWarn:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
-	tglBagSpaceWarn:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglBagSpaceWarn = tglBagSpaceWarn
+	local tglCloseVendor = MakeSubToggle(gCard2, "Auto-Close after sell", C_DK_RED,
+		"Closes the vendor after AutoDelete finishes selling. Turn this off if you want the vendor to stay open.")
+	tglCloseVendor:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 24))
+	tglCloseVendor:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
+	self._tglCloseVendor = tglCloseVendor
 
-	-- Threshold row beneath the Bag warning toggle. Small EditBox + label.
+	-- CARD 3 (Pets): shared summon rules + Hide Greedy Spam. Four rows:
+	-- group guard, spam suppression, merchant threshold label, and count.
+	local tglNoGroupSummons = MakeToggle(gCard3, "No Group Summons", C_ACCENT,
+		"Blocks Greedy Scavenger and Goblin Merchant auto-summons while you are in a party or raid.")
+	tglNoGroupSummons:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -CARD_INNER_PAD_Y)
+	tglNoGroupSummons:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglNoGroupSummons = tglNoGroupSummons
+
+	local tglHideSpam = MakeToggle(gCard3, "Hide Greedy Spam", C_ACCENT,
+		"Hides Greedy Scavenger's chat messages and speech bubbles.")
+	tglHideSpam:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 22))
+	tglHideSpam:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
+	self._tglHideSpam = tglHideSpam
+
+	-- Merchant summon threshold: label row, then count row.
 	local thresholdRow = CreateFrame("Frame", nil, gCard3)
-	thresholdRow:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	thresholdRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 22))
+	thresholdRow:SetSize(cardW - CARD_INNER_PAD_X * 2, 36)
+	thresholdRow:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 44))
 
 	local thresholdLabel = thresholdRow:CreateFontString(nil, "OVERLAY")
 	thresholdLabel:SetFont(FONT, 10, "OUTLINE")
 	thresholdLabel:SetTextColor(unpack(C_DIM))
-	thresholdLabel:SetPoint("LEFT", thresholdRow, "LEFT", 0, 0)
-	thresholdLabel:SetText("Free slots:")
+	thresholdLabel:SetPoint("TOPLEFT", thresholdRow, "TOPLEFT", 0, 0)
+	thresholdLabel:SetWidth(cardW - CARD_INNER_PAD_X * 2)
+	thresholdLabel:SetJustifyH("LEFT")
+	thresholdLabel:SetWordWrap(false)
+	thresholdLabel:SetNonSpaceWrap(false)
+	thresholdLabel:SetText("Summon Merchant when bags have")
 
 	local thresholdBox = CreateFrame("Frame", nil, thresholdRow)
 	thresholdBox:SetSize(44, 20)
-	thresholdBox:SetPoint("RIGHT", thresholdRow, "RIGHT", 0, 0)
+	thresholdBox:SetPoint("TOPLEFT", thresholdRow, "TOPLEFT", 0, -16)
 	ApplyBackdrop(thresholdBox, C_DROP_BG, C_DROP_BORDER)
+	thresholdRow._suffix = MakeText(thresholdRow, 10, C_DIM, "OUTLINE")
+	thresholdRow._suffix:SetPoint("LEFT", thresholdBox, "RIGHT", 8, 0)
+	thresholdRow._suffix:SetText("free slots left")
 	local thresholdEdit = CreateFrame("EditBox", nil, thresholdBox)
 	thresholdEdit:SetFont(FONT, 10, "OUTLINE")
 	thresholdEdit:SetTextColor(unpack(C_TEXT))
@@ -4213,19 +4806,10 @@ local function BuildUI(self)
 		p.bagSpaceWarnThreshold = val
 		if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
 	end)
-	AttachSimpleTooltip(thresholdBox, "Free slots",
-		"Pick the free bag slot number that should show the warning.")
-	AttachSimpleTooltip(thresholdEdit, "Free slots",
-		"Pick the free bag slot number that should show the warning.")
-	self._bagSpaceWarnEdit = thresholdEdit
-
-	-- Hide Greedy Spam at the bottom of card 3. Compact toggle, no
-	-- sub-description.
-	local tglHideSpam = MakeToggle(gCard3, "Hide Greedy Spam", C_ACCENT,
-		"Hides Greedy Scavenger's chat messages and speech bubbles.")
-	tglHideSpam:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -(CARD_INNER_PAD_Y + 48))
-	tglHideSpam:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
-	self._tglHideSpam = tglHideSpam
+	AttachSimpleTooltip(thresholdBox, "Free slots to summon",
+		"When your bags have this many free slots or fewer, AutoDelete can summon Goblin Merchant.")
+	AttachSimpleTooltip(thresholdEdit, "Free slots to summon",
+		"When your bags have this many free slots or fewer, AutoDelete can summon Goblin Merchant.")
 
 	-- ========================================================================
 	-- FILTERS TAB (internal key "tools" -- kept stable for SV migration):
@@ -4668,7 +5252,7 @@ local function BuildUI(self)
 		card3Title:SetText("Affix Display")
 
 		local tglShowAffixDot = MakeToggle(aCard2, "Show affix dot", C_ACCENT,
-			"Shows a small dot on gear with a Project Ebonhold affix. The dot color shows the tier. Missing affixes use your chosen color.")
+			"Shows a small dot on gear with a server affix. The dot color shows the tier. Missing affixes use your chosen color.")
 		tglShowAffixDot:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -24)
 		tglShowAffixDot:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 		self._tglShowAffixDot = tglShowAffixDot
@@ -4703,7 +5287,7 @@ local function BuildUI(self)
 		card3Title:SetText("Affix Tools")
 
 		-- Refresh List button. Scans the user's Delete + Sell lists for
-		-- items carrying PE's @affix@ tooltip marker; prints a
+		-- items carrying server @affix@ tooltip markers; prints a
 		-- chat summary. Doesn't modify the lists.
 		local auditBtn = MakeActionButton(aCard3, "Refresh List", C_BLUE, function()
 			if _G.AutoDelete_AuditAffixOnLists then
@@ -4727,9 +5311,8 @@ local function BuildUI(self)
 			GameTooltip:Hide()
 		end)
 
-		-- Update Affix List button. Refreshes the addon's owned-affix
-		-- mirror from PE and opens the scrollable
-		-- Learned Affixes window with Learned and Unlearned tabs.
+		-- Update Affix List button. Requests AutoDelete's learned-affix
+		-- mirror from the server and opens the PEEv1-style affix mirror.
 		local scanBtn = MakeActionButton(aCard3, "Update Affix List", C_BLUE, function()
 			if _G.AutoDelete_ScanLearnedAffixes then
 				_G.AutoDelete_ScanLearnedAffixes()
@@ -4742,7 +5325,7 @@ local function BuildUI(self)
 			btn._text:SetTextColor(1, 1, 1)
 			GameTooltip:SetOwner(btn, "ANCHOR_TOP")
 			GameTooltip:SetText("Update Affix List", C_MAGE_BLUE[1], C_MAGE_BLUE[2], C_MAGE_BLUE[3], 1)
-			GameTooltip:AddLine("Updates your learned affix data from Project Ebonhold and opens the Learned Affixes window.",
+			GameTooltip:AddLine("Asks the server for your learned affix data and opens AutoDelete's server-fed PEEv1-style affix mirror with Armor, Weapon, and Learned filters.",
 				C_TOOLTIP_BODY[1], C_TOOLTIP_BODY[2], C_TOOLTIP_BODY[3], true)
 			GameTooltip:Show()
 		end)
@@ -5824,7 +6407,7 @@ local function BuildUI(self)
 	--
 	-- Four independent category controls: Sell Known Recipes first, then BoE Armor,
 	-- BoP, and BoE Weapons. Gear cards have Rare/Epic toggles and iLvl range;
-	-- Sell Known Recipes has white/green/blue/purple quality toggles.
+	-- Sell Known Recipes has BoE/BoP plus white/green/blue/purple toggles.
 	--
 	-- Delete Junk lives on the General tab. Common / Greens / Rares live in
 	-- the Filters tab Auto Actions card. They are global, quality-based
@@ -5843,50 +6426,72 @@ local function BuildUI(self)
 
 	-- Helper: build a category card. Returns a table of widgets so the
 	-- enclosing scope can wire OnClick / OnTextChanged handlers.
+	local SELL_LAYOUT = _G.AutoDelete_OptionsLayout
 	local function MakeSellCategoryCard(parent, title, yPos, height, fields)
 		local card = MakeSection(parent, title, yPos, 1)
 		card:SetHeight(height)
 
-		-- ROW 1: Enable toggle on the LEFT, Rare/Epic toggles on the RIGHT.
-		-- Putting the rarity toggles on the same row as the enable cuts
-		-- vertical space and groups identity/qualifier visually.
 		local tglEnable = MakeToggle(card, title, C_ACCENT, fields.enableTooltip)
-		tglEnable:SetPoint("TOPLEFT", 15, -12)
-		tglEnable:SetSize(140, 20)
+		tglEnable:SetPoint("TOPLEFT",
+			(SELL_LAYOUT and SELL_LAYOUT.GEAR_ENABLE_X) or 15,
+			-((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_TOP_Y) or 3))
+		tglEnable:SetSize((SELL_LAYOUT and SELL_LAYOUT.GEAR_ENABLE_W) or 140,
+			(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20)
 
 		local tglEpic = MakeToggle(card, "Epic", C_Q_EPIC,
 			"Sell purple " .. fields.rarityNoun .. " when this section is on and the iLvl is in range.")
-		tglEpic:SetPoint("TOPRIGHT", -15, -12)
-		tglEpic:SetSize(60, 20)
+		tglEpic:SetPoint("TOPLEFT", card, "TOPLEFT",
+			(SELL_LAYOUT and SELL_LAYOUT.GEAR_EPIC_X) or 475,
+			-((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_TOP_Y) or 3))
+		tglEpic:SetSize((SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_W) or 60,
+			(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20)
 
 		local tglRare = MakeToggle(card, "Rare", C_Q_RARE,
 			"Sell blue " .. fields.rarityNoun .. " when this section is on and the iLvl is in range.")
-		tglRare:SetPoint("RIGHT", tglEpic, "LEFT", -16, 0)
-		tglRare:SetSize(60, 20)
+		tglRare:SetPoint("TOPLEFT", card, "TOPLEFT",
+			(SELL_LAYOUT and SELL_LAYOUT.GEAR_RARE_X)
+				or (475 - ((SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_W) or 60)
+					- ((SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_GAP) or 16)),
+			-((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_TOP_Y) or 3))
+		tglRare:SetSize((SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_W) or 60,
+			(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20)
 
-		-- ROW 2: iLvl range. Single row, label + min spinner + "to" + max spinner.
-		-- Inputs share the available width so they're visually balanced
-		-- instead of being narrow boxes lost in the middle of the card.
-		local lblIlvl = MakeText(card, 10, C_DIM, "OUTLINE")
-		lblIlvl:SetPoint("TOPLEFT", 15, -42)
+		local ilvlRow = CreateFrame("Frame", nil, card)
+		ilvlRow:SetPoint("TOPLEFT", card, "TOPLEFT",
+			(SELL_LAYOUT and SELL_LAYOUT.GEAR_ILVL_ROW_X) or 15,
+			-((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_ROW_Y) or 24))
+		ilvlRow:SetSize((SELL_LAYOUT and SELL_LAYOUT.GEAR_ILVL_ROW_W) or 287,
+			(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20)
+
+		local lblIlvl = MakeText(ilvlRow, 10, C_DIM, "OUTLINE")
+		lblIlvl:SetPoint("TOPLEFT", ilvlRow, "TOPLEFT", 0,
+			-(((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_LABEL_Y) or 28)
+				- ((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_ROW_Y) or 24)))
 		lblIlvl:SetText("iLvl")
 
-		-- Keep the iLvl spinners compact and stable; the surrounding card stays
-		-- full-width to match the rest of the Sell tab.
-		local SPINNER_W = 100
+		local SPINNER_W = (SELL_LAYOUT and SELL_LAYOUT.GEAR_SPINNER_W) or 100
 
-		local minFrame = MakeSpinnerInput(card, SPINNER_W, 22, 1, 9999, nil,
+		local minFrame = MakeSpinnerInput(ilvlRow, SPINNER_W,
+			(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20, 1, 9999, nil,
 			"Lowest item level this sell rule can sell.", "Minimum iLvl")
-		minFrame:SetPoint("LEFT", lblIlvl, "RIGHT", 8, 0)
+		minFrame:SetPoint("TOPLEFT", ilvlRow, "TOPLEFT",
+			((SELL_LAYOUT and SELL_LAYOUT.GEAR_SPINNER_X) or 70)
+				- ((SELL_LAYOUT and SELL_LAYOUT.GEAR_ILVL_ROW_X) or 15),
+			0)
 		local minBox = minFrame.editBox
 
-		local toLabel = MakeText(card, 9, C_DIM, "OUTLINE")
-		toLabel:SetPoint("LEFT", minFrame, "RIGHT", 8, 0)
+		local toLabel = MakeText(ilvlRow, 9, C_DIM, "OUTLINE")
+		toLabel:SetPoint("LEFT", minFrame, "RIGHT",
+			(SELL_LAYOUT and SELL_LAYOUT.GEAR_TO_LABEL_GAP) or 8, 0)
+		toLabel:SetWidth((SELL_LAYOUT and SELL_LAYOUT.GEAR_TO_LABEL_W) or 16)
+		toLabel:SetJustifyH("CENTER")
 		toLabel:SetText("to")
 
-		local maxFrame = MakeSpinnerInput(card, SPINNER_W, 22, 1, 9999, nil,
+		local maxFrame = MakeSpinnerInput(ilvlRow, SPINNER_W,
+			(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20, 1, 9999, nil,
 			"Highest item level this sell rule can sell.", "Maximum iLvl")
-		maxFrame:SetPoint("LEFT", toLabel, "RIGHT", 8, 0)
+		maxFrame:SetPoint("LEFT", toLabel, "RIGHT",
+			(SELL_LAYOUT and SELL_LAYOUT.GEAR_TO_LABEL_GAP) or 8, 0)
 		local maxBox = maxFrame.editBox
 
 		return {
@@ -5899,17 +6504,15 @@ local function BuildUI(self)
 		}
 	end
 
-	-- Fixed-frame budget at the real 882px frame height:
-	--   yOff -202 - note 30 - recipe section 44 - gear cards 276 - List Mode 72 = -624
-	--   Search & Manage = 882 - 28 - 624 - 8 = 222px, above the 220px minimum.
-	-- Gear-card row math: row 1 is y=-12..-32, row 2 is y=-42..-64, leaving
-	-- 6px bottom padding inside a 70px card.
-	local CARD_H = 70
-	local RECIPE_CARD_H = 22
+	-- Fixed-frame budget at the real 906px frame height:
+	--   yOff -202 - note 30 - four sell cards at 50px - List Mode 65 = -585
+	--   Search & Manage gets 285px, enough for ten 18px rows plus chrome.
+	local CARD_H = (_G.AutoDelete_OptionsLayout and _G.AutoDelete_OptionsLayout.SELL_CARD_H) or 50
+	local RECIPE_CARD_H = CARD_H
 
 	-- Info banner above the category cards. Keep this as a note; controls
 	-- belong in normal sell sections below.
-	local BANNER_H = 24
+	local BANNER_H = (_G.AutoDelete_OptionsLayout and _G.AutoDelete_OptionsLayout.SELL_BANNER_H) or 24
 	local banner = CreateFrame("Frame", nil, self)
 	banner:SetPoint("TOPLEFT", self, "TOPLEFT", 15, yOff)
 	banner:SetPoint("TOPRIGHT", self, "TOPRIGHT", -15, yOff)
@@ -5934,32 +6537,64 @@ local function BuildUI(self)
 	self._knownRecipes = {
 		card = MakeSection(self, "Sell Known Recipes", yOff, RECIPE_CARD_H),
 	}
-	self._knownRecipes.enable = MakeToggle(self._knownRecipes.card, "Sell Known Recipes", C_ACCENT,
-		"Sell recipes at vendors only when their tooltip says Already known. Unknown or unreadable recipes stay kept from automatic sell rules while this rule is on.")
-	self._knownRecipes.enable:SetPoint("LEFT", self._knownRecipes.card, "LEFT", 15, 0)
-	self._knownRecipes.enable:SetSize(190, 20)
+	self._knownRecipes.enable = MakeToggle(self._knownRecipes.card, "Enable auto-sell", C_ACCENT,
+		"Sell recipes at vendors only when their tooltip says Already known and the quality plus BoE/BoP toggles allow it. Unknown or unreadable recipes stay kept from automatic sell rules while this rule is on.",
+		"Sell Known Recipes")
+	self._knownRecipes.enable:SetPoint("TOPLEFT", self._knownRecipes.card, "TOPLEFT",
+		(SELL_LAYOUT and SELL_LAYOUT.RECIPE_ENABLE_X) or 15,
+		-((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_TOP_Y) or 3))
+	self._knownRecipes.enable:SetSize((SELL_LAYOUT and SELL_LAYOUT.RECIPE_ENABLE_W) or 150,
+		(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20)
 
-	self._knownRecipes.epic = MakeToggle(self._knownRecipes.card, "Purple", C_Q_EPIC,
-		"Allow purple already-known recipes to sell when Sell Known Recipes is on.")
-	self._knownRecipes.epic:SetPoint("RIGHT", self._knownRecipes.card, "RIGHT", -15, 0)
-	self._knownRecipes.epic:SetSize(60, 20)
+	self._knownRecipes.boe = MakeToggle(self._knownRecipes.card, "BoE", C_ACCENT,
+		"Allow non-soulbound or tradeable already-known recipes to sell when Sell Known Recipes is on.")
+	self._knownRecipes.boe:SetPoint("TOPLEFT", self._knownRecipes.card, "TOPLEFT",
+		(SELL_LAYOUT and SELL_LAYOUT.RECIPE_BOE_X) or 15,
+		-((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_ROW_Y) or 24))
+	self._knownRecipes.boe:SetSize((SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_W) or 60,
+		(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20)
 
-	self._knownRecipes.rare = MakeToggle(self._knownRecipes.card, "Blue", C_Q_RARE,
-		"Allow blue already-known recipes to sell when Sell Known Recipes is on.")
-	self._knownRecipes.rare:SetPoint("RIGHT", self._knownRecipes.epic, "LEFT", -16, 0)
-	self._knownRecipes.rare:SetSize(60, 20)
-
-	self._knownRecipes.uncommon = MakeToggle(self._knownRecipes.card, "Green", C_Q_UNCOMMON,
-		"Allow green already-known recipes to sell when Sell Known Recipes is on.")
-	self._knownRecipes.uncommon:SetPoint("RIGHT", self._knownRecipes.rare, "LEFT", -16, 0)
-	self._knownRecipes.uncommon:SetSize(64, 20)
+	self._knownRecipes.bop = MakeToggle(self._knownRecipes.card, "BoP", C_ACCENT,
+		"Allow soulbound already-known recipes to sell when Sell Known Recipes is on.")
+	self._knownRecipes.bop:SetPoint("TOPLEFT", self._knownRecipes.card, "TOPLEFT",
+		(SELL_LAYOUT and SELL_LAYOUT.RECIPE_BOP_X) or 91,
+		-((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_ROW_Y) or 24))
+	self._knownRecipes.bop:SetSize((SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_W) or 60,
+		(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20)
 
 	self._knownRecipes.common = MakeToggle(self._knownRecipes.card, "White", C_Q_COMMON,
 		"Allow white already-known recipes to sell when Sell Known Recipes is on.",
 		nil,
 		C_ACCENT)
-	self._knownRecipes.common:SetPoint("RIGHT", self._knownRecipes.uncommon, "LEFT", -16, 0)
-	self._knownRecipes.common:SetSize(64, 20)
+	self._knownRecipes.common:SetPoint("TOPLEFT", self._knownRecipes.card, "TOPLEFT",
+		(SELL_LAYOUT and SELL_LAYOUT.RECIPE_WHITE_X) or 247,
+		-((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_ROW_Y) or 24))
+	self._knownRecipes.common:SetSize((SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_W) or 60,
+		(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20)
+
+	self._knownRecipes.uncommon = MakeToggle(self._knownRecipes.card, "Green", C_Q_UNCOMMON,
+		"Allow green already-known recipes to sell when Sell Known Recipes is on.")
+	self._knownRecipes.uncommon:SetPoint("TOPLEFT", self._knownRecipes.card, "TOPLEFT",
+		(SELL_LAYOUT and SELL_LAYOUT.RECIPE_GREEN_X) or 323,
+		-((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_ROW_Y) or 24))
+	self._knownRecipes.uncommon:SetSize((SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_W) or 60,
+		(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20)
+
+	self._knownRecipes.rare = MakeToggle(self._knownRecipes.card, "Blue", C_Q_RARE,
+		"Allow blue already-known recipes to sell when Sell Known Recipes is on.")
+	self._knownRecipes.rare:SetPoint("TOPLEFT", self._knownRecipes.card, "TOPLEFT",
+		(SELL_LAYOUT and SELL_LAYOUT.RECIPE_BLUE_X) or 399,
+		-((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_ROW_Y) or 24))
+	self._knownRecipes.rare:SetSize((SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_W) or 60,
+		(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20)
+
+	self._knownRecipes.epic = MakeToggle(self._knownRecipes.card, "Purple", C_Q_EPIC,
+		"Allow purple already-known recipes to sell when Sell Known Recipes is on.")
+	self._knownRecipes.epic:SetPoint("TOPLEFT", self._knownRecipes.card, "TOPLEFT",
+		(SELL_LAYOUT and SELL_LAYOUT.RECIPE_PURPLE_X) or 475,
+		-((SELL_LAYOUT and SELL_LAYOUT.SELL_CARD_ROW_Y) or 24))
+	self._knownRecipes.epic:SetSize((SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_W) or 60,
+		(SELL_LAYOUT and SELL_LAYOUT.SELL_OPTION_H) or 20)
 	yOff = yOff - 16 - RECIPE_CARD_H - SECTION_GAP
 
 	-- Card 1: BoE Armor
@@ -5991,11 +6626,13 @@ local function BuildUI(self)
 	-- Scan Speed lives on the General settings tab; this section is just
 	-- the three list-mode tab buttons that drive the list view below.
 	-- ========================================================================
-	local scanCardH = 34                                                   -- fits 26-tall buttons + 4px pad top/bot
+	local scanCardH = (_G.AutoDelete_OptionsLayout and _G.AutoDelete_OptionsLayout.LIST_MODE_CARD_H) or 34
+	local scanSectionH = (_G.AutoDelete_OptionsLayout and _G.AutoDelete_OptionsLayout.LIST_MODE_H) or 43
 	-- Section renamed from "Scan Options" to "List Mode": the contained
 	-- buttons select the active item list view, not scan settings.
 	-- Scan Speed lives on the General tab.
 	local scanBox = MakeSection(self, "List Mode", yOff, 1)
+	scanBox:SetHeight(scanSectionH)
 	-- Hide the outer section border so it doesn't double up with the inner
 	-- scanRightCard's border below. The inner card is the visible frame.
 	scanBox:SetBackdropBorderColor(0, 0, 0, 0)
@@ -6096,8 +6733,7 @@ local function BuildUI(self)
 	self._sellTabText = sellTabText
 	self._keepTabText = keepTabText
 
-	-- AUTO-SIZE: scan card is the lowest element
-	local scanActualH = AutoSizeSection(scanBox, scanRightCard, 8, 50)
+	local scanActualH = scanSectionH
 	yOff = yOff - 16 - scanActualH - SECTION_GAP
 
 	-- ========================================================================
@@ -6109,10 +6745,15 @@ local function BuildUI(self)
 	-- margins. Account for the ~7px ALREADY consumed inside manageBox
 	-- (1px border + 6px gap below pagination); 8 below that lands the
 	-- visible bottom gap at ~15, matching the 15px side margin.
-	local bottomPad = 8
+	local bottomPad = (_G.AutoDelete_OptionsLayout and _G.AutoDelete_OptionsLayout.MANAGE_BOTTOM_PAD) or 8
 	local frameH = self:GetHeight() or 800
-	local manageH = frameH - 28 - math.abs(yOff) - bottomPad
-	if manageH < 220 then manageH = 220 end
+	local manageH
+	if _G.AutoDelete_OptionsLayout and _G.AutoDelete_OptionsLayout.ClampManageHeight then
+		manageH = _G.AutoDelete_OptionsLayout.ClampManageHeight(frameH, yOff, bottomPad)
+	else
+		manageH = frameH - 28 - math.abs(yOff) - bottomPad
+		if manageH < 1 then manageH = 1 end
+	end
 	local manageBox = MakeSection(self, "Search & Manage", yOff, manageH)
 	yOff = yOff - 18
 
@@ -6175,10 +6816,19 @@ local function BuildUI(self)
 	local LIST_RAW_W = 55
 	local LIST_REFRESH_W = 86
 	local LIST_REFRESH_HELP_W = 100
+	local MANAGE_LAYOUT = _G.AutoDelete_OptionsLayout
+	local MANAGE_SEARCH_Y = (MANAGE_LAYOUT and MANAGE_LAYOUT.MANAGE_SEARCH_Y) or 12
+	local MANAGE_HEADER_Y = (MANAGE_LAYOUT and MANAGE_LAYOUT.MANAGE_HEADER_Y) or 40
+	local MANAGE_HEADER_H = (MANAGE_LAYOUT and MANAGE_LAYOUT.MANAGE_HEADER_H) or 22
+	local MANAGE_LIST_Y = (MANAGE_LAYOUT and MANAGE_LAYOUT.MANAGE_LIST_Y) or 62
+	local MANAGE_INSET = (MANAGE_LAYOUT and MANAGE_LAYOUT.MANAGE_INSET) or 1
+	local MANAGE_BOTTOM_RESERVED = (MANAGE_LAYOUT and MANAGE_LAYOUT.MANAGE_BOTTOM_RESERVED) or 36
+	local MANAGE_PAGING_GAP = (MANAGE_LAYOUT and MANAGE_LAYOUT.MANAGE_PAGING_GAP) or 6
+	local MANAGE_PAGING_H = (MANAGE_LAYOUT and MANAGE_LAYOUT.MANAGE_PAGING_H) or 24
 
 	local searchFrame = CreateFrame("Frame", nil, manageBox)
 	searchFrame:SetSize(LIST_SEARCH_W, 22)
-	searchFrame:SetPoint("TOPLEFT", 12, -12)
+	searchFrame:SetPoint("TOPLEFT", 12, -MANAGE_SEARCH_Y)
 	ApplyBackdrop(searchFrame, C_DROP_BG, C_DROP_BORDER)
 
 	-- Magnifying glass icon on the left (stock Blizzard search icon)
@@ -6283,9 +6933,9 @@ local function BuildUI(self)
 	-- Header keeps a slightly lighter bg than listBox to signal "this is the
 	-- column header" without breaking the unified border.
 	local itemNameHeader = CreateFrame("Button", nil, manageBox)
-	itemNameHeader:SetPoint("TOPLEFT", 1, -40)
-	itemNameHeader:SetPoint("TOPRIGHT", -1, -40)
-	itemNameHeader:SetHeight(22)
+	itemNameHeader:SetPoint("TOPLEFT", MANAGE_INSET, -MANAGE_HEADER_Y)
+	itemNameHeader:SetPoint("TOPRIGHT", -MANAGE_INSET, -MANAGE_HEADER_Y)
+	itemNameHeader:SetHeight(MANAGE_HEADER_H)
 	-- v3.21 §6.3: ApplyBackdrop helper. Slightly lighter than the listBox below
 	-- so the column header reads as a header band.
 	ApplyBackdrop(itemNameHeader, { 0.063, 0.063, 0.063, 1 }, { 0.15, 0.15, 0.15, 1 })
@@ -6316,8 +6966,8 @@ local function BuildUI(self)
 	-- Item List (inside manageBox, below Item Name header)
 	-- ========================================================================
 	local listBox = CreateFrame("Frame", nil, manageBox)
-	listBox:SetPoint("TOPLEFT", 1, -62)                                    -- below header (40) + header height (22)
-	listBox:SetPoint("BOTTOMRIGHT", -1, 36)                                -- reserve 36px at bottom for pagination
+	listBox:SetPoint("TOPLEFT", MANAGE_INSET, -MANAGE_LIST_Y)
+	listBox:SetPoint("BOTTOMRIGHT", -MANAGE_INSET, MANAGE_BOTTOM_RESERVED)
 	-- v3.21 §6.3: ApplyBackdrop helper. Matches the column-header border so
 	-- the list reads as a single bordered region.
 	ApplyBackdrop(listBox, { 0.035, 0.035, 0.035, 1 }, { 0.15, 0.15, 0.15, 1 })
@@ -6328,8 +6978,8 @@ local function BuildUI(self)
 	self._emptyText = emptyText
 
 	local scroll = CreateFrame("ScrollFrame", "AutoDelete_ListScroll", listBox, "FauxScrollFrameTemplate")
-	scroll:SetPoint("TOPLEFT", 1, -1)
-	scroll:SetPoint("BOTTOMRIGHT", -1, 1)
+	scroll:SetPoint("TOPLEFT", MANAGE_INSET, -MANAGE_INSET)
+	scroll:SetPoint("BOTTOMRIGHT", -MANAGE_INSET, MANAGE_INSET)
 	self._scroll = scroll
 
 	-- Hide the FauxScrollFrame's scrollbar completely - we use pagination only.
@@ -6343,13 +6993,16 @@ local function BuildUI(self)
 	if scrollUp then scrollUp:Hide() end
 	if scrollDown then scrollDown:Hide() end
 
-	local ROW_HEIGHT = 18
-	-- listBox sits inside manageBox: 62px at top (search row 34 + header 22 + gap 6),
-	-- 36px at bottom (reserved for pagination row). So effective listBox height:
-	local listHeight = manageH - 62 - 36 - 4  -- -4 for borders
-	local NUM_ROWS = math.floor(listHeight / ROW_HEIGHT)
-	if NUM_ROWS < 5 then NUM_ROWS = 5 end
-	if NUM_ROWS > 10 then NUM_ROWS = 10 end   -- cap at 10 visible rows per user request
+	local ROW_HEIGHT = (_G.AutoDelete_OptionsLayout and _G.AutoDelete_OptionsLayout.LIST_ROW_H) or 18
+	local NUM_ROWS
+	if _G.AutoDelete_OptionsLayout and _G.AutoDelete_OptionsLayout.ListRowsForManageHeight then
+		NUM_ROWS = _G.AutoDelete_OptionsLayout.ListRowsForManageHeight(manageH)
+	else
+		local listHeight = manageH - MANAGE_LIST_Y - MANAGE_BOTTOM_RESERVED - 4
+		NUM_ROWS = math.floor(listHeight / ROW_HEIGHT)
+		if NUM_ROWS < 1 then NUM_ROWS = 1 end
+		if NUM_ROWS > 10 then NUM_ROWS = 10 end
+	end
 
 	self._rows = {}
 	for i = 1, NUM_ROWS do
@@ -6556,9 +7209,9 @@ local function BuildUI(self)
 	self._pageSize = NUM_ROWS
 
 	local pagingFrame = CreateFrame("Frame", nil, manageBox)
-	pagingFrame:SetPoint("TOPLEFT", listBox, "BOTTOMLEFT", 0, -6)
-	pagingFrame:SetPoint("TOPRIGHT", listBox, "BOTTOMRIGHT", 0, -6)
-	pagingFrame:SetHeight(24)
+	pagingFrame:SetPoint("TOPLEFT", listBox, "BOTTOMLEFT", 0, -MANAGE_PAGING_GAP)
+	pagingFrame:SetPoint("TOPRIGHT", listBox, "BOTTOMRIGHT", 0, -MANAGE_PAGING_GAP)
+	pagingFrame:SetHeight(MANAGE_PAGING_H)
 
 	local pagingInfo = MakeText(pagingFrame, 9, C_DIM, "OUTLINE", "LEFT")
 	pagingInfo:SetPoint("LEFT", 4, 0)
@@ -6724,10 +7377,14 @@ local function BuildUI(self)
 	-- ========================================================================
 	tglEnable:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		local p = GetActiveProfile(db)
-		p.enabled = btn._checked
-		print("|cffff8000[AutoDelete]|r " .. (p.enabled and "|cff00ff00enabled|r" or "|cffff0000disabled|r"))
+		if _G.AutoDelete_SetAddonEnabled then
+			_G.AutoDelete_SetAddonEnabled(btn._checked, "options")
+		else
+			btn:SetChecked(btn._checked)
+			local p = GetActiveProfile(db)
+			p.enabled = btn._checked
+			print("|cffff8000[AutoDelete]|r " .. (p.enabled and "|cff00ff00enabled|r" or "|cffff0000disabled|r"))
+		end
 	end)
 
 	-- Auto-Add Equipped: flipping ON triggers the one-time sync of currently
@@ -6812,11 +7469,16 @@ local function BuildUI(self)
 	WireKnownRecipeToggle(self._knownRecipes.uncommon, "knownRecipeSellUncommon")
 	WireKnownRecipeToggle(self._knownRecipes.rare, "knownRecipeSellRare")
 	WireKnownRecipeToggle(self._knownRecipes.epic, "knownRecipeSellEpic")
+	WireKnownRecipeToggle(self._knownRecipes.boe, "knownRecipeSellBoE")
+	WireKnownRecipeToggle(self._knownRecipes.bop, "knownRecipeSellBoP")
 
 	tglScav:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
 		GetActiveProfile(db).summonScavenger = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
 	end)
 
 	-- General tab: Delete Junk.
@@ -6833,26 +7495,55 @@ local function BuildUI(self)
 		end
 	end)
 
+	tglCloseVendor:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		GetActiveProfile(db).autoCloseMerchantAfterSell = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+	end)
+
 	-- Goblin tab: Summon Scavenger sub-toggles
 	tglScavAfterSell:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
 		GetActiveProfile(db).summonAfterSell = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
 	end)
 	tglScavAfterClose:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
 		GetActiveProfile(db).summonAfterClose = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
 	end)
 	tglScavOnlyInCombat:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
 		GetActiveProfile(db).summonOnlyInCombat = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
 	end)
 	tglSummonMerchant:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
 		GetActiveProfile(db).summonMerchantWhenBagsFull = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+	end)
+	tglNoGroupSummons:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		GetActiveProfile(db).summonDisableInGroup = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
 	end)
 
 	-- Goblin tab: Hide Greedy Scavenger spam
@@ -6860,6 +7551,9 @@ local function BuildUI(self)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
 		GetActiveProfile(db).hideGreedySpam = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
 	end)
 
 	-- AutoInv tab: master toggle
@@ -6867,6 +7561,9 @@ local function BuildUI(self)
 		btn._checked = not btn._checked
 		btn:SetChecked(btn._checked)
 		GetActiveProfile(db).autoInviteEnabled = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
 	end)
 
 	-- AutoInv tab: loot rule apply toggle
@@ -7086,10 +7783,9 @@ local function BuildUI(self)
 	end)
 
 	-- Filters tab -> Affix Display: Collection Mode toggle. Mirrors the
-	-- Show/Keep Missing Affix toggle. On toggle-on we re-pull PE's
-	-- learned-affix table (it may have grown since the player last
-	-- reloaded) and force a dot refresh so existing bag slots reflect
-	-- the new owned/missing partition immediately. Accessed through
+	-- Show/Keep Missing Affix toggle. On toggle-on we ask the server for
+	-- the learned-affix table and force a dot refresh so existing bag slots
+	-- reflect the new owned/missing partition immediately. Accessed through
 	-- `self` for the same do/end-scope reason as Show affix dot above.
 	self._tglAffixCollection:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
@@ -7099,8 +7795,11 @@ local function BuildUI(self)
 		if _G.AutoDelete_RefreshCachedProfile then
 			_G.AutoDelete_RefreshCachedProfile()
 		end
-		-- Re-mirror PE's learned-affix map so the next dot evaluation
-		-- sees current data. Safe no-op if PE isn't loaded.
+		-- Rebuild from the current server-fed map and request a fresh
+		-- packet so the next dot evaluation sees current data.
+		if _G.AutoDelete_RequestServerLearnedAffixes then
+			_G.AutoDelete_RequestServerLearnedAffixes("Show/Keep Missing Affix", true)
+		end
 		if _G.AutoDelete_RefreshOwnedAffixes then
 			_G.AutoDelete_RefreshOwnedAffixes()
 		end
@@ -7108,14 +7807,15 @@ local function BuildUI(self)
 			_G.AutoDelete_RefreshAffixDots()
 		end
 		-- Chat confirmation matching the slash-command output. Use the raw
-		-- learned count from PE, not the alias-expanded lookup-key count.
+		-- learned count from the server mirror, not the alias-expanded
+		-- lookup-key count.
 		if btn._checked then
 			local count = _G.AutoDelete_OwnedAffixCount or 0
 			local colorLabel = _G.AutoDelete_GetMissingAffixColorLabel
 				and _G.AutoDelete_GetMissingAffixColorLabel(p)
 				or "bright red"
 			print("|cffff8000[AutoDelete]|r Show/Keep Missing Affix |cff00ff00ON|r. "
-				.. count .. " owned affixes mirrored from PE. Dots will now "
+				.. count .. " owned affixes mirrored from the server. Dots will now "
 				.. "show/keep missing affixes only (in " .. colorLabel .. ").")
 		else
 			print("|cffff8000[AutoDelete]|r Show/Keep Missing Affix |cffff5555OFF|r. "
@@ -7130,18 +7830,11 @@ local function BuildUI(self)
 		if _G.AutoDelete_RefreshCachedProfile then
 			_G.AutoDelete_RefreshCachedProfile()
 		end
+		if _G.AutoDelete_RequestServerLearnedAffixes then
+			_G.AutoDelete_RequestServerLearnedAffixes("KeepOne Missing Affix", false)
+		end
 		if _G.AutoDelete_RefreshOwnedAffixes then
 			_G.AutoDelete_RefreshOwnedAffixes()
-		end
-	end)
-
-	-- Tools tab: Bag Space Warning toggle.
-	tglBagSpaceWarn:SetScript("OnClick", function(btn)
-		btn._checked = not btn._checked
-		btn:SetChecked(btn._checked)
-		GetActiveProfile(db).bagSpaceWarnEnabled = btn._checked
-		if _G.AutoDelete_RefreshCachedProfile then
-			_G.AutoDelete_RefreshCachedProfile()
 		end
 	end)
 
@@ -7472,8 +8165,8 @@ local function BuildUI(self)
 		if self._editDisenchantIlvlMin then self._editDisenchantIlvlMin:SetText(tostring(p.disenchantIlvlMin or 0)) end
 		if self._editDisenchantIlvlMax then self._editDisenchantIlvlMax:SetText(tostring(p.disenchantIlvlMax or 0)) end
 
-		-- Pets tab: Bag Warning + threshold (Card 3, moved from Tools tab)
-		tglBagSpaceWarn:SetChecked(p.bagSpaceWarnEnabled)
+		-- Pets tab: shared summon rules and merchant threshold.
+		tglNoGroupSummons:SetChecked(p.summonDisableInGroup)
 		thresholdEdit:SetText(tostring(p.bagSpaceWarnThreshold or 5))
 
 		-- BoE Armor card
@@ -7503,6 +8196,8 @@ local function BuildUI(self)
 		self._knownRecipes.uncommon:SetChecked(p.knownRecipeSellUncommon == true)
 		self._knownRecipes.rare:SetChecked(p.knownRecipeSellRare == true)
 		self._knownRecipes.epic:SetChecked(p.knownRecipeSellEpic == true)
+		self._knownRecipes.boe:SetChecked(p.knownRecipeSellBoE ~= false)
+		self._knownRecipes.bop:SetChecked(p.knownRecipeSellBoP ~= false)
 
 		-- Filters tab: Quality Filters (Card 1, moved from General tab)
 		-- Quality Filters card now uses cycle pills, not checkboxes.
@@ -7526,6 +8221,7 @@ local function BuildUI(self)
 		tglScavAfterClose:SetChecked(p.summonAfterClose)
 		tglScavOnlyInCombat:SetChecked(p.summonOnlyInCombat)
 		tglSummonMerchant:SetChecked(p.summonMerchantWhenBagsFull)
+		tglCloseVendor:SetChecked(p.autoCloseMerchantAfterSell ~= false)
 		tglHideSpam:SetChecked(p.hideGreedySpam)
 		-- AutoInv tab toggles
 		tglAutoInvite:SetChecked(p.autoInviteEnabled)

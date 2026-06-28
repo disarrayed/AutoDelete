@@ -2,11 +2,13 @@
 ## Title: AutoDelete
 ## Notes: Automatically delete and sell specified items from your bags.
 ## Author: Baenre
-## Version: 3.28
-## OptionalDeps: ProjectEbonhold, Bagnon
+## Version: 3.29
+## OptionalDeps: Bagnon
 ## SavedVariables: AutoDeleteDB
 ## SavedVariablesPerCharacter: AutoDeleteStatsDB
 
 RecipeRules.lua
+AffixServer.lua
 AutoDelete.lua
+OptionsLayout.lua
 Options.lua

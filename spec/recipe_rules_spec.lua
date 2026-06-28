@@ -6,6 +6,8 @@ local function reloadRules()
 	_G.AutoDelete_IsRecipeLikeItem = nil
 	_G.AutoDelete_IsKnownRecipeQualityEnabled = nil
 	_G.AutoDelete_GetRecipeQualityLabel = nil
+	_G.AutoDelete_IsKnownRecipeBindEnabled = nil
+	_G.AutoDelete_GetRecipeBindLabel = nil
 	_G.AutoDelete_DetectRecipeKnowledgeFromTooltipLines = nil
 	_G.AutoDelete_GetRecipeKnowledgeCacheHit = nil
 	_G.AutoDelete_RememberRecipeKnowledgeState = nil
@@ -21,6 +23,8 @@ local function profile(overrides)
 		knownRecipeSellUncommon = true,
 		knownRecipeSellRare = false,
 		knownRecipeSellEpic = false,
+		knownRecipeSellBoE = true,
+		knownRecipeSellBoP = true,
 	}
 	for key, value in pairs(overrides or {}) do
 		p[key] = value
@@ -63,6 +67,18 @@ describe("Sell Known Recipes rules", function()
 		assert.are.equal("Purple", _G.AutoDelete_GetRecipeQualityLabel(4))
 	end)
 
+	it("maps recipe bind toggles to BoE, BoP, and unknown", function()
+		local p = profile()
+		assert.is_true(_G.AutoDelete_IsKnownRecipeBindEnabled(p, "boe"))
+		assert.is_true(_G.AutoDelete_IsKnownRecipeBindEnabled(p, "bop"))
+		assert.is_true(_G.AutoDelete_IsKnownRecipeBindEnabled(p, "soulbound"))
+		assert.is_false(_G.AutoDelete_IsKnownRecipeBindEnabled(p, "unknown"))
+		assert.is_false(_G.AutoDelete_IsKnownRecipeBindEnabled(p, nil))
+		assert.are.equal("BoE", _G.AutoDelete_GetRecipeBindLabel("boe"))
+		assert.are.equal("BoP", _G.AutoDelete_GetRecipeBindLabel("bop"))
+		assert.are.equal("unknown", _G.AutoDelete_GetRecipeBindLabel(nil))
+	end)
+
 	it("detects recipe knowledge from tooltip lines", function()
 		assert.are.equal("known", _G.AutoDelete_DetectRecipeKnowledgeFromTooltipLines({
 			"Use: Teaches you how to cook.",
@@ -96,15 +112,16 @@ describe("Sell Known Recipes rules", function()
 		assert.are.equal("known", cache[link])
 	end)
 
-	it("sells a known recipe only when the quality toggle allows it", function()
-		local action, reason, rule, state, qualityEnabled =
-			_G.AutoDelete_GetKnownRecipeSellDecision(profile(), 0, 1, "item:1", "Recipe", nil, 2, false, false)
+	it("sells a known recipe only when quality and bind toggles allow it", function()
+		local action, reason, rule, state, qualityEnabled, bindEnabled =
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile(), 0, 1, "item:1", "Recipe", nil, 2, false, false, nil, "boe")
 
 		assert.are.equal("sell", action)
 		assert.are.equal("knownRecipe", reason)
 		assert.are.equal("Sell Filters: Sell Known Recipes", rule)
 		assert.are.equal("known", state)
 		assert.is_true(qualityEnabled)
+		assert.is_true(bindEnabled)
 	end)
 
 	it("does not sell Echo tomes through Sell Known Recipes", function()
@@ -116,25 +133,63 @@ describe("Sell Known Recipes rules", function()
 	end)
 
 	it("protects known recipes when the quality toggle is off", function()
-		local action, reason, rule, state, qualityEnabled =
-			_G.AutoDelete_GetKnownRecipeSellDecision(profile(), 0, 1, "item:1", "Recipe", nil, 3, false, false)
+		local action, reason, rule, state, qualityEnabled, bindEnabled =
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile(), 0, 1, "item:1", "Recipe", nil, 3, false, false, nil, "boe")
 
 		assert.are.equal("protect", action)
 		assert.are.equal("Known recipe quality not enabled", reason)
 		assert.are.equal("Known Recipe Protection", rule)
 		assert.are.equal("known", state)
 		assert.is_false(qualityEnabled)
+		assert.is_true(bindEnabled)
+	end)
+
+	it("protects known recipes when the BoE toggle is off", function()
+		local action, reason, rule, state, qualityEnabled, bindEnabled =
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile({ knownRecipeSellBoE = false }), 0, 1, "item:1", "Recipe", nil, 2, false, false, nil, "boe")
+
+		assert.are.equal("protect", action)
+		assert.are.equal("Known recipe bind type not enabled", reason)
+		assert.are.equal("Known Recipe Protection", rule)
+		assert.are.equal("known", state)
+		assert.is_true(qualityEnabled)
+		assert.is_false(bindEnabled)
+	end)
+
+	it("protects known recipes when the BoP toggle is off", function()
+		local action, reason, rule, state, qualityEnabled, bindEnabled =
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile({ knownRecipeSellBoP = false }), 0, 1, "item:1", "Recipe", nil, 2, false, false, nil, "bop")
+
+		assert.are.equal("protect", action)
+		assert.are.equal("Known recipe bind type not enabled", reason)
+		assert.are.equal("Known Recipe Protection", rule)
+		assert.are.equal("known", state)
+		assert.is_true(qualityEnabled)
+		assert.is_false(bindEnabled)
+	end)
+
+	it("protects known recipes when bind state is unknown", function()
+		local action, reason, rule, state, qualityEnabled, bindEnabled =
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile(), 0, 1, "item:1", "Recipe", nil, 2, false, false, nil, "unknown")
+
+		assert.are.equal("protect", action)
+		assert.are.equal("Known recipe bind type not enabled", reason)
+		assert.are.equal("Known Recipe Protection", rule)
+		assert.are.equal("known", state)
+		assert.is_true(qualityEnabled)
+		assert.is_false(bindEnabled)
 	end)
 
 	it("protects quest recipes with a clear reason", function()
-		local action, reason, rule, state, qualityEnabled =
-			_G.AutoDelete_GetKnownRecipeSellDecision(profile(), 0, 1, "item:1", "Recipe", nil, 2, true, false)
+		local action, reason, rule, state, qualityEnabled, bindEnabled =
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile(), 0, 1, "item:1", "Recipe", nil, 2, true, false, nil, "bop")
 
 		assert.are.equal("protect", action)
 		assert.are.equal("Quest recipe protected", reason)
 		assert.are.equal("Known Recipe Protection", rule)
 		assert.are.equal("known", state)
 		assert.is_true(qualityEnabled)
+		assert.is_true(bindEnabled)
 	end)
 
 	it("protects unknown and uncertain recipe knowledge states", function()
@@ -142,7 +197,7 @@ describe("Sell Known Recipes rules", function()
 			return "unknown"
 		end
 		local action, reason, rule =
-			_G.AutoDelete_GetKnownRecipeSellDecision(profile(), 0, 1, "item:1", "Recipe", nil, 2, false, false)
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile(), 0, 1, "item:1", "Recipe", nil, 2, false, false, nil, "boe")
 
 		assert.are.equal("protect", action)
 		assert.are.equal("Unknown recipe protected", reason)
@@ -152,7 +207,7 @@ describe("Sell Known Recipes rules", function()
 			return "uncertain"
 		end
 		action, reason, rule =
-			_G.AutoDelete_GetKnownRecipeSellDecision(profile(), 0, 1, "item:1", "Recipe", nil, 2, false, false)
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile(), 0, 1, "item:1", "Recipe", nil, 2, false, false, nil, "boe")
 
 		assert.are.equal("protect", action)
 		assert.are.equal("Recipe knowledge unknown; kept safe", reason)

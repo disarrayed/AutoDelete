@@ -1394,11 +1394,10 @@ local DEFAULT_PROFILE = {
 	-- ============================================================
 	-- Master switch
 	-- ============================================================
-	-- Gates the periodic delete/sell scanner, vendor auto-repair,
-	-- vendor auto-sell, and the companion watcher (mount-aware
-	-- dismiss/re-summon, stuck-detection, bag-full merchant summon).
-	-- Auto-Invite and Hide Greedy Spam are deliberately INDEPENDENT
-	-- of this switch - they run regardless.
+	-- Gates every automatic action: periodic delete/sell, vendor auto-repair,
+	-- vendor auto-sell, companion automation, Auto-Add Equipped, Auto-Invite,
+	-- Hide Greedy Spam, and automatic UI state changes. Manual panels and
+	-- reports still open while disabled.
 	enabled = false,
 
 	-- ============================================================
@@ -1451,11 +1450,12 @@ local DEFAULT_PROFILE = {
 	-- colored by tier (white/green/blue/purple/orange). Affix
 	-- tier protection applies to all checked affix tiers.
 	-- When ON: the dot ONLY shows for affixes the player hasn't yet
-	-- learned in PE's perk system (reads ExtractionService.learnedAffixes
-	-- directly), colored with missingAffixColor. Items whose affix is
+	-- learned in the server's affix system (AutoDelete requests the
+	-- learned-affix packet directly), colored with missingAffixColor.
+	-- Items whose affix is
 	-- already owned at the same tier pass through to normal sell/delete
-	-- rules (duplicate-cleanup behavior). Fallback when the PE addon
-	-- isn't loaded: behaves as if mode is OFF.
+	-- rules (duplicate-cleanup behavior). Fallback before server data
+	-- arrives: behaves as if mode is OFF.
 	affixCollectionMode    = false,
 	missingAffixColor      = "red",
 	missingAffixColorR     = 1.00,
@@ -1617,6 +1617,9 @@ local DEFAULT_PROFILE = {
 	knownRecipeSellUncommon = true,
 	knownRecipeSellRare     = false,
 	knownRecipeSellEpic     = false,
+	knownRecipeSellBoE      = true,
+	knownRecipeSellBoP      = true,
+	autoCloseMerchantAfterSell = true,
 
 	-- ============================================================
 	-- Companion management (Goblin tab)
@@ -1631,6 +1634,7 @@ local DEFAULT_PROFILE = {
 	summonAfterSell            = true,    -- summon scav after vendor sell completes
 	summonAfterClose           = false,   -- summon scav after vendor window closes
 	summonOnlyInCombat         = true,    -- gate ALL auto-summon paths on UnitAffectingCombat("player")
+	summonDisableInGroup       = false,   -- block Scavenger/Merchant auto-summons while in party or raid
 	summonMerchantWhenBagsFull = false,   -- summon Goblin Merchant when bags hit 0 free for 3s+
 
 	-- ============================================================
@@ -1644,13 +1648,13 @@ local DEFAULT_PROFILE = {
 	-- Hide Greedy Scavenger spam (Goblin tab)
 	-- ============================================================
 	-- Suppresses the scavenger's chat lines AND chat bubbles.
-	-- Independent of the master `enabled` toggle.
+	-- Gated by `enabled`.
 	hideGreedySpam = false,
 
 	-- ============================================================
 	-- Auto-Invite (AutoInv tab)
 	-- ============================================================
-	-- Independent of the master `enabled` toggle.
+	-- Gated by `enabled`.
 	-- autoInviteLootRule values: "freeforall" | "roundrobin"
 	--                           | "group" | "needbeforegreed" | "master"
 	autoInviteEnabled         = false,
@@ -2061,6 +2065,10 @@ function _G.AutoDelete_RecordDecision(data)
 	local recipeQualityLabel = data.recipeQualityLabel
 		or (recipeQuality ~= nil and _G.AutoDelete_GetRecipeQualityLabel and _G.AutoDelete_GetRecipeQualityLabel(recipeQuality))
 	local recipeQualityEnabled = data.recipeQualityEnabled
+	local recipeBindState = data.recipeBindState
+	local recipeBindLabel = data.recipeBindLabel
+		or (recipeBindState ~= nil and _G.AutoDelete_GetRecipeBindLabel and _G.AutoDelete_GetRecipeBindLabel(recipeBindState))
+	local recipeBindEnabled = data.recipeBindEnabled
 	if not affixName and _G.AutoDelete_GetAffixKeyForItemName then
 		affixName = _G.AutoDelete_GetAffixKeyForItemName(itemName)
 	end
@@ -2074,6 +2082,8 @@ function _G.AutoDelete_RecordDecision(data)
 		tostring(recipeState or ""),
 		tostring(recipeQualityLabel or ""),
 		tostring(recipeQualityEnabled),
+		tostring(recipeBindLabel or ""),
+		tostring(recipeBindEnabled),
 	}, "|")
 	local first = hist.entries[1]
 	if first and hist.lastKey == key and (now - (hist.lastAt or 0)) < 10 then
@@ -2095,6 +2105,9 @@ function _G.AutoDelete_RecordDecision(data)
 		recipeQuality = recipeQuality,
 		recipeQualityLabel = recipeQualityLabel,
 		recipeQualityEnabled = recipeQualityEnabled,
+		recipeBindState = recipeBindState,
+		recipeBindLabel = recipeBindLabel,
+		recipeBindEnabled = recipeBindEnabled,
 		bag = data.bag,
 		slot = data.slot,
 		repeatCount = 1,
@@ -2145,6 +2158,8 @@ function _G.AutoDelete_BuildDecisionHistoryReport(searchText)
 			entry.recipeState,
 			entry.recipeQualityLabel,
 			entry.recipeQualityEnabled ~= nil and ("recipe quality " .. (entry.recipeQualityEnabled and "enabled" or "disabled")) or nil,
+			entry.recipeBindLabel,
+			entry.recipeBindEnabled ~= nil and ("recipe bind " .. (entry.recipeBindEnabled and "enabled" or "disabled")) or nil,
 			entry.bag and entry.slot and (tostring(entry.bag) .. "." .. tostring(entry.slot)) or nil,
 		}
 		for _, value in ipairs(fields) do
@@ -2185,7 +2200,9 @@ function _G.AutoDelete_BuildDecisionHistoryReport(searchText)
 			table.insert(lines, "   Recipe: yes"
 				.. (entry.recipeState and ("; knowledge=" .. tostring(entry.recipeState)) or "")
 				.. (entry.recipeQualityLabel and ("; quality=" .. tostring(entry.recipeQualityLabel)) or "")
-				.. (entry.recipeQualityEnabled ~= nil and ("; quality toggle=" .. (entry.recipeQualityEnabled and "on" or "off")) or ""))
+				.. (entry.recipeQualityEnabled ~= nil and ("; quality toggle=" .. (entry.recipeQualityEnabled and "on" or "off")) or "")
+				.. (entry.recipeBindLabel and ("; bind=" .. tostring(entry.recipeBindLabel)) or "")
+				.. (entry.recipeBindEnabled ~= nil and ("; bind toggle=" .. (entry.recipeBindEnabled and "on" or "off")) or ""))
 		end
 		table.insert(lines, "   Final action: " .. tostring(entry.action))
 		table.insert(lines, "   Reason: " .. tostring(entry.reason))
@@ -3468,6 +3485,7 @@ local function DeleteItems()
 					elseif recipeDeleteBlocked then
 						AutoDelete_PerfCount("DeleteItems/items-skipped-recipe", 1)
 						if _G.AutoDelete_RecordDecision then
+							local recipeBindState = _G.AutoDelete_GetRecipeBindState and _G.AutoDelete_GetRecipeBindState(bag, slot)
 							_G.AutoDelete_RecordDecision({
 								itemName = itemName,
 								itemId = itemId,
@@ -3478,6 +3496,9 @@ local function DeleteItems()
 								recipeState = _G.AutoDelete_GetRecipeKnowledgeState(bag, slot, itemLink),
 								recipeQuality = itemQuality,
 								recipeQualityEnabled = _G.AutoDelete_IsKnownRecipeQualityEnabled(profile, itemQuality),
+								recipeBindState = recipeBindState,
+								recipeBindEnabled = _G.AutoDelete_IsKnownRecipeBindEnabled
+									and _G.AutoDelete_IsKnownRecipeBindEnabled(profile, recipeBindState),
 								bag = bag,
 								slot = slot,
 							})
@@ -4472,6 +4493,12 @@ local function IsSoulbound(bag, slot)
 	return sb
 end
 
+function _G.AutoDelete_GetRecipeBindState(bag, slot)
+	if bag == nil or slot == nil then return "unknown" end
+	if IsSoulbound(bag, slot) then return "bop" end
+	return "boe"
+end
+
 -- Affix Protection: PE wraps server-set affix tooltip lines with literal
 -- @affix@TEXT@affix@ markers. Reuses the same scan-tooltip pattern as
 -- IsBindOnEquip. Returns true if any tooltip line on the given bag slot
@@ -4563,36 +4590,39 @@ end
 -- sell/delete rules so the player can clear duplicates; missing-affix
 -- items get the chosen missing-affix color AND keep their affix protection.
 --
--- Data source: PE's ExtractionService.learnedAffixes global (populated
--- by PE's SEND_LEARNED_AFFIXES server packet). Each entry has fields
+-- Data source: AutoDelete listens to the Ebonhold server's learned-affix
+-- packet directly. Each parsed entry has fields
 -- { id, name = "Iron Will IV", learned = true|false, ... }. We mirror
 -- only the `learned == true` entries into a lowercase-keyed lookup so
 -- per-item membership checks are O(1).
 --
--- When ExtractionService is nil (PE addon not loaded), the lookup
--- table stays empty and IsAffixOwnedByItemName returns nil -- callers
+-- Until the server sends data, IsAffixOwnedByItemName returns nil. Callers
 -- treat nil as "can't determine" and fall back to non-collection-mode
--- behavior so nothing breaks for non-PE users.
+-- behavior so startup does not hide dots or sell/delete based on stale data.
 --
 -- State lives on _G to keep the main chunk under Lua 5.1's 200-local
 -- cap (we've already had to globalize a lot for this reason).
+_G.AutoDelete_LearnedAffixes = _G.AutoDelete_LearnedAffixes or nil
+_G.AutoDelete_AffixServerHasData = _G.AutoDelete_AffixServerHasData or false
+_G.AutoDelete_AffixServerPrefix = _G.AutoDelete_AffixServerPrefix or (_G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.PREFIX) or "AAM0x9"
+_G.AutoDelete_AffixServerRequestLearned = _G.AutoDelete_AffixServerRequestLearned or (_G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.REQUEST_LEARNED) or 313
+_G.AutoDelete_AffixServerSendLearned = _G.AutoDelete_AffixServerSendLearned or (_G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.SEND_LEARNED) or 513
+_G.AutoDelete_AffixPacketInflight = _G.AutoDelete_AffixPacketInflight or {}
+_G.AutoDelete_LastAffixServerRequestAt = _G.AutoDelete_LastAffixServerRequestAt or 0
+_G.AutoDelete_AffixServerRequestThrottleSeconds = _G.AutoDelete_AffixServerRequestThrottleSeconds or (_G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.REQUEST_THROTTLE_SECONDS) or 5
 _G.AutoDelete_OwnedAffixes = _G.AutoDelete_OwnedAffixes or {}
 _G.AutoDelete_KnownAffixes = _G.AutoDelete_KnownAffixes or {}
 _G.AutoDelete_OwnedAffixCount = _G.AutoDelete_OwnedAffixCount or 0
+_G.AutoDelete_AllAffixFamilies = _G.AutoDelete_AllAffixFamilies or {}
 
--- Mirror of PE's AFFIX_ALIASES table at extraction.lua:129. PE's
--- internal spell names don't always match the names that appear in
+-- Some server spell names do not match the names that appear in
 -- item suffixes (e.g. spell "Shield Block IV" -> item suffix "Block
--- IV"; spell "Cold IV" -> item suffix "Precision IV"). PE handles
--- this via GetAffixSearchNames at extraction.lua:184; we must do the
--- same or our suffix-match check returns false on every aliased
--- affix and draws a "missing" dot on items the player actually
--- owns.
+-- IV"; spell "Cold IV" -> item suffix "Precision IV"). AutoDelete keeps
+-- the same alias list so the suffix-match check does not draw a "missing"
+-- dot on items the player actually owns.
 --
--- KEEP THIS TABLE IN SYNC with PE's extraction.lua AFFIX_ALIASES and
--- PE creature-family item suffixes. If PE adds/changes an alias, add/change
--- it here too. Version bump forces the mirrored owned-affix map to rebuild
--- after /reload because the map itself lives on _G.
+-- Version bump forces the mirrored owned-affix map to rebuild after /reload
+-- because the map itself lives on _G.
 _G.AutoDelete_AffixAliasVersionCurrent = 4
 local AUTODELETE_AFFIX_ALIASES = {
 	["cold"]            = "precision",
@@ -4625,18 +4655,135 @@ local AUTODELETE_AFFIX_ALIASES = {
 	["undead bane"]     = "the undead",
 	["undead slayer"]   = "the undead",
 }
+_G.AutoDelete_UniqueAffixes = _G.AutoDelete_UniqueAffixes or {
+	["spell mastery"] = true,
+	["temporal flux"] = true,
+}
 
--- Rebuild the owned-affixes lookup from PE's data. Cheap; called from
--- PLAYER_LOGIN, SPELLS_CHANGED, ExtractionUI.OnLearnedAffixesReceived
--- (auto-hook -- see AutoDelete_InstallPEAffixHook below), and on the
--- affixCollectionMode toggle. Idempotent. Returns the count of learned
--- affixes mirrored, useful for a debug print.
+function _G.AutoDelete_RegisterAffixServerPrefix()
+	if RegisterAddonMessagePrefix then
+		pcall(RegisterAddonMessagePrefix, _G.AutoDelete_AffixServerPrefix)
+	end
+end
+
+function _G.AutoDelete_ParseLearnedAffixesPayload(body)
+	if _G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.ParseLearnedAffixesPayload then
+		return _G.AutoDelete_AffixServer.ParseLearnedAffixesPayload(body, GetSpellInfo)
+	end
+	return {}
+end
+
+function _G.AutoDelete_SetLearnedAffixesFromServer(body)
+	_G.AutoDelete_LearnedAffixes = _G.AutoDelete_ParseLearnedAffixesPayload(body)
+	_G.AutoDelete_AffixServerHasData = true
+	_G.AutoDelete_AffixServerLastReceivedAt = GetTime and GetTime() or 0
+	if _G.AutoDelete_RefreshOwnedAffixes then
+		_G.AutoDelete_RefreshOwnedAffixes()
+	end
+	if cachedProfile and cachedProfile.showAffixDot ~= false
+		and _G.AutoDelete_RefreshAffixDots then
+		_G.AutoDelete_RefreshAffixDots()
+	end
+	if _G.AutoDelete_LearnedAffixesPopup
+		and _G.AutoDelete_LearnedAffixesPopup.IsShown
+		and _G.AutoDelete_LearnedAffixesPopup:IsShown()
+		and _G.AutoDelete_ScanLearnedAffixes then
+		_G.AutoDelete_ScanLearnedAffixes(false)
+	end
+	return _G.AutoDelete_LearnedAffixes
+end
+
+function _G.AutoDelete_RequestServerLearnedAffixes(reason, force)
+	if not SendAddonMessage or not UnitName then
+		return false, "unavailable"
+	end
+	if not force and _G.AutoDelete_AffixServerHasData
+		and type(_G.AutoDelete_LearnedAffixes) == "table"
+		and next(_G.AutoDelete_LearnedAffixes) ~= nil then
+		return false, "has-data"
+	end
+
+	local now = GetTime and GetTime() or 0
+	local last = _G.AutoDelete_LastAffixServerRequestAt or 0
+	if not force and last > 0 and now > 0
+		and now - last < (_G.AutoDelete_AffixServerRequestThrottleSeconds or 5) then
+		return false, "throttled"
+	end
+
+	_G.AutoDelete_RegisterAffixServerPrefix()
+	_G.AutoDelete_LastAffixServerRequestAt = now
+	local ok, err = pcall(SendAddonMessage, _G.AutoDelete_AffixServerPrefix,
+		tostring(_G.AutoDelete_AffixServerRequestLearned), "WHISPER", UnitName("player"))
+	if not ok then
+		if _G.AutoDelete_DebugSell then
+			print("|cffff8000[AutoDelete DEBUG]|r learned-affix server request failed: " .. tostring(err))
+		end
+		return false, "error"
+	end
+
+	if _G.AutoDelete_DebugSell then
+		print("|cffff8000[AutoDelete DEBUG]|r requested learned-affix packet from server"
+			.. (reason and (" (" .. tostring(reason) .. ")") or "") .. ".")
+	end
+	return true, "requested"
+end
+
+function _G.AutoDelete_HandleAffixServerMessage(prefix, payload, dist, sender)
+	local playerName = UnitName and UnitName("player") or nil
+	if _G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.ShouldAcceptMessage then
+		local ok = _G.AutoDelete_AffixServer.ShouldAcceptMessage(prefix, payload, dist, sender, playerName)
+		if not ok then return false end
+	elseif prefix ~= _G.AutoDelete_AffixServerPrefix then
+		return false
+	end
+
+	local evt, rest
+	if _G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.ParseEventPayload then
+		evt, rest = _G.AutoDelete_AffixServer.ParseEventPayload(payload)
+	else
+		local evtStr
+		evtStr, rest = payload:match("^(%d+)\t(.*)$")
+		if not evtStr then
+			evtStr, rest = payload:match("^(%d+)$"), ""
+		end
+		evt = tonumber(evtStr)
+	end
+	if evt ~= _G.AutoDelete_AffixServerSendLearned then return true end
+
+	local chunk = _G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.ParseChunk
+		and _G.AutoDelete_AffixServer.ParseChunk(rest)
+	if chunk then
+		local key = tostring(evt) .. ":" .. chunk.mid
+		local rec = _G.AutoDelete_AffixPacketInflight[key]
+		if not rec then
+			rec = { total = chunk.total, got = 0, parts = {}, t0 = GetTime and GetTime() or 0 }
+			_G.AutoDelete_AffixPacketInflight[key] = rec
+		end
+		local i = chunk.index
+		if i and i >= 1 and i <= rec.total and not rec.parts[i] then
+			rec.parts[i] = chunk.slice
+			rec.got = rec.got + 1
+		end
+		if rec.got == rec.total then
+			_G.AutoDelete_AffixPacketInflight[key] = nil
+			_G.AutoDelete_SetLearnedAffixesFromServer(table.concat(rec.parts, "", 1, rec.total))
+		end
+		return true
+	end
+
+	_G.AutoDelete_SetLearnedAffixesFromServer(rest or "")
+	return true
+end
+
+-- Rebuild the owned-affixes lookup from AutoDelete's server-fed data.
+-- Cheap and idempotent. Returns the count of learned affixes mirrored,
+-- useful for debug and UI messages.
 function _G.AutoDelete_RefreshOwnedAffixes()
 	local map = {}
 	local known = {}
 	local count = 0
-	if _G.ExtractionService and _G.ExtractionService.learnedAffixes then
-		for _, entry in ipairs(_G.ExtractionService.learnedAffixes) do
+	if type(_G.AutoDelete_LearnedAffixes) == "table" then
+		for _, entry in ipairs(_G.AutoDelete_LearnedAffixes) do
 			if entry and entry.name then
 				local lname = Normalize(entry.name)
 				known[lname] = true
@@ -4644,11 +4791,10 @@ function _G.AutoDelete_RefreshOwnedAffixes()
 					map[lname] = true
 					count = count + 1
 				end
-				-- Alias expansion: if PE renames this spell for item
-				-- naming purposes, also store the renamed form so the
+				-- Alias expansion: if the server spell name differs from
+				-- the item suffix, also store the renamed form so the
 				-- suffix-match check at AutoDelete_IsAffixOwnedByItemName
-				-- hits both spellings. Mirrors PE's GetAffixSearchNames
-				-- logic at extraction.lua:184.
+				-- hits both spellings.
 				local base = lname:match("^(.-)%s+[iv]+$") or lname
 				local roman = lname:match("%s+([iv]+)$")
 				local alias = AUTODELETE_AFFIX_ALIASES[base]
@@ -4674,14 +4820,14 @@ function _G.AutoDelete_RefreshOwnedAffixes()
 	_G.AutoDelete_OwnedAffixAliasVersion = _G.AutoDelete_AffixAliasVersionCurrent
 	if _G.AutoDelete_DebugSell then
 		print(string.format(
-			"|cffff8000[AutoDelete DEBUG]|r owned-affix map rebuilt: %d learned affixes mirrored (alias expansion included).",
+			"|cffff8000[AutoDelete DEBUG]|r owned-affix map rebuilt: %d learned affixes mirrored from server (alias expansion included).",
 			count))
 	end
 	return count
 end
 
 function _G.AutoDelete_EnsureOwnedAffixMirror()
-	if not _G.ExtractionService or not _G.ExtractionService.learnedAffixes then
+	if not _G.AutoDelete_AffixServerHasData or type(_G.AutoDelete_LearnedAffixes) ~= "table" then
 		return false
 	end
 	if _G.AutoDelete_OwnedAffixAliasVersion ~= _G.AutoDelete_AffixAliasVersionCurrent
@@ -4692,106 +4838,17 @@ function _G.AutoDelete_EnsureOwnedAffixMirror()
 	return false
 end
 
-_G.AutoDelete_LastPEAffixRequestAt = _G.AutoDelete_LastPEAffixRequestAt or 0
-local PE_AFFIX_REQUEST_THROTTLE_SECONDS = 5
-
-function _G.AutoDelete_RequestPELearnedAffixes(reason, force)
-	local service = _G.ExtractionService
-	if type(service) ~= "table" or type(service.RequestLearnedAffixes) ~= "function" then
-		return false, "unavailable"
-	end
-
-	local affixes = service.learnedAffixes
-	if not force and type(affixes) == "table" and next(affixes) ~= nil then
-		return false, "has-data"
-	end
-
-	local now = GetTime and GetTime() or 0
-	local last = _G.AutoDelete_LastPEAffixRequestAt or 0
-	if not force and last > 0 and now > 0
-		and now - last < PE_AFFIX_REQUEST_THROTTLE_SECONDS then
-		return false, "throttled"
-	end
-
-	_G.AutoDelete_LastPEAffixRequestAt = now
-	local ok, err = pcall(service.RequestLearnedAffixes)
-	if not ok then
-		if _G.AutoDelete_DebugSell then
-			print("|cffff8000[AutoDelete DEBUG]|r PE learned-affix request failed: " .. tostring(err))
-		end
-		return false, "error"
-	end
-
-	if _G.AutoDelete_DebugSell then
-		print("|cffff8000[AutoDelete DEBUG]|r requested PE learned-affix packet"
-			.. (reason and (" (" .. tostring(reason) .. ")") or "") .. ".")
-	end
-	return true, "requested"
-end
-
--- Auto-refresh hook: install once at PLAYER_LOGIN. PE's packet handler
--- at extraction_service.lua line 62 rebuilds ExtractionService
--- .learnedAffixes from a server-pushed SEND_LEARNED_AFFIXES packet,
--- THEN calls ExtractionUI.OnLearnedAffixesReceived(). hooksecurefunc on
--- that UI callback gives us a notification the instant PE's table
--- changes -- which is the ONLY time our mirror can be stale -- so we
--- don't need a BAG_UPDATE poll, a manual toggle re-run, or any other
--- manual refresh trigger.
---
--- PE fires SEND_LEARNED_AFFIXES on:
---   1. PLAYER_ENTERING_WORLD (post-login initial fetch)
---   2. Successful extraction (server re-pushes the updated list)
---   3. Any other server-initiated update (rare)
---
--- We can't subscribe via ProjectEbonhold.onEventReceived because that's
--- a SINGLE-callback registry (projectebonhold.lua line 114: assignment,
--- not append), so registering would silently overwrite PE's own handler
--- and break PE's UI. hooksecurefunc is the only safe path.
---
--- Returns true if the hook installed (PE present + ExtractionUI loaded),
--- false otherwise. Idempotent -- second call is a no-op.
-_G.AutoDelete_PEAffixHookInstalled = false
-function _G.AutoDelete_InstallPEAffixHook()
-	if _G.AutoDelete_PEAffixHookInstalled then return true end
-	if type(_G.ExtractionUI) ~= "table" then return false end
-	if type(_G.ExtractionUI.OnLearnedAffixesReceived) ~= "function" then
-		return false
-	end
-	hooksecurefunc(_G.ExtractionUI, "OnLearnedAffixesReceived", function()
-		-- PE just rebuilt learnedAffixes. Mirror it now.
-		AutoDelete_RefreshOwnedAffixes()
-		-- Missing-affix color is visible even when collection mode is off,
-		-- so any ownership refresh can change dots: recognized missing
-		-- affixes turn to that color, newly learned affixes return to tier color or
-		-- hide if Show/Keep Missing Affix is on.
-		if cachedProfile and cachedProfile.showAffixDot ~= false then
-			if _G.AutoDelete_RefreshAffixDots then
-				_G.AutoDelete_RefreshAffixDots()
-			end
-		end
-		if _G.AutoDelete_DebugSell then
-			print("|cffff8000[AutoDelete DEBUG]|r PE affix hook fired -- mirror refreshed.")
-		end
-	end)
-	_G.AutoDelete_PEAffixHookInstalled = true
-
-	if _G.AutoDelete_DebugSell then
-		print("|cffff8000[AutoDelete DEBUG]|r installed ExtractionUI.OnLearnedAffixesReceived hook.")
-	end
-	return true
-end
-
 -- Returns true if the given item NAME ends with " of <known-owned-affix>".
 -- Returns false if no owned-affix name matches the suffix.
--- Returns nil if PE data hasn't been observed yet (so callers can fall
--- back to the non-collection-mode path instead of incorrectly hiding
--- dots before PE has finished initializing).
+-- Returns nil if server data hasn't been observed yet (so callers can fall
+-- back to the non-collection-mode path instead of incorrectly hiding dots
+-- before the learned-affix packet arrives).
 function _G.AutoDelete_IsAffixOwnedByItemName(itemName)
 	if not itemName then return nil end
-	-- nil-vs-empty distinction: if we have no PE data at all, return nil
-	-- ("can't determine"). If we have PE data but the item's affix isn't
-	-- in it, return false ("not owned").
-	if not _G.ExtractionService or not _G.ExtractionService.learnedAffixes then
+	-- nil-vs-empty distinction: if we have no server data at all, return nil
+	-- ("can't determine"). If we have server data but the item's affix
+	-- isn't in it, return false ("not owned").
+	if not _G.AutoDelete_AffixServerHasData or type(_G.AutoDelete_LearnedAffixes) ~= "table" then
 		return nil
 	end
 	_G.AutoDelete_EnsureOwnedAffixMirror()
@@ -5062,16 +5119,19 @@ end
 _G.AutoDelete_AuditAffixOnLists = AuditAffixOnLists
 
 -- Scan + display the player's learned and unlearned affixes. Two jobs in one call:
---   1. Refresh the owned-affix mirror from PE's current data (same call
---      Show/Keep Missing Affix makes internally) so we're not displaying stale
---      info if PE's table changed since the last hook fire.
---   2. Build tier-grouped roster strings and hand them off to the
---      Learned Affixes popup (lives in Options.lua) for display.
+--   1. Request the latest learned-affix payload directly from the server.
+--   2. Refresh the owned-affix mirror from AutoDelete's current server data.
+--   3. Build PEEv1-style family rows and hand them off to the Affix Book
+--      popup (lives in Options.lua) for display.
 -- Output goes to a scrollable themed window, not the chat frame -- the
 -- user explicitly asked for a window so this function never prints unless
 -- the UI side failed to load (defensive fallback).
-local function ScanLearnedAffixes()
-	-- Step 1: refresh the mirror. Safe to call any time; idempotent.
+local function ScanLearnedAffixes(requestFresh)
+	if requestFresh ~= false and _G.AutoDelete_RequestServerLearnedAffixes then
+		_G.AutoDelete_RequestServerLearnedAffixes("learned-affixes-scan", true)
+	end
+
+	-- Refresh the mirror. Safe to call any time; idempotent.
 	if _G.AutoDelete_RefreshOwnedAffixes then
 		_G.AutoDelete_RefreshOwnedAffixes()
 	end
@@ -5082,166 +5142,155 @@ local function ScanLearnedAffixes()
 	-- and what to investigate.
 	local showFn = _G.AutoDelete_ShowLearnedAffixesWindow
 	if type(showFn) ~= "function" then
-		print("|cffff8000[AutoDelete]|r Learned Affixes window not available. "
+		print("|cffff8000[AutoDelete]|r Affix window not available. "
 			.. "Options panel may not have finished loading -- try again in a moment.")
 		return
 	end
 
-	-- Helper to build "|cff...COLOR HEX...|r text |r" wrapped strings so the
-	-- popup's FontString renders tier headers in legendary orange. C_ACCENT
-	-- here is fixed in chat color escape form so it matches the addon's
-	-- chrome without re-importing the table from Options.lua.
 	local ACCENT_OPEN  = "|cffff8000"
-	local DIM_OPEN     = "|cff8a8a8a"
 	local COLOR_CLOSE  = "|r"
 
 	-- Empty / error states render as their own in-window message rather
-	-- than chat noise. Keeps the user experience consistent regardless of
-	-- whether PE is loaded.
-	if type(_G.ExtractionService) ~= "table"
-		or type(_G.ExtractionService.learnedAffixes) ~= "table" then
-		local requested = AutoDelete_RequestPELearnedAffixes
-			and AutoDelete_RequestPELearnedAffixes("learned-affixes-scan", false)
-		showFn(ACCENT_OPEN .. "Project Ebonhold not loaded" .. COLOR_CLOSE
-			.. "\n\nNo learned-affix data is available yet. Open the "
-			.. "Extraction UI in-game once to trigger data sync, then click "
-			.. "Update Affix List again."
-			.. (requested and "\n\nAutoDelete also requested a fresh sync from Project Ebonhold." or ""))
+	-- than chat noise. The server reply will refresh the same popup when it
+	-- arrives.
+	local serverAffixes = _G.AutoDelete_LearnedAffixes
+	if not _G.AutoDelete_AffixServerHasData or type(serverAffixes) ~= "table" then
+		showFn(ACCENT_OPEN .. "Server affix data requested" .. COLOR_CLOSE
+			.. "\n\nAutoDelete asked the server for your learned affix list. "
+			.. "Try Update Affix List again in a moment if this does not refresh.")
 		return
 	end
 
-	local function addAffix(byTier, name)
-		-- Group by Roman-numeral tier so a 40-entry roster reads as a handful
-		-- of headed sections instead of a wall of text. Affix names look like
-		-- "Iron Will IV" -- strip the trailing roman and use it as a key.
-		local base, roman = name:match("^(.-)%s+([IVX]+)$")
-		if not base then
-			base, roman = name, "?"
+	local function buildAffixBookRows()
+		local families, order = {}, {}
+		local function titleCase(text)
+			return tostring(text or ""):gsub("(%a)([%w']*)", function(first, rest)
+				return string.upper(first) .. rest
+			end)
 		end
-		byTier[roman] = byTier[roman] or {}
-		table.insert(byTier[roman], base)
-	end
-
-	local function buildRosterText(byTier, total, learned)
-		if total == 0 then
-			if learned then
-				local requested = AutoDelete_RequestPELearnedAffixes
-					and AutoDelete_RequestPELearnedAffixes("learned-affixes-empty", false)
-				return ACCENT_OPEN .. "No learned affixes found" .. COLOR_CLOSE
-					.. "\n\nEither this character has not learned any affixes yet, "
-					.. "or Project Ebonhold has not received the SEND_LEARNED_AFFIXES "
-					.. "packet yet. Try opening the Extraction UI once, then re-scan."
-					.. (requested and "\n\nAutoDelete also requested a fresh sync from Project Ebonhold." or "")
+		local function addSearchName(family, name)
+			if not name or name == "" then return end
+			family.searchText = (family.searchText or "") .. " " .. string.lower(name)
+		end
+		for _, entry in ipairs(serverAffixes) do
+			if entry and entry.name then
+				local base = entry.name:match("^(.-)%s+[IVX]+$")
+				local weaponOnly = entry.weaponOnly == true
+				if not base then
+					base = entry.name
+					weaponOnly = true
+				end
+				local key = string.lower(base)
+				local tier = AutoDelete_ExtractAffixLevel(entry.name) or tonumber(entry.difficulty) or 0
+				if tier < 1 or tier > 5 then tier = 1 end
+				local family = families[key]
+				if not family then
+					family = {
+						baseName = key,
+						prettyName = titleCase(key),
+						weaponOnly = weaponOnly,
+						learned = false,
+						isUnique = _G.AutoDelete_UniqueAffixes[key] == true,
+						tiers = {},
+						equippedCount = 0,
+						searchText = "",
+					}
+					families[key] = family
+					table.insert(order, key)
+				end
+				family.tiers[tier] = {
+					id = entry.id,
+					name = entry.name,
+					icon = entry.icon,
+					applyCost = entry.applyCost,
+					appliedCount = entry.appliedCount or 0,
+					difficulty = entry.difficulty,
+					weaponOnly = weaponOnly,
+					learned = entry.learned == true,
+				}
+				if weaponOnly then family.weaponOnly = true end
+				if entry.learned then family.learned = true end
+				family.equippedCount = family.equippedCount + (entry.appliedCount or 0)
+				addSearchName(family, entry.name)
+				local lname = string.lower(entry.name)
+				local baseName = lname:match("^(.-)%s+[iv]+$") or lname
+				local tierSuffix = lname:match("%s+([iv]+)$") or ""
+				local alias = AUTODELETE_AFFIX_ALIASES[baseName]
+				if alias then
+					if tierSuffix ~= "" then
+						addSearchName(family, alias .. " " .. tierSuffix)
+					else
+						addSearchName(family, alias)
+					end
+				end
 			end
-			return ACCENT_OPEN .. "No unlearned affixes found" .. COLOR_CLOSE
-				.. "\n\nProject Ebonhold reports every known affix as learned "
-				.. "for this character."
 		end
+		for _, base in ipairs(_G.AutoDelete_AllAffixFamilies or {}) do
+			local key = string.lower(tostring(base or ""))
+			if key ~= "" and not families[key] then
+				families[key] = {
+					baseName = key,
+					prettyName = titleCase(key),
+					weaponOnly = false,
+					learned = false,
+					isUnique = _G.AutoDelete_UniqueAffixes[key] == true,
+					tiers = {},
+					equippedCount = 0,
+					searchText = key,
+					allLocked = true,
+				}
+				table.insert(order, key)
+			end
+		end
+		table.sort(order)
 
-		-- Build the body string. Summary first, then one section per tier in
-		-- the canonical order, with affixes one-per-line and alphabetically
-		-- sorted within each section. Catch-all loop at the end picks up any
-		-- unexpected tier (e.g. PE adds VI later, or a name with no roman
-		-- suffix landed in byTier["?"]).
-		local lines = {}
 		local rows = {}
-		local label = learned and "learned" or "unlearned"
-		local function addRow(kind, text, copyText)
-			table.insert(lines, text or "")
-			table.insert(rows, { kind = kind, text = text or "", copyText = copyText })
-		end
-
-		addRow("summary", string.format("%s%d %s affix(es) mirrored from PE.%s",
-			DIM_OPEN, total, label, COLOR_CLOSE))
-		addRow("blank", "")
-
-		local function emitTier(tier, group)
-			table.sort(group)
-			-- Display-only special case: affixes with no Roman-numeral suffix
-			-- get bucketed under the "?" key during the grouping pass, but in
-			-- the rendered list they read as "Weapon Affix" (per user feedback).
-			-- The underlying bucket key stays "?" so the catch-all loop after
-			-- the canonical tiers still picks them up alongside any other
-			-- unexpected tier code; only the header label changes.
-			local header
-			if tier == "?" then
-				header = string.format("%sWeapon Affix (%d)%s",
-					ACCENT_OPEN, #group, COLOR_CLOSE)
+		for _, key in ipairs(order) do
+			local family = families[key]
+			local nameColor
+			if not family.learned then
+				nameColor = "|cff999999"
+			elseif family.isUnique then
+				nameColor = "|cffff8000"
 			else
-				header = string.format("%sTier %s (%d)%s",
-					ACCENT_OPEN, tier, #group, COLOR_CLOSE)
+				nameColor = "|cffffffff"
 			end
-			addRow("header", header)
-			for _, name in ipairs(group) do
-				addRow("affix", "    " .. name, name)
+			local weaponTag = ""
+			if family.weaponOnly then
+				weaponTag = family.learned and " |cffb048f8(H)|r" or " |cff999999(H)|r"
 			end
-			addRow("blank", "")
-		end
-
-		local tierOrder = { "I", "II", "III", "IV", "V" }
-		for _, t in ipairs(tierOrder) do
-			local group = byTier[t]
-			if group and #group > 0 then
-				emitTier(t, group)
-				byTier[t] = nil
+			local eqTag = ""
+			if (family.equippedCount or 0) > 0 then
+				eqTag = " |cff00ff00(" .. tostring(family.equippedCount) .. ")|r"
 			end
+			table.insert(rows, {
+				kind = "affix",
+				text = nameColor .. family.prettyName .. "|r" .. weaponTag .. eqTag,
+				copyText = family.prettyName,
+				baseName = family.baseName,
+				prettyName = family.prettyName,
+				weaponOnly = family.weaponOnly,
+				learned = family.learned,
+				isUnique = family.isUnique,
+				tiers = family.tiers,
+				equippedCount = family.equippedCount,
+				searchText = family.searchText,
+			})
 		end
-
-		local extraTiers = {}
-		for tier, group in pairs(byTier) do
-			if #group > 0 then
-				table.insert(extraTiers, tier)
-			end
-		end
-		table.sort(extraTiers)
-		for _, tier in ipairs(extraTiers) do
-			emitTier(tier, byTier[tier])
-		end
-
-		-- Drop the trailing blank line so the last tier doesn't render with a
-		-- dead-space gap at the bottom of the scroll content.
-		if lines[#lines] == "" then
-			lines[#lines] = nil
-			rows[#rows] = nil
-		end
-
-		return table.concat(lines, "\n"), rows
+		return rows
 	end
 
-	local learnedByTier, unlearnedByTier = {}, {}
-	local learnedTotal, unlearnedTotal = 0, 0
-	local knownTotal = 0
-	for _, entry in ipairs(_G.ExtractionService.learnedAffixes) do
-		if entry and entry.name then
-			knownTotal = knownTotal + 1
-			if entry.learned then
-				addAffix(learnedByTier, entry.name)
-				learnedTotal = learnedTotal + 1
-			else
-				addAffix(unlearnedByTier, entry.name)
-				unlearnedTotal = unlearnedTotal + 1
-			end
-		end
-	end
-
-	if knownTotal == 0 then
+	local affixRows = buildAffixBookRows()
+	if #affixRows == 0 then
 		showFn(ACCENT_OPEN .. "No affixes found" .. COLOR_CLOSE
-			.. "\n\nProject Ebonhold has not populated any affix entries yet. "
-			.. "Try opening the Extraction UI once, then re-scan.")
+			.. "\n\nThe server has not returned any affix entries yet. "
+			.. "Try Update Affix List again in a moment.")
 		return
 	end
-
-	local learnedText, learnedRows = buildRosterText(learnedByTier, learnedTotal, true)
-	local unlearnedText, unlearnedRows = buildRosterText(unlearnedByTier, unlearnedTotal, false)
 
 	showFn({
-		learned = learnedText,
-		unlearned = unlearnedText,
-		learnedRows = learnedRows,
-		unlearnedRows = unlearnedRows,
-		learnedCount = learnedTotal,
-		unlearnedCount = unlearnedTotal,
-		defaultTab = (unlearnedTotal > 0) and "unlearned" or "learned",
+		affixRows = affixRows,
+		preserveSearch = requestFresh == false,
 	})
 end
 
@@ -5500,7 +5549,7 @@ local affixDotVersion = 0
 --
 -- Decision tree:
 --   no marker / showAffixDot off       -> (false, nil)  hide
---   PE data unknown                    -> (tier, nil)   tier color
+--   server data unknown                -> (tier, nil)   tier color
 --   collection OFF, affix is owned     -> (tier, nil)   tier color
 --   collection OFF, affix is missing   -> (tier, color) selected missing color
 --   collection ON, affix is owned      -> (false, nil)  hide (dup)
@@ -5520,11 +5569,11 @@ function _G.AutoDelete_DecideDot(link, bag, slot, button)
 	local tier = ClassifyAffixByLink(link, bag, slot, button)
 	if not tier then return false, nil end
 
-	-- If PE ownership data is available, missing affixes should always
+	-- If server ownership data is available, missing affixes should always
 	-- use the selected attention dot. Show/Keep Missing Affix only changes
 	-- what happens to owned affixes: hide them instead of tier-coloring
-	-- them. If PE data is not ready yet, keep the tier color so dots do
-	-- not silently disappear during PE's startup window.
+	-- them. If server data is not ready yet, keep the tier color so dots
+	-- do not silently disappear during startup.
 	local itemName = _G.AutoDelete_GetAffixDisplayName
 		and _G.AutoDelete_GetAffixDisplayName(link, bag, slot, GetItemInfo(link))
 		or GetItemInfo(link)
@@ -5545,7 +5594,8 @@ function _G.AutoDelete_DecideDot(link, bag, slot, button)
 end
 
 function _G.AutoDelete_GetAffixKeyForItemName(itemName)
-	if not itemName or not _G.ExtractionService or not _G.ExtractionService.learnedAffixes then
+	if not itemName or not _G.AutoDelete_AffixServerHasData
+		or type(_G.AutoDelete_LearnedAffixes) ~= "table" then
 		return nil
 	end
 	_G.AutoDelete_EnsureOwnedAffixMirror()
@@ -6160,7 +6210,8 @@ end
 
 function _G.AutoDelete_ShouldMerchantHavePriority(profile)
 	profile = profile or cachedProfile
-	if not profile or not profile.summonMerchantWhenBagsFull then return false end
+	if not profile or not profile.enabled or not profile.summonScavenger or not profile.summonMerchantWhenBagsFull then return false end
+	if _G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(profile) then return false end
 	if profile.summonOnlyInCombat and not (UnitAffectingCombat and UnitAffectingCombat("player")) then return false end
 	local threshold = tonumber(profile.bagSpaceWarnThreshold) or 3
 	local free = 0
@@ -6171,13 +6222,29 @@ function _G.AutoDelete_ShouldMerchantHavePriority(profile)
 	return free <= threshold
 end
 
--- Central combat gate for every AutoDelete-owned Scavenger summon path.
--- Delayed timers re-check here so "Only in Combat" cannot leak a summon after
--- combat ends.
-function _G.AutoDelete_ScavengerCombatAllowed(profile)
+function _G.AutoDelete_IsPlayerGrouped()
+	local inRaid = GetNumRaidMembers and GetNumRaidMembers() > 0
+	local inParty = GetNumPartyMembers and GetNumPartyMembers() > 0
+	return (inRaid or inParty) and true or false
+end
+
+function _G.AutoDelete_IsCompanionSummonBlockedByGroup(profile)
+	return profile and profile.summonDisableInGroup and _G.AutoDelete_IsPlayerGrouped()
+end
+
+-- Central summon gate for every AutoDelete-owned Scavenger summon path.
+-- Delayed timers re-check here so disabled, party/raid, or combat gates cannot
+-- leak a summon after state changes.
+function _G.AutoDelete_GetScavengerSummonBlockReason(profile)
 	profile = profile or cachedProfile
-	if not profile or not profile.summonOnlyInCombat then return true end
-	return (UnitAffectingCombat and UnitAffectingCombat("player")) and true or false
+	if not profile or not profile.enabled or not profile.summonScavenger then return "disabled" end
+	if _G.AutoDelete_IsCompanionSummonBlockedByGroup(profile) then return "group-blocked" end
+	if profile.summonOnlyInCombat and not (UnitAffectingCombat and UnitAffectingCombat("player")) then return "combat-blocked" end
+	return nil
+end
+
+function _G.AutoDelete_ScavengerCombatAllowed(profile)
+	return _G.AutoDelete_GetScavengerSummonBlockReason(profile) == nil
 end
 
 function _G.AutoDelete_PrintSummonAttempt(name, attempt, maxAttempts)
@@ -6233,8 +6300,9 @@ function _G.AutoDelete_CallScavengerForConfirm(attempt)
 		_G.AutoDelete_PendingScavengerAfterCompanion = true
 		return
 	end
-	if not _G.AutoDelete_ScavengerCombatAllowed(cachedProfile) then
-		_G.AutoDelete_FinishScavengerFailure("combat-blocked")
+	local blockReason = _G.AutoDelete_GetScavengerSummonBlockReason(cachedProfile)
+	if blockReason then
+		_G.AutoDelete_FinishScavengerFailure(blockReason)
 		return
 	end
 
@@ -6252,8 +6320,9 @@ function _G.AutoDelete_CallScavengerForConfirm(attempt)
 	if IsOtherCompanionSummoned("greedy scavenger") then
 		if DismissCompanion then DismissCompanion("CRITTER") end
 		AfterDelay(0.5, function()
-			if not _G.AutoDelete_ScavengerCombatAllowed(cachedProfile) then
-				_G.AutoDelete_FinishScavengerFailure("combat-blocked")
+			local delayedBlockReason = _G.AutoDelete_GetScavengerSummonBlockReason(cachedProfile)
+			if delayedBlockReason then
+				_G.AutoDelete_FinishScavengerFailure(delayedBlockReason)
 				return
 			end
 			local idx2, isUp2, cId2 = FindCompanionById(SCAVENGER_CREATURE_ID, "greedy scavenger")
@@ -6289,8 +6358,9 @@ function _G.AutoDelete_ConfirmScavengerSummon(callAt, attempt)
 	if attempt == 1 and _G.AutoDelete_ScavengerConfirmPending then return end
 	_G.AutoDelete_ScavengerConfirmPending = true
 	AfterDelay(_G.AutoDelete_ScavengerConfirmDelay, function()
-		if not _G.AutoDelete_ScavengerCombatAllowed(cachedProfile) then
-			_G.AutoDelete_FinishScavengerFailure("combat-blocked")
+		local blockReason = _G.AutoDelete_GetScavengerSummonBlockReason(cachedProfile)
+		if blockReason then
+			_G.AutoDelete_FinishScavengerFailure(blockReason)
 			return
 		end
 
@@ -6312,7 +6382,11 @@ function _G.AutoDelete_ConfirmScavengerSummon(callAt, attempt)
 end
 
 local function SummonGreedyScavenger(force)
-	if not _G.AutoDelete_ScavengerCombatAllowed(cachedProfile) then return end
+	local blockReason = _G.AutoDelete_GetScavengerSummonBlockReason(cachedProfile)
+	if blockReason then
+		_G.AutoDelete_ScavengerLastSummonResult = blockReason
+		return
+	end
 	if (not force) and _G.AutoDelete_ShouldMerchantHavePriority and _G.AutoDelete_ShouldMerchantHavePriority(cachedProfile) then
 		_G.AutoDelete_ScavengerLastSummonResult = "waiting-for-bags-full-merchant"
 		_G.AutoDelete_PendingScavengerAfterBags = true
@@ -6445,6 +6519,20 @@ function _G.AutoDelete_ConfirmGoblinMerchantSummon(callAt, attempt)
 end
 
 local function SummonGoblinMerchant(force)
+	if not cachedProfile or not cachedProfile.enabled or not cachedProfile.summonScavenger or not cachedProfile.summonMerchantWhenBagsFull then
+		_G.AutoDelete_GoblinLastSummonResult = "disabled"
+		return false
+	end
+	if _G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(cachedProfile) then
+		_G.AutoDelete_GoblinLastSummonResult = "group-blocked"
+		_G.AutoDelete_GoblinLastDeferReason = "group-blocked"
+		return false
+	end
+	if cachedProfile.summonOnlyInCombat and not (UnitAffectingCombat and UnitAffectingCombat("player")) then
+		_G.AutoDelete_GoblinLastSummonResult = "combat-blocked"
+		_G.AutoDelete_GoblinLastDeferReason = "combat-blocked"
+		return false
+	end
 	if (not force) and _G.AutoDelete_GoblinAutoBackoffActive and _G.AutoDelete_GoblinAutoBackoffActive() then
 		_G.AutoDelete_GoblinLastSummonResult = "backoff"
 		_G.AutoDelete_GoblinLastDeferReason = "summon-backoff"
@@ -6479,7 +6567,11 @@ local function DelayedSummon(delaySeconds)
 	summonPending = true
 	AfterDelay(delaySeconds or 1.5, function()
 		summonPending = false
-		if not _G.AutoDelete_ScavengerCombatAllowed(cachedProfile) then return end
+		local blockReason = _G.AutoDelete_GetScavengerSummonBlockReason(cachedProfile)
+		if blockReason then
+			_G.AutoDelete_ScavengerLastSummonResult = blockReason
+			return
+		end
 		if MerchantFrame and MerchantFrame:IsShown() then
 			_G.AutoDelete_ScavengerLastSummonResult = "waiting-for-merchant-close"
 			DelayedSummon(2.0)
@@ -6503,8 +6595,9 @@ _G.AutoDelete_RequestDelayedScavengerSummon = DelayedSummon
 
 -- ============================================================================
 -- Hide Greedy Scavenger spam (chat filter + bubble suppressor)
--- Gated at runtime by cachedProfile.hideGreedySpam. Installed once at load;
--- the filter/bubble functions become no-ops when the toggle is off.
+-- Gated at runtime by cachedProfile.enabled + cachedProfile.hideGreedySpam.
+-- Installed once at load; the filter/bubble functions become no-ops when
+-- the addon is disabled or the feature toggle is off.
 -- ============================================================================
 
 -- Author-name matcher: true if the speaker is the Greedy Scavenger.
@@ -6550,7 +6643,7 @@ local function GreedyChatFilter(_, _, msg, author)
 		if _G.AutoDelete_RecordScavLootChat then
 			_G.AutoDelete_RecordScavLootChat(GetTime())
 		end
-		if cachedProfile and cachedProfile.hideGreedySpam then
+		if cachedProfile and cachedProfile.enabled and cachedProfile.hideGreedySpam then
 			return true   -- swallow the message
 		end
 	end
@@ -6594,7 +6687,7 @@ bubbleWatcher:SetScript("OnUpdate", function(self, dt)
 	bubbleTimer = bubbleTimer + dt
 	if bubbleTimer < BUBBLE_CHECK_INTERVAL then return end
 	bubbleTimer = 0
-	if not cachedProfile or not cachedProfile.hideGreedySpam then return end
+	if not cachedProfile or not cachedProfile.enabled or not cachedProfile.hideGreedySpam then return end
 	if not next(greedyRecentMessages) then return end
 
 	for i = 1, WorldFrame:GetNumChildren() do
@@ -6630,9 +6723,9 @@ InstallGreedyChatFilters()
 -- not "binv"). Comma-separated list in profile.autoInviteKeywords.
 --
 -- Gated by:
+--   cachedProfile.enabled (addon master switch)
 --   cachedProfile.autoInviteEnabled (master toggle for this feature)
 --   player must be group leader OR raid assistant (silently ignored otherwise)
--- INDEPENDENT of the AutoDelete master Enable toggle by design.
 --
 -- Active everywhere (party, raid, BG, solo).
 --
@@ -6743,7 +6836,7 @@ end
 -- Apply the configured loot rule. Silent. Only applies if toggle is on AND
 -- the player actually has loot-setting authority.
 local function ApplyConfiguredLootRule()
-	if not cachedProfile or not cachedProfile.autoInviteApplyLootRule then return end
+	if not cachedProfile or not cachedProfile.enabled or not cachedProfile.autoInviteApplyLootRule then return end
 	local ruleKey = cachedProfile.autoInviteLootRule or "freeforall"
 	local info = LOOT_METHOD_MAP[ruleKey]
 	if not info or not SetLootMethod then return end
@@ -6767,7 +6860,7 @@ end
 
 -- Convert party to raid if configured AND the party is full.
 local function MaybeConvertToRaid()
-	if not cachedProfile or not cachedProfile.autoInviteConvertToRaid then return end
+	if not cachedProfile or not cachedProfile.enabled or not cachedProfile.autoInviteConvertToRaid then return end
 	if not IsPartyFullForRaidConvert() then return end
 	if not (IsPartyLeader and IsPartyLeader()) then return end
 	if ConvertToRaid then ConvertToRaid() end
@@ -6799,7 +6892,7 @@ local function HandleIncomingWhisper(msg, author)
 	-- Always refresh cached profile here; UI toggles don't fire any event
 	-- that would otherwise update it, so stale data would silently block invites.
 	RefreshCachedProfile()
-	if not cachedProfile or not cachedProfile.autoInviteEnabled then return end
+	if not cachedProfile or not cachedProfile.enabled or not cachedProfile.autoInviteEnabled then return end
 	if not PlayerCanInvite() then return end
 
 	local keywords = ParseInviteKeywords(cachedProfile.autoInviteKeywords)
@@ -6857,7 +6950,7 @@ end
 -- Auto-repair: called from MERCHANT_SHOW.
 -- Respects profile.autoRepair and profile.autoRepairUseGuildBank.
 local function TryAutoRepair()
-	if not cachedProfile or not cachedProfile.autoRepair then return end
+	if not cachedProfile or not cachedProfile.enabled or not cachedProfile.autoRepair then return end
 	if not CanMerchantRepair or not CanMerchantRepair() then return end
 	if not GetRepairAllCost or not RepairAllItems then return end
 
@@ -6981,7 +7074,8 @@ local function SellItems(silent)
 					local sellReason = nil   -- "list" | "knownRecipe" | "junk" | "common" | "greens" | "rares" | "boeArmor" | "bop" | "boeWeapons"
 					local itemId = GetItemIDFromLink(itemLink)
 					local onSellList = (itemId and sellIDs[itemId]) or (name and sellNames[Normalize(name)])
-					local recipeAction, recipeReason, recipeRule, recipeState, recipeQualityEnabled = nil, nil, nil, nil, nil
+					local recipeAction, recipeReason, recipeRule, recipeState, recipeQualityEnabled, recipeBindEnabled = nil, nil, nil, nil, nil, nil
+					local recipeBindState = nil
 
 					-- Step 1: Keep / KeepOne / KeepStack and Affix Protection
 					-- short-circuit before any sell rule.
@@ -6992,8 +7086,11 @@ local function SellItems(silent)
 
 					if not protectedByRule then
 
-						recipeAction, recipeReason, recipeRule, recipeState, recipeQualityEnabled =
-							_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, itemLink, itemClass, itemSubType, itemQuality, isQuestItem, onSellList, name)
+						if _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType, name) then
+							recipeBindState = _G.AutoDelete_GetRecipeBindState(bag, slot)
+						end
+						recipeAction, recipeReason, recipeRule, recipeState, recipeQualityEnabled, recipeBindEnabled =
+							_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, itemLink, itemClass, itemSubType, itemQuality, isQuestItem, onSellList, name, recipeBindState)
 
 						if recipeAction == "sell" then
 							shouldSell = true
@@ -7023,16 +7120,20 @@ local function SellItems(silent)
 									recipeState = recipeState,
 									recipeQuality = itemQuality,
 									recipeQualityEnabled = recipeQualityEnabled,
+									recipeBindState = recipeBindState,
+									recipeBindEnabled = recipeBindEnabled,
 									bag = bag,
 									slot = slot,
 								})
 							end
 							if _G.AutoDelete_DebugSell then
 								print(string.format(
-									"|cffff8000[AutoDelete DEBUG]|r recipe PROTECTED: %s (id=%s) | state=%s | quality=%s | qualityToggle=%s | source=%s | reason=%s",
+									"|cffff8000[AutoDelete DEBUG]|r recipe PROTECTED: %s (id=%s) | state=%s | quality=%s | qualityToggle=%s | bind=%s | bindToggle=%s | source=%s | reason=%s",
 									tostring(name), tostring(itemId), tostring(recipeState),
 									tostring(_G.AutoDelete_GetRecipeQualityLabel(itemQuality)),
-									tostring(recipeQualityEnabled), tostring(blockedSourceRule), tostring(recipeReason)
+									tostring(recipeQualityEnabled),
+									tostring(_G.AutoDelete_GetRecipeBindLabel(recipeBindState)),
+									tostring(recipeBindEnabled), tostring(blockedSourceRule), tostring(recipeReason)
 								))
 							end
 						else
@@ -7172,10 +7273,12 @@ local function SellItems(silent)
 							))
 							if _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType, name) then
 								print(string.format(
-									"|cffff8000[AutoDelete DEBUG]|r recipe SOLD: %s (id=%s) | state=%s | quality=%s | qualityToggle=%s | source=%s",
+									"|cffff8000[AutoDelete DEBUG]|r recipe SOLD: %s (id=%s) | state=%s | quality=%s | qualityToggle=%s | bind=%s | bindToggle=%s | source=%s",
 									tostring(name), idStr, tostring(recipeState),
 									tostring(_G.AutoDelete_GetRecipeQualityLabel(itemQuality)),
 									tostring(recipeQualityEnabled),
+									tostring(_G.AutoDelete_GetRecipeBindLabel(recipeBindState)),
+									tostring(recipeBindEnabled),
 									tostring((sellReason == "knownRecipe" and "Sell Known Recipes") or sellReason)
 								))
 							end
@@ -7213,6 +7316,8 @@ local function SellItems(silent)
 								recipeState = recipeState,
 								recipeQuality = itemQuality,
 								recipeQualityEnabled = recipeQualityEnabled,
+								recipeBindState = recipeBindState,
+								recipeBindEnabled = recipeBindEnabled,
 								bag = bag,
 								slot = slot,
 							})
@@ -7234,7 +7339,7 @@ local function SellItems(silent)
 			sellSessionCount = 0
 			sellSessionCopper = 0
 			sellDryTicks = 0
-			if MerchantFrame and MerchantFrame:IsShown() then
+			if profile.autoCloseMerchantAfterSell ~= false and MerchantFrame and MerchantFrame:IsShown() then
 				MerchantFrame:Hide()
 			end
 		end
@@ -7727,7 +7832,7 @@ local function RefreshElvUIJunkIconSuppression(profile)
 	_G.AutoDeleteDB = db
 	local state = _G.AutoDelete_ElvUIJunkIconState or { active = false, restore = nil }
 	_G.AutoDelete_ElvUIJunkIconState = state
-	local shouldSuppress = profile and profile.qualityActionJunk == "delete"
+	local shouldSuppress = profile and profile.enabled and profile.qualityActionJunk == "delete"
 	local changed = false
 
 	if shouldSuppress then
@@ -7774,12 +7879,56 @@ RefreshCachedProfile = function()
 	local db = GetDB()
 	cachedProfile = GetActiveProfile(db)
 	RefreshElvUIJunkIconSuppression(cachedProfile)
+	if _G.AutoDelete_UpdateMinimapButtonState then
+		_G.AutoDelete_UpdateMinimapButtonState()
+	end
 end
 _G.AutoDelete_RefreshCachedProfile = RefreshCachedProfile
 -- Read-only accessor for the cached profile. Used by the Process Bags
 -- panel (Options.lua) to scan bags without re-reading the DB on every
 -- refresh.
 function _G.AutoDelete_GetCachedProfile() return cachedProfile end
+
+function _G.AutoDelete_ClearQueuedDeletesForDisable()
+	local Q = _G.AutoDelete_DeleteQueue
+	if not Q or not Q.items or #Q.items == 0 then return 0 end
+	local cleared = #Q.items
+	for i = cleared, 1, -1 do Q.items[i] = nil end
+	if AutoDelete_PerfCount then
+		AutoDelete_PerfCount("DeleteItems/queue-cleared-disable", cleared)
+	end
+	if _G.AutoDelete_DebugSell then
+		print(string.format(
+			"|cffff8000[AutoDelete DEBUG]|r queue CLEARED on disable: %d entries dropped",
+			cleared
+		))
+	end
+	return cleared
+end
+
+function _G.AutoDelete_SetAddonEnabled(enabled, source)
+	local db = GetDB()
+	local profile = GetActiveProfile(db)
+	local nextEnabled = enabled and true or false
+	profile.enabled = nextEnabled
+	RefreshCachedProfile()
+	if not nextEnabled then
+		_G.AutoDelete_ClearQueuedDeletesForDisable()
+		_G.AutoDelete_PendingScavengerAfterBags = false
+		_G.AutoDelete_PendingScavengerAfterCompanion = false
+	end
+	if _G.AutoDelete_UpdateMinimapButtonState then
+		_G.AutoDelete_UpdateMinimapButtonState()
+	end
+	local panel = _G.AutoDeleteOptionsPanel
+	if panel and panel._tglEnable then
+		panel._tglEnable:SetChecked(nextEnabled)
+	end
+	if source ~= "silent" then
+		print("|cffff8000[AutoDelete]|r " .. (nextEnabled and "|cff00ff00enabled|r" or "|cffff0000disabled|r"))
+	end
+	return nextEnabled
+end
 
 -- ============================================================================
 -- Auto-Add Equipped (settings.autoAddEquipped)
@@ -7954,7 +8103,7 @@ _G.AutoDelete_SyncEquippedToKeep = SyncEquippedToKeep
 -- id from the event) since the event fires on un-equip too, where the slot
 -- is now empty.
 local function HandleEquipmentChanged(slot)
-	if not cachedProfile or not cachedProfile.autoAddEquipped then return end
+	if not cachedProfile or not cachedProfile.enabled or not cachedProfile.autoAddEquipped then return end
 	if not slot or SKIPPED_EQUIP_SLOTS[slot] then return end
 	local link = GetInventoryItemLink("player", slot)
 	if not link then return end
@@ -9562,8 +9711,12 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 	local recipeProtectReason = nil
 	local recipeProtectRule = nil
 	if vendorPrice and vendorPrice > 0 then
+		local recipeBindState = nil
+		if _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType, name) then
+			recipeBindState = _G.AutoDelete_GetRecipeBindState(bag, slot)
+		end
 		local recipeAction, recipeReason, recipeRule =
-			_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, link, itemClass, itemSubType, itemQuality, isQuestItem, onSell, name)
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, link, itemClass, itemSubType, itemQuality, isQuestItem, onSell, name, recipeBindState)
 		if recipeAction == "sell" then
 			sellRule = recipeRule
 		elseif recipeAction == "protect" then
@@ -9965,6 +10118,13 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 	local isRecipeLike = _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType, name)
 	local recipeKnowledgeState = nil
 	local recipeQualityEnabled = nil
+	local recipeBindState = nil
+	local recipeBindEnabled = nil
+	if isRecipeLike and _G.AutoDelete_GetRecipeBindState then
+		recipeBindState = _G.AutoDelete_GetRecipeBindState(bag, slot)
+		recipeBindEnabled = _G.AutoDelete_IsKnownRecipeBindEnabled
+			and _G.AutoDelete_IsKnownRecipeBindEnabled(profile, recipeBindState)
+	end
 	if profile.knownRecipeSellEnabled and isRecipeLike and bag and slot and itemLink then
 		recipeKnowledgeState = _G.AutoDelete_GetRecipeKnowledgeState(bag, slot, itemLink)
 		recipeQualityEnabled = _G.AutoDelete_IsKnownRecipeQualityEnabled(profile, quality)
@@ -10017,6 +10177,8 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		table.insert(lines, "  Knowledge state: " .. tostring(recipeKnowledgeState or "not scanned"))
 		table.insert(lines, "  Quality toggle: " .. tostring(_G.AutoDelete_GetRecipeQualityLabel(quality))
 			.. (recipeQualityEnabled == nil and " (not checked)" or (recipeQualityEnabled and " on" or " off")))
+		table.insert(lines, "  Bind toggle: " .. tostring(_G.AutoDelete_GetRecipeBindLabel(recipeBindState))
+			.. (recipeBindEnabled == nil and " (not checked)" or (recipeBindEnabled and " on" or " off")))
 		table.insert(lines, "  Explicit Sell list: " .. (onSell and "yes - sells before recipe protection" or "no"))
 		table.insert(lines, "  Explicit Delete list: " .. (onDelete and "yes - deletes before automatic recipe protection" or "no"))
 	end
@@ -10091,7 +10253,7 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 		table.insert(lines, "  Final: keep. Affix protection blocks sell.")
 	elseif profile.knownRecipeSellEnabled and isRecipeLike then
 		local recipeAction, recipeReason, recipeRule =
-			_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, itemLink, itemClass, itemSubType, quality, isQuestItem, onSell, name)
+			_G.AutoDelete_GetKnownRecipeSellDecision(profile, bag, slot, itemLink, itemClass, itemSubType, quality, isQuestItem, onSell, name, recipeBindState)
 		if recipeAction == "sell" and recipeRule == "Sell list" then
 			table.insert(lines, "  Final: sell at vendor. Explicit Sell list entry matches.")
 		elseif recipeAction == "sell" then
@@ -10311,6 +10473,8 @@ function _G.AutoDelete_BuildDiagnosticReport()
 		"",
 		"Recipe filters:",
 		"  Sell Known Recipes: " .. tostring(profile.knownRecipeSellEnabled),
+		"  BoE: " .. tostring(profile.knownRecipeSellBoE)
+			.. "   BoP: " .. tostring(profile.knownRecipeSellBoP),
 		"  White: " .. tostring(profile.knownRecipeSellCommon)
 			.. "   Green: " .. tostring(profile.knownRecipeSellUncommon)
 			.. "   Blue: " .. tostring(profile.knownRecipeSellRare)
@@ -10524,12 +10688,15 @@ function _G.AutoDelete_BuildProcessDebugReport()
 					yes(soulbound), yes(boe), tostring(affix), yes(missingBlocked), tostring(missingState)
 				))
 				if _G.AutoDelete_IsRecipeLikeItem(itemClass, itemSubType, name) then
+					local recipeBindState = _G.AutoDelete_GetRecipeBindState(bag, slot)
 					table.insert(lines, string.format(
-						"    recipe: enabled=%s state=%s quality=%s qualityToggle=%s",
+						"    recipe: enabled=%s state=%s quality=%s qualityToggle=%s bind=%s bindToggle=%s",
 						yes(profile.knownRecipeSellEnabled),
 						tostring(profile.knownRecipeSellEnabled and _G.AutoDelete_GetRecipeKnowledgeState(bag, slot, link) or "not scanned"),
 						tostring(_G.AutoDelete_GetRecipeQualityLabel(quality)),
-						yes(_G.AutoDelete_IsKnownRecipeQualityEnabled(profile, quality))
+						yes(_G.AutoDelete_IsKnownRecipeQualityEnabled(profile, quality)),
+						tostring(_G.AutoDelete_GetRecipeBindLabel(recipeBindState)),
+						yes(_G.AutoDelete_IsKnownRecipeBindEnabled(profile, recipeBindState))
 					))
 				end
 				table.insert(lines, string.format(
@@ -10809,6 +10976,7 @@ local scanner = CreateFrame("Frame")
 _G.AutoDelete_ScannerFrame = scanner
 scanner:RegisterEvent("ADDON_LOADED")
 scanner:RegisterEvent("PLAYER_LOGIN")
+scanner:RegisterEvent("CHAT_MSG_ADDON")
 scanner:RegisterEvent("BAG_UPDATE")
 scanner:RegisterEvent("BAG_UPDATE_DELAYED")
 scanner:RegisterEvent("MERCHANT_SHOW")
@@ -11431,7 +11599,7 @@ end
 -- MERCHANT_SHOW       -> sample inventory worth, then auto-repair + auto-sell
 -- MERCHANT_CLOSED     -> print sell summary, fire after-close summon if armed
 
-scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
+scanner:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4)
 	-- v3.20 spike debug: track LOOT_* events when active. These events
 	-- are only registered while SpikeDebug is on (see SetSpikeDebug),
 	-- so the dispatch cost is zero in the off case.
@@ -11442,16 +11610,15 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 	if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
 		GetDB()
 		RefreshCachedProfile()
+		if _G.AutoDelete_RegisterAffixServerPrefix then
+			_G.AutoDelete_RegisterAffixServerPrefix()
+		end
 		return
 	end
-	if event == "ADDON_LOADED" and tostring(arg1 or ""):lower() == "projectebonhold" then
-		AfterDelay(0.2, function()
-			if AutoDelete_InstallPEAffixHook then AutoDelete_InstallPEAffixHook() end
-			if AutoDelete_RefreshOwnedAffixes then AutoDelete_RefreshOwnedAffixes() end
-			if AutoDelete_RequestPELearnedAffixes then
-				AutoDelete_RequestPELearnedAffixes("ProjectEbonhold loaded", false)
-			end
-		end)
+	if event == "CHAT_MSG_ADDON" then
+		if _G.AutoDelete_HandleAffixServerMessage then
+			_G.AutoDelete_HandleAffixServerMessage(arg1, arg2, arg3, arg4)
+		end
 		return
 	end
 	if event == "UNIT_SPELLCAST_START" and arg1 == "player" then
@@ -11481,7 +11648,7 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 		return
 	end
 	if event == "EQUIPMENT_SETS_CHANGED" then
-		if cachedProfile and cachedProfile.autoAddEquipped then
+		if cachedProfile and cachedProfile.enabled and cachedProfile.autoAddEquipped then
 			SyncEquippedToKeep()
 		end
 		return
@@ -11489,22 +11656,11 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 	if event == "PLAYER_LOGIN" then
 		RefreshCachedProfile()
 		print("|cffff8000[AutoDelete]|r loaded. Type |cff00ff00/del|r to configure.")
-		-- Mirror PE's learnedAffixes if PE addon has already populated.
-		-- PE's SEND_LEARNED_AFFIXES often arrives later than PLAYER_LOGIN
-		-- so the auto-hook below catches subsequent updates, but a login-
-		-- time pass catches the case where PE pushed data via a different
-		-- path before our addon loaded.
-		if AutoDelete_RefreshOwnedAffixes then AutoDelete_RefreshOwnedAffixes() end
-		-- Install the PE auto-refresh hook NOW. This is the primary
-		-- trigger that keeps our mirror in sync with PE's table without
-		-- the user having to re-toggle Show/Keep Missing Affix after every Extract.
-		-- See AutoDelete_InstallPEAffixHook for the design rationale.
-		-- If PE isn't loaded yet (rare -- both addons should be loaded
-		-- by PLAYER_LOGIN), the install is a no-op and the SPELLS_CHANGED
-		-- handler will pick up affix updates as a fallback.
-		if AutoDelete_InstallPEAffixHook then AutoDelete_InstallPEAffixHook() end
-		if AutoDelete_RequestPELearnedAffixes then
-			AutoDelete_RequestPELearnedAffixes("PLAYER_LOGIN", false)
+		if AutoDelete_RegisterAffixServerPrefix then
+			AutoDelete_RegisterAffixServerPrefix()
+		end
+		if AutoDelete_RequestServerLearnedAffixes then
+			AutoDelete_RequestServerLearnedAffixes("PLAYER_LOGIN", false)
 		end
 		if _G.AutoDelete_InstallBagAltRightHook then _G.AutoDelete_InstallBagAltRightHook() end
 		if _G.AutoDelete_CreateMinimapButton then _G.AutoDelete_CreateMinimapButton() end
@@ -11748,8 +11904,8 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 			_G.AutoDelete_RefreshProspectKnown()
 			if _G.AutoDelete_UpdateProspectButton then _G.AutoDelete_UpdateProspectButton() end
 		end
-		-- Mirror PE's learnedAffixes so affix-collection mode reflects
-		-- any new affixes the player just learned. Cheap rebuild.
+		-- Rebuild the server-fed affix mirror so affix-collection mode
+		-- reflects any learned-affix packet received since the last pass.
 		if AutoDelete_RefreshOwnedAffixes then AutoDelete_RefreshOwnedAffixes() end
 		return
 	end
@@ -11803,11 +11959,12 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 			sellDryTicks = 0
 		end
 		_G.AutoDelete_SellSessionHadSalesSinceOpen = false
-		if cachedProfile and cachedProfile.summonScavenger and cachedProfile.summonAfterSell and hadSellSession then
-			local combatOk = (not cachedProfile.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player"))
-			if combatOk then
+		if cachedProfile and cachedProfile.enabled and cachedProfile.summonScavenger and cachedProfile.summonAfterSell and hadSellSession then
+			if _G.AutoDelete_ScavengerCombatAllowed(cachedProfile) then
 				_G.AutoDelete_ScavengerLastTriggerReason = "after-sell-merchant-closed"
 				DelayedSummon(2.0)
+			elseif _G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(cachedProfile) then
+				_G.AutoDelete_ScavengerLastTriggerReason = "after-sell-merchant-closed-group-blocked"
 			else
 				_G.AutoDelete_ScavengerLastTriggerReason = "after-sell-merchant-closed-combat-blocked"
 			end
@@ -11816,11 +11973,12 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2)
 		-- Gated by summonScavenger (master) AND summonAfterClose (this-moment subflag).
 		-- If summonOnlyInCombat is set, the player must be in combat here and
 		-- when the delayed summon fires.
-		if cachedProfile and cachedProfile.summonScavenger and cachedProfile.summonAfterClose then
-			local combatOk = (not cachedProfile.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player"))
-			if combatOk then
+		if cachedProfile and cachedProfile.enabled and cachedProfile.summonScavenger and cachedProfile.summonAfterClose then
+			if _G.AutoDelete_ScavengerCombatAllowed(cachedProfile) then
 				_G.AutoDelete_ScavengerLastTriggerReason = "after-vendor-close"
 				DelayedSummon(1.5)
+			elseif _G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(cachedProfile) then
+				_G.AutoDelete_ScavengerLastTriggerReason = "after-vendor-close-group-blocked"
 			else
 				_G.AutoDelete_ScavengerLastTriggerReason = "after-vendor-close-combat-blocked"
 			end
@@ -12001,17 +12159,8 @@ scanner:SetScript("OnUpdate", function(self, elapsed)
 		-- A fresh walk after re-enable repopulates the queue under
 		-- the new rules. The counter queue-cleared-disable surfaces
 		-- this in /del perf report so the user can see when it fired.
-		local Q = _G.AutoDelete_DeleteQueue
-		if Q and #Q.items > 0 then
-			local cleared = #Q.items
-			for i = cleared, 1, -1 do Q.items[i] = nil end
-			AutoDelete_PerfCount("DeleteItems/queue-cleared-disable", cleared)
-			if _G.AutoDelete_DebugSell then
-				print(string.format(
-					"|cffff8000[AutoDelete DEBUG]|r queue CLEARED on disable: %d entries dropped",
-					cleared
-				))
-			end
+		if _G.AutoDelete_ClearQueuedDeletesForDisable then
+			_G.AutoDelete_ClearQueuedDeletesForDisable()
 		end
 		return
 	end
@@ -12254,8 +12403,9 @@ local recentPlayerLootTimes = {}
 
 -- Simple periodic ticker: checks mount state changes and companion summoned
 -- flag every ~1s. Not tied to scanInterval because the scanner is gated on
--- cachedProfile.enabled; this watcher must also run when Master is off but
--- scavenger features are used (rare, but correct).
+-- scanInterval. Master Enable gates companion automation inside the watcher.
+-- The optional group guard also blocks all companion auto-summons in parties
+-- and raids.
 local companionWatcher = CreateFrame("Frame")
 local watchAccum = 0
 local WATCH_INTERVAL = 1.0
@@ -12361,12 +12511,11 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 		return
 	end
 
-	-- Combat gate. When summonOnlyInCombat is enabled, ALL automatic summon
-	-- paths (mount/dismount restore, stuck-detection re-summon, bag-full
-	-- merchant trigger) only fire while the player is in combat. Manual
-	-- /del commands and after-sell/after-close summons (handled in their
-	-- own code paths) check this flag separately.
-	local combatOk = (not p.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+	-- Summon gate. When summonOnlyInCombat is enabled, automatic summon paths
+	-- only fire while the player is in combat. When the group guard is enabled,
+	-- they do not fire in parties or raids.
+	local combatOk = (not (_G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(p)))
+		and ((not p.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player")))
 
 	-- (0) Loot-based stuck detection (only for scavenger; merchant doesn't loot).
 	-- We don't run this every tick - only when there's something to evaluate.
@@ -12467,7 +12616,15 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 		local threshold = GetGoblinBagThreshold(p)
 		local now = GetTime()
 
-		if free > threshold then
+		if not combatOk then
+			bagsFullSince = nil
+			_G.AutoDelete_BagsFullQueueAtStart = nil
+			if _G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(p) then
+				_G.AutoDelete_GoblinLastDeferReason = "group-blocked"
+			else
+				_G.AutoDelete_GoblinLastDeferReason = "combat-blocked"
+			end
+		elseif free > threshold then
 			-- Bags above threshold: full reset. Drain caught up OR loot
 			-- stopped on its own.
 			bagsFullSince = nil
@@ -12624,7 +12781,9 @@ companionEventFrame:SetScript("OnEvent", function(_, event)
 	-- LOOT_CLOSED: player finished looting a corpse. Push the timestamp so
 	-- the loot-based stuck detector can correlate against scav chat lines.
 	if event == "LOOT_CLOSED" then
-		table.insert(recentPlayerLootTimes, GetTime())
+		if cachedProfile and cachedProfile.enabled then
+			table.insert(recentPlayerLootTimes, GetTime())
+		end
 		return
 	end
 
@@ -12657,9 +12816,9 @@ companionEventFrame:SetScript("OnEvent", function(_, event)
 
 	if not activeTracked then return end
 
-	-- Combat gate (when summonOnlyInCombat is on, all auto-summons require
-	-- the player to be in combat).
-	local combatOk = (not p.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+	-- Summon gate: combat toggle plus optional party/raid block.
+	local combatOk = (not (_G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(p)))
+		and ((not p.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player")))
 
 	-- Suppress while mounted - WoW handles companion despawn natively.
 	if IsPlayerMountedOrFlying() then return end
@@ -13659,6 +13818,7 @@ function _G.AutoDelete_ShowMinimapMenu(anchor)
 		print("|cffff8000[AutoDelete]|r Minimap menu is not available on this client.")
 		return
 	end
+	if _G.AutoDelete_RefreshCachedProfile then _G.AutoDelete_RefreshCachedProfile() end
 	if not _G.AutoDelete_MinimapMenuFrame then
 		_G.AutoDelete_MinimapMenuFrame = CreateFrame("Frame", "AutoDeleteMinimapMenu", UIParent, "UIDropDownMenuTemplate")
 		_G.AutoDelete_RegisterSpecialFrame("AutoDeleteMinimapMenu")
@@ -13667,6 +13827,8 @@ function _G.AutoDelete_ShowMinimapMenu(anchor)
 	local settingsLabel = "Open Settings"
 	local panel = _G.AutoDeleteOptionsPanel
 	if panel and panel.IsShown and panel:IsShown() then settingsLabel = "Close Settings" end
+	local enabled = cachedProfile and cachedProfile.enabled
+	local enabledLabel = enabled and "Disable Addon" or "Enable Addon"
 
 	local function run(command)
 		return function() _G.AutoDelete_RunSlashCommand(command) end
@@ -13674,6 +13836,11 @@ function _G.AutoDelete_ShowMinimapMenu(anchor)
 
 	local menu = {
 		{ text = "AutoDelete", isTitle = true, notCheckable = true },
+		{ text = enabledLabel, notCheckable = true, func = function()
+			if _G.AutoDelete_SetAddonEnabled then
+				_G.AutoDelete_SetAddonEnabled(not (cachedProfile and cachedProfile.enabled), "minimap")
+			end
+		end },
 		{ text = settingsLabel, notCheckable = true, func = function() _G.AutoDelete_ToggleOptionsPanel() end },
 		{ text = "Process Bags", notCheckable = true, func = run("process") },
 		{ text = "Affix List", notCheckable = true, func = run("affix") },
@@ -13694,6 +13861,30 @@ function _G.AutoDelete_ShowMinimapMenu(anchor)
 	}
 
 	EasyMenu(menu, _G.AutoDelete_MinimapMenuFrame, anchor or "cursor", 0, 0, "MENU", 2)
+end
+
+function _G.AutoDelete_UpdateMinimapButtonState()
+	local button = _G.AutoDelete_MinimapButton
+	if not button then return end
+	local enabled = cachedProfile and cachedProfile.enabled
+	local hover = button._hovering
+	local bg = hover and 16/255 or 5/255
+	button:SetBackdropColor(bg, bg, bg, 1)
+	if enabled then
+		local green = hover and 0.95 or 0.75
+		button:SetBackdropBorderColor(0.15, green, 0.25, 1)
+		if button._label then
+			button._label:SetText("AD")
+			button._label:SetTextColor(0.45, 1, 0.55, 1)
+		end
+	else
+		local red = hover and 1 or 0.82
+		button:SetBackdropBorderColor(red, 0.18, 0.18, 1)
+		if button._label then
+			button._label:SetText("AD")
+			button._label:SetTextColor(1, 0.32, 0.32, 1)
+		end
+	end
 end
 
 function _G.AutoDelete_SetMinimapButtonPosition(angle)
@@ -13753,20 +13944,19 @@ function _G.AutoDelete_CreateMinimapButton()
 	button._label = label
 
 	button:SetScript("OnEnter", function(self)
-		self:SetBackdropColor(16/255, 16/255, 16/255, 1)
-		self:SetBackdropBorderColor(1, 0.65, 0.15, 1)
-		if self._label then self._label:SetTextColor(1, 0.65, 0.15, 1) end
+		self._hovering = true
+		if _G.AutoDelete_UpdateMinimapButtonState then _G.AutoDelete_UpdateMinimapButtonState() end
 		GameTooltip:SetOwner(self, "ANCHOR_LEFT")
 		GameTooltip:AddLine("AutoDelete", 1, 0.5, 0)
+		GameTooltip:AddLine("Status: " .. ((cachedProfile and cachedProfile.enabled) and "Enabled" or "Disabled"), 0.85, 0.85, 0.85)
 		GameTooltip:AddLine("Left-click: open/close settings", 0.85, 0.85, 0.85)
-		GameTooltip:AddLine("Right-click: quick menu", 0.85, 0.85, 0.85)
+		GameTooltip:AddLine("Right-click: quick menu and enable/disable", 0.85, 0.85, 0.85)
 		GameTooltip:AddLine("Drag: move button", 0.6, 0.6, 0.6)
 		GameTooltip:Show()
 	end)
 	button:SetScript("OnLeave", function(self)
-		self:SetBackdropColor(5/255, 5/255, 5/255, 1)
-		self:SetBackdropBorderColor(1, 0.5, 0, 1)
-		if self._label then self._label:SetTextColor(1, 0.5, 0, 1) end
+		self._hovering = nil
+		if _G.AutoDelete_UpdateMinimapButtonState then _G.AutoDelete_UpdateMinimapButtonState() end
 		GameTooltip:Hide()
 	end)
 	button:SetScript("OnClick", function(self, mouseButton)
@@ -13793,6 +13983,7 @@ function _G.AutoDelete_CreateMinimapButton()
 
 	_G.AutoDelete_MinimapButton = button
 	_G.AutoDelete_SetMinimapButtonPosition((_G.AutoDeleteDB and _G.AutoDeleteDB.minimapAngle) or 225)
+	_G.AutoDelete_UpdateMinimapButtonState()
 end
 
 SLASH_AUTODELETE1 = "/del"
@@ -13988,6 +14179,14 @@ SlashCmdList["AUTODELETE"] = function(msg)
 			tostring(_G.AutoDelete_GoblinLastSummonAttempt or "none"),
 			tostring(_G.AutoDelete_GoblinConfirmPending or false)
 		))
+		if p then
+			table.insert(lines, string.format("enabled=%s   summonScavenger=%s   groupGuard=%s   grouped=%s",
+				tostring(p.enabled),
+				tostring(p.summonScavenger),
+				tostring(p.summonDisableInGroup),
+				tostring(_G.AutoDelete_IsPlayerGrouped and _G.AutoDelete_IsPlayerGrouped() or false)
+			))
+		end
 		table.insert(lines, string.format("autoBackoff=%s   backoffLeft=%s",
 			tostring(_G.AutoDelete_GoblinAutoBackoffActive and _G.AutoDelete_GoblinAutoBackoffActive() or false),
 			(now < (_G.AutoDelete_GoblinAutoBackoffUntil or 0))
@@ -14103,7 +14302,7 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		if _G.AutoDelete_ScanLearnedAffixes then
 			_G.AutoDelete_ScanLearnedAffixes()
 		else
-			print("|cffff8000[AutoDelete]|r Learned Affixes window not available. Try again in a moment.")
+			print("|cffff8000[AutoDelete]|r Affix window not available. Try again in a moment.")
 		end
 		return
 	end
@@ -14118,6 +14317,7 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		local inCombat = (UnitAffectingCombat and UnitAffectingCombat("player")) and true or false
 		local mounted = IsPlayerMountedOrFlying()
 		local combatAllowed = (_G.AutoDelete_ScavengerCombatAllowed and _G.AutoDelete_ScavengerCombatAllowed(p)) and true or false
+		local blockReason = _G.AutoDelete_GetScavengerSummonBlockReason and _G.AutoDelete_GetScavengerSummonBlockReason(p) or nil
 		local lines = {
 			"AutoDelete Greedy Scavenger diagnostic",
 			"debugBuild=scav-priority-v3-2026-05-30"
@@ -14134,12 +14334,15 @@ SlashCmdList["AUTODELETE"] = function(msg)
 
 		table.insert(lines, "inCombat=" .. tostring(inCombat)
 			.. "  mounted=" .. tostring(mounted)
-			.. "  combatAllowed=" .. tostring(combatAllowed))
+			.. "  combatAllowed=" .. tostring(combatAllowed)
+			.. "  blockReason=" .. tostring(blockReason or "none"))
 
 		if p then
 			table.insert(lines, "enabled=" .. tostring(p.enabled)
 				.. "  summonScavenger=" .. tostring(p.summonScavenger)
-				.. "  onlyCombat=" .. tostring(p.summonOnlyInCombat))
+				.. "  onlyCombat=" .. tostring(p.summonOnlyInCombat)
+				.. "  groupGuard=" .. tostring(p.summonDisableInGroup)
+				.. "  grouped=" .. tostring(_G.AutoDelete_IsPlayerGrouped and _G.AutoDelete_IsPlayerGrouped() or false))
 			table.insert(lines, "afterSell=" .. tostring(p.summonAfterSell)
 				.. "  afterVendorClose=" .. tostring(p.summonAfterClose)
 				.. "  hideSpam=" .. tostring(p.hideGreedySpam))
@@ -14236,7 +14439,7 @@ SlashCmdList["AUTODELETE"] = function(msg)
 		row("/del audit",        "open a copyable item list audit")
 		row("/del setup",        "re-open the first-time setup / welcome popup")
 		print(" ")
-		row("/del affix",        "open the Learned / Unlearned affix list")
+		row("/del affix",        "open AutoDelete's server-fed PEEv1-style affix mirror")
 		print(" ")
 		row("/del perf",         "toggle perf instrumentation -- USE THIS TO DIAGNOSE LAG")
 		row("/del perf report",  "print perf stats collected since `/del perf` turned on")
