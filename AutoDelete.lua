@@ -3178,6 +3178,8 @@ local function DeleteItems()
 			print("|cffff8000[AutoDelete DEBUG]|r delete scan: no work - Delete/KeepOne/KeepStack lists empty AND Junk/Common/Greens/Rares quality filters not in delete mode.")
 			_G._AutoDelete_DebugDelEmptyLogged = true
 		end
+		_G.AutoDelete_LastDeleteWalkAt       = GetTime()
+		_G.AutoDelete_LastDeleteWalkEnqueued = 0
 		AutoDelete_PerfEnd("DeleteItems", _p)
 		return
 	end
