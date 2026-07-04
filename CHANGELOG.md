@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 No changes yet.
 
+## [3.29.1] - 2026-07-04
+
+### Hot Fix
+
+- **Goblin Merchant no longer waits forever when no delete cleanup is possible.** Full bags now enter the normal Merchant summon countdown when delete rules are inactive, while still deferring during active or recently drained delete queues.
+
 ## [3.29] - 2026-06-28
 
 ### Added

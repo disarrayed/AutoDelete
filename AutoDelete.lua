@@ -3102,6 +3102,22 @@ local ComputeTotalFreeSlots
 -- oscillation around the threshold. Threshold field 'bagSpaceWarnThreshold'
 -- is now read only by GetGoblinBagThreshold for summon timing.)
 
+local function ProfileHasDeleteRules(profile)
+	if not profile then return false end
+	local wantedNames, wantedIDs = BuildWantedSets(profile.listText, "delete-list")
+	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+
+	return next(wantedNames) ~= nil
+		or next(wantedIDs) ~= nil
+		or next(keepOneIDs) ~= nil
+		or next(keepStackIDs) ~= nil
+		or profile.qualityActionJunk == "delete"
+		or profile.qualityActionCommon == "delete"
+		or profile.qualityActionGreens == "delete"
+		or profile.qualityActionRares == "delete"
+end
+
 local function DeleteItems()
 	local _p = AutoDelete_PerfBegin("DeleteItems")
 	if CursorHasItem() then AutoDelete_PerfEnd("DeleteItems", _p); return end
@@ -12667,6 +12683,10 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 			local pipelineBusy = (qLen > 0)
 				or (lastDrain > 0 and (now - lastDrain) < recency)
 				or (lastEnq   > 0 and (now - lastEnq)   < recency)
+			-- If no delete rules are active, no bag walk can free slots;
+			-- Merchant is the correct full-bag answer without waiting for
+			-- LastDeleteWalkAt to move.
+			local noDeleteRulesActive = not ProfileHasDeleteRules(p)
 			-- "Walk happened since bags went below" = AutoDelete has had
 			-- at least one chance to scan since this near-full started.
 			local walkSinceBelow = (lastWalk >= bagsBelowAt)
@@ -12691,16 +12711,12 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 					_G.AutoDelete_BagsFullQueueAtStart = nil
 					_G.AutoDelete_GoblinLastDeferReason = "pipeline-busy-recent"
 				end
-			elseif not walkSinceBelow then
-				-- State 1: pipeline has NOT scanned yet since bags went
-				-- below threshold (sustained loot storm preventing
-				-- DeleteItems from running). Defer. DO NOT start timer.
-				bagsFullSince = nil
-				_G.AutoDelete_BagsFullQueueAtStart = nil
-				_G.AutoDelete_GoblinLastDeferReason = "no-walk-yet"
-			elseif foundNothingLastWalk then
-				-- State 3: pipeline scanned, found NO deletable items.
+			elseif noDeleteRulesActive or foundNothingLastWalk then
+				-- State 3: delete side is settled. Either no delete rules
+				-- exist, or the latest walk found no deletable candidates.
 				-- Start timer immediately; Goblin is the right answer.
+				local fireReason = noDeleteRulesActive and "no-delete-rules" or "no-deletable-candidates"
+				local waitReason = noDeleteRulesActive and "no-delete-rules-waiting" or "found-nothing-waiting"
 				if not bagsFullSince then
 					bagsFullSince = now
 					_G.AutoDelete_BagsFullQueueAtStart = qLen
@@ -12713,12 +12729,19 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 						_G.AutoDelete_BagsFullQueueAtStart = nil
 						_G.AutoDelete_BagsBelowAt = 0
 						_G.AutoDelete_GoblinLastFireAt = now
-						_G.AutoDelete_GoblinLastFireReason = "no-deletable-candidates"
+						_G.AutoDelete_GoblinLastFireReason = fireReason
 						SummonGoblinMerchant()
 					end
 				else
-					_G.AutoDelete_GoblinLastDeferReason = "found-nothing-waiting"
+					_G.AutoDelete_GoblinLastDeferReason = waitReason
 				end
+			elseif not walkSinceBelow then
+				-- State 1: pipeline has NOT scanned yet since bags went
+				-- below threshold (sustained loot storm preventing
+				-- DeleteItems from running). Defer. DO NOT start timer.
+				bagsFullSince = nil
+				_G.AutoDelete_BagsFullQueueAtStart = nil
+				_G.AutoDelete_GoblinLastDeferReason = "no-walk-yet"
 			else
 				-- Transitional state: walked, enqueued items, but the
 				-- recency windows for drain/enqueue have elapsed AND
