@@ -1438,6 +1438,7 @@ local DEFAULT_PROFILE = {
 	protectAffixTier3      = false,
 	protectAffixTier4      = false,
 	protectAffixTier5      = false,
+	protectAffixTier6      = false,
 	keepSingleMissingAffix    = false,
 
 	-- Visual cyan dot in the bottom-left corner of bag slots with affixed
@@ -1447,7 +1448,7 @@ local DEFAULT_PROFILE = {
 
 	-- Affix Collection Mode (Filters tab, Affix Protection card).
 	-- When OFF (default): the affix dot shows on every affixed item,
-	-- colored by tier (white/green/blue/purple/orange). Affix
+	-- colored by tier (white/green/blue/purple/orange/red). Affix
 	-- tier protection applies to all checked affix tiers.
 	-- When ON: the dot ONLY shows for affixes the player hasn't yet
 	-- learned in the server's affix system (AutoDelete requests the
@@ -1494,9 +1495,8 @@ local DEFAULT_PROFILE = {
 	--   disenchantUncommon  greens. Default ON.
 	--   disenchantRare      blues. Default OFF.
 	--   disenchantEpic      epics. Default OFF.
-	--   disenchantIlvlMin   per-quality floor (0 = use Blizzard mechanical
-	--                       floor: 5 for greens, 55 for blues, 95 for epics).
-	--   disenchantIlvlMax   per-quality ceiling (0 = no cap; Disenchant will
+	--   disenchantIlvlMin   inclusive item-level minimum (0 = no minimum).
+	--   disenchantIlvlMax   inclusive item-level ceiling (0 = no cap; Disenchant will
 	--                       still refuse to cast on items above the live game
 	--                       maximum, ~373 in WotLK).
 	disenchantEnabled  = false,
@@ -1767,12 +1767,14 @@ local function EnsureProfileFields(p)
 		or p.protectAffixTier3 ~= nil
 		or p.protectAffixTier4 ~= nil
 		or p.protectAffixTier5 ~= nil
+		or p.protectAffixTier6 ~= nil
 	if not hasAffixTierProtection and p.protectAffixFromSell == true then
 		p.protectAffixTier1 = true
 		p.protectAffixTier2 = true
 		p.protectAffixTier3 = true
 		p.protectAffixTier4 = true
 		p.protectAffixTier5 = true
+		p.protectAffixTier6 = true
 	end
 
 	if p.qualityActionJunk == nil and (p.autoGray == true or p.autoGray == "delete") then
@@ -2047,6 +2049,16 @@ _G.AutoDelete_DecisionHistory = _G.AutoDelete_DecisionHistory or {
 	lastAt = 0,
 }
 
+-- Session-scoped evidence for actions performed by the merchant/server or
+-- another addon. These counters must never be presented as AutoDelete rule
+-- matches.
+_G.AutoDelete_ExternalActionAudit = _G.AutoDelete_ExternalActionAudit or {
+	peeScrapConfirmations = 0,
+	externalMerchantSells = 0,
+	externalDeletes = 0,
+	last = nil,
+}
+
 function _G.AutoDelete_RecordDecision(data)
 	if not data then return end
 	local hist = _G.AutoDelete_DecisionHistory
@@ -2058,6 +2070,10 @@ function _G.AutoDelete_RecordDecision(data)
 	local action = data.action or "unknown"
 	local reason = data.reason or "No reason recorded"
 	local source = data.sourceRule or data.source or "Unknown rule"
+	local actor = data.actor or (data.autoDeleteOwned == false and "External" or "AutoDelete")
+	local sourceAddon = data.sourceAddon or data.origin
+	local autoDeleteOwned = data.autoDeleteOwned ~= false
+	local quantity = data.quantity or data.count
 	local affixName = data.affixName or data.affixKey
 	local recipeLike = data.recipeLike == true
 	local recipeState = data.recipeState
@@ -2084,11 +2100,15 @@ function _G.AutoDelete_RecordDecision(data)
 		tostring(recipeQualityEnabled),
 		tostring(recipeBindLabel or ""),
 		tostring(recipeBindEnabled),
+		tostring(actor),
+		tostring(sourceAddon or ""),
+		tostring(autoDeleteOwned),
 	}, "|")
 	local first = hist.entries[1]
 	if first and hist.lastKey == key and (now - (hist.lastAt or 0)) < 10 then
 		first.time = now
 		first.repeatCount = (first.repeatCount or 1) + 1
+		if quantity then first.quantity = (first.quantity or 0) + quantity end
 		hist.lastAt = now
 		return
 	end
@@ -2099,6 +2119,10 @@ function _G.AutoDelete_RecordDecision(data)
 		action = action,
 		reason = reason,
 		sourceRule = source,
+		actor = actor,
+		sourceAddon = sourceAddon,
+		autoDeleteOwned = autoDeleteOwned,
+		quantity = quantity,
 		affixName = affixName,
 		recipeLike = recipeLike,
 		recipeState = recipeState,
@@ -2117,6 +2141,43 @@ function _G.AutoDelete_RecordDecision(data)
 	end
 	hist.lastKey = key
 	hist.lastAt = now
+end
+
+function _G.AutoDelete_RecordExternalAction(data)
+	if not data then return end
+	local copy = {}
+	for key, value in pairs(data) do copy[key] = value end
+	copy.autoDeleteOwned = false
+	copy.actor = copy.actor or "External / not AutoDelete"
+	copy.sourceAddon = copy.sourceAddon or "Other addon or player"
+	copy.sourceRule = copy.sourceRule or "External inventory action"
+	copy.reason = copy.reason or "Action executed outside AutoDelete"
+	copy.itemName = copy.itemName or copy.name or "Unknown external item"
+	_G.AutoDelete_RecordDecision(copy)
+
+	local audit = _G.AutoDelete_ExternalActionAudit
+	if copy.action == "sold" then
+		audit.externalMerchantSells = (audit.externalMerchantSells or 0) + 1
+	elseif copy.action == "deleted" then
+		audit.externalDeletes = (audit.externalDeletes or 0) + 1
+	end
+	local merchantAudit = _G.AutoDelete_MerchantAudit
+	if copy.action == "deleted" and copy.itemLink and merchantAudit and merchantAudit.active then
+		local quantity = copy.quantity or copy.count or 1
+		merchantAudit.externalRemovedByLink = merchantAudit.externalRemovedByLink or {}
+		merchantAudit.externalRemovedByLink[copy.itemLink] =
+			(merchantAudit.externalRemovedByLink[copy.itemLink] or 0) + quantity
+	end
+	audit.last = {
+		time = (GetTime and GetTime()) or 0,
+		action = copy.action,
+		itemName = copy.itemName,
+		itemId = copy.itemId,
+		quantity = copy.quantity or copy.count,
+		actor = copy.actor,
+		sourceAddon = copy.sourceAddon,
+		reason = copy.reason,
+	}
 end
 
 function _G.AutoDelete_ClearDecisionHistory()
@@ -2153,6 +2214,10 @@ function _G.AutoDelete_BuildDecisionHistoryReport(searchText)
 			entry.action,
 			entry.reason,
 			entry.sourceRule,
+			entry.actor,
+			entry.sourceAddon,
+			entry.autoDeleteOwned == false and "not AutoDelete" or "AutoDelete",
+			entry.quantity and ("quantity " .. tostring(entry.quantity)) or nil,
 			entry.affixName,
 			entry.recipeLike and "recipe" or nil,
 			entry.recipeState,
@@ -2173,7 +2238,7 @@ function _G.AutoDelete_BuildDecisionHistoryReport(searchText)
 		if Matches(entry) then table.insert(filtered, entry) end
 	end
 	local lines = {
-		"AutoDelete recent decision history",
+		"AutoDelete decision history (session)",
 		"Session entries: " .. tostring(#entries),
 		"",
 	}
@@ -2187,7 +2252,7 @@ function _G.AutoDelete_BuildDecisionHistoryReport(searchText)
 	if #entries == 0 then
 		table.insert(lines, "No decisions recorded this session.")
 		table.insert(lines, "")
-		table.insert(lines, "This log records actual deletes, actual sells, recipe sales/protection, and matching rules blocked by Keep or Affix Protection.")
+		table.insert(lines, "This log records AutoDelete actions, external merchant/inventory actions, recipe sales/protection, and matching rules blocked by Keep or Affix Protection.")
 		return table.concat(lines, "\n")
 	end
 	for i, entry in ipairs(filtered) do
@@ -2205,6 +2270,17 @@ function _G.AutoDelete_BuildDecisionHistoryReport(searchText)
 				.. (entry.recipeBindEnabled ~= nil and ("; bind toggle=" .. (entry.recipeBindEnabled and "on" or "off")) or ""))
 		end
 		table.insert(lines, "   Final action: " .. tostring(entry.action))
+		if entry.autoDeleteOwned == false then
+			table.insert(lines, "   Attribution: NOT AutoDelete (" .. tostring(entry.actor or "external") .. ")")
+			if entry.sourceAddon then
+				table.insert(lines, "   External source: " .. tostring(entry.sourceAddon))
+			end
+		else
+			table.insert(lines, "   Attribution: AutoDelete")
+		end
+		if entry.quantity and tonumber(entry.quantity) and tonumber(entry.quantity) > 0 then
+			table.insert(lines, "   Quantity: " .. tostring(entry.quantity))
+		end
 		table.insert(lines, "   Reason: " .. tostring(entry.reason))
 		table.insert(lines, "   Source rule: " .. tostring(entry.sourceRule))
 		if entry.bag and entry.slot then
@@ -2545,6 +2621,496 @@ end
 local autoDeleteSelling = false
 local merchantBagSnapshot = {}
 
+_G.AutoDelete_InventoryAuditSnapshot = _G.AutoDelete_InventoryAuditSnapshot or { slots = {} }
+_G.AutoDelete_MerchantAudit = _G.AutoDelete_MerchantAudit or {
+	active = false,
+	peePending = false,
+	peeConfirmationsPending = 0,
+	baselineSnapshot = nil,
+	autoDeleteSoldByLink = {},
+	externalSoldByLink = {},
+	externalRemovedByLink = {},
+	peeSoldByLink = {},
+	peeRequests = {},
+	peeRequestSnapshot = nil,
+	peeRequestCandidates = {},
+	peeRequestAutoDeleteAtStart = {},
+	peeRequestExternalAtStart = {},
+}
+_G.AutoDelete_DeleteInProgress = false
+_G.AutoDelete_PendingExternalCursorDelete = nil
+
+function _G.AutoDelete_CopyAuditSnapshot(source)
+	local copy = {}
+	for key, entry in pairs(source or {}) do
+		copy[key] = {
+			link = entry.link,
+			count = entry.count or 1,
+			bag = entry.bag,
+			slot = entry.slot,
+		}
+	end
+	return copy
+end
+
+function _G.AutoDelete_CaptureInventoryAuditSnapshot()
+	local slots = {}
+	for bag = 0, 4 do
+		local n = GetContainerNumSlots(bag) or 0
+		for slot = 1, n do
+			local link = GetContainerItemLink(bag, slot)
+			if link then
+				local _, count = GetContainerItemInfo(bag, slot)
+				slots[bag .. ":" .. slot] = {
+					link = link,
+					count = count or 1,
+					bag = bag,
+					slot = slot,
+				}
+			end
+		end
+	end
+	_G.AutoDelete_InventoryAuditSnapshot.slots = slots
+	return slots
+end
+
+function _G.AutoDelete_BuildAuditTotals(snapshot)
+	local totals = {}
+	for _, entry in pairs(snapshot or {}) do
+		if entry.link then
+			totals[entry.link] = (totals[entry.link] or 0) + (entry.count or 1)
+		end
+	end
+	return totals
+end
+
+function _G.AutoDelete_CopyAuditCountMap(source)
+	local copy = {}
+	for link, count in pairs(source or {}) do copy[link] = count end
+	return copy
+end
+
+function _G.AutoDelete_BeginMerchantAudit()
+	local audit = _G.AutoDelete_MerchantAudit
+	audit.active = true
+	audit.peePending = false
+	audit.peeConfirmationsPending = 0
+	audit.baselineSnapshot = _G.AutoDelete_CopyAuditSnapshot(merchantBagSnapshot)
+	audit.autoDeleteSoldByLink = {}
+	audit.externalSoldByLink = {}
+	audit.externalRemovedByLink = {}
+	audit.peeSoldByLink = {}
+	audit.peeRequests = {}
+	audit.peeRequestSnapshot = nil
+	audit.peeRequestCandidates = {}
+	audit.peeRequestAutoDeleteAtStart = {}
+	audit.peeRequestExternalAtStart = {}
+	return true
+end
+
+function _G.AutoDelete_EndMerchantAudit()
+	local audit = _G.AutoDelete_MerchantAudit
+	audit.active = false
+	audit.peePending = false
+	audit.peeConfirmationsPending = 0
+	audit.baselineSnapshot = nil
+	audit.autoDeleteSoldByLink = {}
+	audit.externalSoldByLink = {}
+	audit.externalRemovedByLink = {}
+	audit.peeSoldByLink = {}
+	audit.peeRequests = {}
+	audit.peeRequestSnapshot = nil
+	audit.peeRequestCandidates = {}
+	audit.peeRequestAutoDeleteAtStart = {}
+	audit.peeRequestExternalAtStart = {}
+end
+
+function _G.AutoDelete_RecordMerchantOwnedSale(link, quantity)
+	local audit = _G.AutoDelete_MerchantAudit
+	if not audit.active or not link then return end
+	audit.autoDeleteSoldByLink[link] = (audit.autoDeleteSoldByLink[link] or 0) + (quantity or 1)
+end
+
+function _G.AutoDelete_RecordExternalMerchantSale(link, quantity, bag, slot, sourceAddon)
+	if not link then return end
+	local audit = _G.AutoDelete_MerchantAudit
+	if audit.active then
+		audit.externalSoldByLink[link] = (audit.externalSoldByLink[link] or 0) + (quantity or 1)
+	end
+	local itemName = GetItemInfo(link)
+	_G.AutoDelete_RecordExternalAction({
+		itemName = itemName or link,
+		itemId = GetItemIDFromLink(link),
+		quantity = quantity or 1,
+		action = "sold",
+		reason = "Item sold by an external merchant action; AutoDelete did not execute this sale.",
+		sourceRule = "External merchant sale (not AutoDelete)",
+		sourceAddon = sourceAddon or "Other addon or player",
+		actor = "External merchant",
+		bag = bag,
+		slot = slot,
+	})
+end
+
+function _G.AutoDelete_BeginProjectEbonholdSellAudit()
+	local audit = _G.AutoDelete_MerchantAudit
+	if not audit.active then return false end
+	audit.peeRequests = audit.peeRequests or {}
+	audit.peeSoldByLink = audit.peeSoldByLink or {}
+	audit.externalRemovedByLink = audit.externalRemovedByLink or {}
+	local request = {
+		snapshot = _G.AutoDelete_CopyAuditSnapshot(
+			_G.AutoDelete_CaptureInventoryAuditSnapshot()),
+		candidates = {},
+		autoDeleteAtStart = _G.AutoDelete_CopyAuditCountMap(audit.autoDeleteSoldByLink),
+		externalAtStart = _G.AutoDelete_CopyAuditCountMap(audit.externalSoldByLink),
+		externalRemovedAtStart = _G.AutoDelete_CopyAuditCountMap(audit.externalRemovedByLink),
+		peeAtStart = _G.AutoDelete_CopyAuditCountMap(audit.peeSoldByLink),
+		at = (GetTime and GetTime()) or 0,
+	}
+	local project = _G.ProjectEbonhold
+	local service = (project and project.ScrapService) or _G.ScrapService
+	if service and type(service.GetSellableItems) == "function" then
+		local ok, items = pcall(service.GetSellableItems)
+		if ok and type(items) == "table" then
+			for _, item in ipairs(items) do
+				if item and item.link then
+					local count = item.count
+					if not count and item.bag and item.slot then
+						local _, stackCount = GetContainerItemInfo(item.bag, item.slot)
+						count = stackCount
+					end
+					request.candidates[item.link] = (request.candidates[item.link] or 0) + (count or 1)
+				end
+			end
+		end
+	end
+	table.insert(audit.peeRequests, request)
+	-- Keep the latest request mirrored for diagnostics and compatibility with
+	-- older integrations; finalization consumes the FIFO queue above.
+	audit.peeRequestSnapshot = request.snapshot
+	audit.peeRequestCandidates = request.candidates
+	audit.peeRequestAutoDeleteAtStart = request.autoDeleteAtStart
+	audit.peeRequestExternalAtStart = request.externalAtStart
+	audit.peeRequestAt = request.at
+	return true
+end
+
+function _G.AutoDelete_InstallProjectEbonholdAuditHook()
+	if _G.AutoDelete_PEEAuditHookInstalled then return true end
+	local project = _G.ProjectEbonhold
+	local service = (project and project.ScrapService) or _G.ScrapService
+	if not service or type(service.SellJunk) ~= "function" then return false end
+	local ok = pcall(hooksecurefunc, service, "SellJunk", function()
+		if _G.AutoDelete_BeginProjectEbonholdSellAudit then
+			_G.AutoDelete_BeginProjectEbonholdSellAudit()
+		end
+	end)
+	if ok then
+		_G.AutoDelete_PEEAuditHookInstalled = true
+	end
+	return ok
+end
+
+function _G.AutoDelete_FinalizeMerchantAuditLegacy(source)
+	local audit = _G.AutoDelete_MerchantAudit
+	if not audit.active and not audit.baselineSnapshot then return false end
+	audit.peePending = false
+	local isPeeSale = source == "Project Ebonhold Scrap"
+	local baseline
+	if isPeeSale then
+		baseline = audit.peeRequestSnapshot
+	else
+		baseline = audit.baselineSnapshot or merchantBagSnapshot
+	end
+	if isPeeSale and not audit.peeRequestSnapshot then
+		_G.AutoDelete_RecordExternalAction({
+			itemName = "Project Ebonhold Scrap sale batch",
+			action = "sold",
+			reason = "Project Ebonhold confirmed an external merchant sale without a request-time item snapshot.",
+			sourceRule = "External merchant sale (Project Ebonhold Scrap)",
+			sourceAddon = "ProjectEbonholdEnhanced",
+			actor = "Project Ebonhold Scrap",
+		})
+		return false
+	end
+	local current = _G.AutoDelete_CaptureInventoryAuditSnapshot()
+	local beforeTotals = _G.AutoDelete_BuildAuditTotals(baseline)
+	local afterTotals = _G.AutoDelete_BuildAuditTotals(current)
+	local owned = audit.autoDeleteSoldByLink or {}
+	local knownExternal = audit.externalSoldByLink or {}
+	local candidates = isPeeSale and audit.peeRequestCandidates or nil
+	if isPeeSale then
+		local ownedAtStart = audit.peeRequestAutoDeleteAtStart or {}
+		local externalAtStart = audit.peeRequestExternalAtStart or {}
+		local ownedSince, externalSince = {}, {}
+		for link, count in pairs(owned) do
+			ownedSince[link] = math.max(0, count - (ownedAtStart[link] or 0))
+		end
+		for link, count in pairs(knownExternal) do
+			externalSince[link] = math.max(0, count - (externalAtStart[link] or 0))
+		end
+		owned, knownExternal = ownedSince, externalSince
+	end
+	local found = 0
+	for link, before in pairs(beforeTotals) do
+		if not candidates or candidates[link] then
+			local lost = before - (afterTotals[link] or 0)
+			local external = lost - (owned[link] or 0) - (knownExternal[link] or 0)
+			if candidates and candidates[link] then
+				external = math.min(external, candidates[link])
+			end
+			if external > 0 then
+				local representative
+				for _, entry in pairs(baseline) do
+					if entry.link == link then representative = entry; break end
+				end
+				_G.AutoDelete_RecordExternalAction({
+					itemName = GetItemInfo(link) or link,
+					itemId = GetItemIDFromLink(link),
+					quantity = external,
+					action = "sold",
+					reason = "Item removed by confirmed Project Ebonhold Scrap sale; AutoDelete did not execute this sale.",
+					sourceRule = "External merchant sale (Project Ebonhold Scrap)",
+				sourceAddon = source or "Project EbonholdEnhanced",
+				actor = "Project Ebonhold Scrap",
+				bag = representative and representative.bag,
+				slot = representative and representative.slot,
+				})
+				found = found + 1
+				end
+		end
+	end
+	if isPeeSale and found == 0 then
+		_G.AutoDelete_RecordExternalAction({
+			itemName = "Project Ebonhold Scrap sale batch",
+			action = "sold",
+			reason = "Project Ebonhold confirmed an external merchant sale, but no item-level bag delta was available.",
+			sourceRule = "External merchant sale (Project Ebonhold Scrap)",
+			sourceAddon = "ProjectEbonholdEnhanced",
+			actor = "Project Ebonhold Scrap",
+		})
+	end
+	merchantBagSnapshot = _G.AutoDelete_CopyAuditSnapshot(current)
+	audit.baselineSnapshot = _G.AutoDelete_CopyAuditSnapshot(current)
+	audit.autoDeleteSoldByLink = {}
+	audit.externalSoldByLink = {}
+	audit.peeRequestSnapshot = nil
+	audit.peeRequestCandidates = {}
+	audit.peeRequestAutoDeleteAtStart = {}
+	audit.peeRequestExternalAtStart = {}
+	return found > 0
+end
+
+-- FIFO finalizer: PEE's server response carries no item IDs, so each
+-- confirmation consumes the oldest request-time candidate snapshot. This
+-- prevents a double-click or auto-sell+manual request from attributing the
+-- first response to the latest request.
+function _G.AutoDelete_FinalizeMerchantAudit(source)
+	local audit = _G.AutoDelete_MerchantAudit
+	if not audit.active and not audit.baselineSnapshot then return false end
+	local isPeeSale = source == "Project Ebonhold Scrap"
+	audit.peeRequests = audit.peeRequests or {}
+	local request
+	local baseline
+	if isPeeSale then
+		request = table.remove(audit.peeRequests, 1)
+		baseline = request and request.snapshot
+	else
+		baseline = audit.baselineSnapshot or merchantBagSnapshot
+	end
+	if isPeeSale and not request then
+		_G.AutoDelete_RecordExternalAction({
+			itemName = "Project Ebonhold Scrap sale batch",
+			action = "sold",
+			reason = "Project Ebonhold confirmed an external merchant sale without a request-time item snapshot.",
+			sourceRule = "External merchant sale (Project Ebonhold Scrap)",
+			sourceAddon = "ProjectEbonholdEnhanced",
+			actor = "Project Ebonhold Scrap",
+		})
+		return false
+	end
+	local current = _G.AutoDelete_CaptureInventoryAuditSnapshot()
+	local beforeTotals = _G.AutoDelete_BuildAuditTotals(baseline)
+	local afterTotals = _G.AutoDelete_BuildAuditTotals(current)
+	local owned = audit.autoDeleteSoldByLink or {}
+	local knownExternal = audit.externalSoldByLink or {}
+	local knownRemoved = audit.externalRemovedByLink or {}
+	local knownPee = audit.peeSoldByLink or {}
+	local candidates = isPeeSale and request.candidates or nil
+	if isPeeSale then
+		local ownedAtStart = request.autoDeleteAtStart or {}
+		local externalAtStart = request.externalAtStart or {}
+		local removedAtStart = request.externalRemovedAtStart or {}
+		local peeAtStart = request.peeAtStart or {}
+		local ownedSince, externalSince, removedSince, peeSince = {}, {}, {}, {}
+		for link, count in pairs(owned) do
+			ownedSince[link] = math.max(0, count - (ownedAtStart[link] or 0))
+		end
+		for link, count in pairs(knownExternal) do
+			externalSince[link] = math.max(0, count - (externalAtStart[link] or 0))
+		end
+		for link, count in pairs(knownRemoved) do
+			removedSince[link] = math.max(0, count - (removedAtStart[link] or 0))
+		end
+		for link, count in pairs(knownPee) do
+			peeSince[link] = math.max(0, count - (peeAtStart[link] or 0))
+		end
+		owned, knownExternal, knownRemoved, knownPee = ownedSince, externalSince, removedSince, peeSince
+	end
+	local found = 0
+	for link, before in pairs(beforeTotals) do
+		if not candidates or candidates[link] then
+			local lost = math.max(0, before - (afterTotals[link] or 0))
+			local external = lost - (owned[link] or 0)
+				- (knownExternal[link] or 0) - (knownRemoved[link] or 0)
+				- (knownPee[link] or 0)
+			if candidates and candidates[link] then
+				external = math.min(external, candidates[link])
+			end
+			if external > 0 then
+				local representative
+				for _, entry in pairs(baseline) do
+					if entry.link == link then representative = entry; break end
+				end
+				_G.AutoDelete_RecordExternalAction({
+					itemName = GetItemInfo(link) or link,
+					itemId = GetItemIDFromLink(link),
+					quantity = external,
+					action = "sold",
+					reason = "Item removed by confirmed Project Ebonhold Scrap sale; AutoDelete did not execute this sale.",
+					sourceRule = "External merchant sale (Project Ebonhold Scrap)",
+					sourceAddon = source or "ProjectEbonholdEnhanced",
+					actor = "Project Ebonhold Scrap",
+					bag = representative and representative.bag,
+					slot = representative and representative.slot,
+				})
+				found = found + 1
+				audit.peeSoldByLink[link] = (audit.peeSoldByLink[link] or 0) + external
+			end
+		end
+	end
+	if isPeeSale and found == 0 then
+		_G.AutoDelete_RecordExternalAction({
+			itemName = "Project Ebonhold Scrap sale batch",
+			action = "sold",
+			reason = "Project Ebonhold confirmed an external merchant sale, but no item-level bag delta was available.",
+			sourceRule = "External merchant sale (Project Ebonhold Scrap)",
+			sourceAddon = "ProjectEbonholdEnhanced",
+			actor = "Project Ebonhold Scrap",
+		})
+	end
+	merchantBagSnapshot = _G.AutoDelete_CopyAuditSnapshot(current)
+	audit.baselineSnapshot = _G.AutoDelete_CopyAuditSnapshot(current)
+	local nextRequest = audit.peeRequests[1]
+	if nextRequest then
+		audit.peeRequestSnapshot = nextRequest.snapshot
+		audit.peeRequestCandidates = nextRequest.candidates
+		audit.peeRequestAutoDeleteAtStart = nextRequest.autoDeleteAtStart
+		audit.peeRequestExternalAtStart = nextRequest.externalAtStart
+	else
+		audit.peeRequestSnapshot = nil
+		audit.peeRequestCandidates = {}
+		audit.peeRequestAutoDeleteAtStart = {}
+		audit.peeRequestExternalAtStart = {}
+		audit.autoDeleteSoldByLink = {}
+		audit.externalSoldByLink = {}
+		audit.externalRemovedByLink = {}
+		audit.peeSoldByLink = {}
+	end
+	if (audit.peeConfirmationsPending or 0) == 0 then audit.peePending = false end
+	if isPeeSale and audit.active and not audit.peePending
+		and #audit.peeRequests == 0 and MerchantFrame and not MerchantFrame:IsShown() then
+		AfterDelay(0.1, function()
+			local currentAudit = _G.AutoDelete_MerchantAudit
+			if currentAudit.active and not currentAudit.peePending
+				and #currentAudit.peeRequests == 0 then
+				_G.AutoDelete_EndMerchantAudit()
+			end
+		end)
+	end
+	return found > 0
+end
+
+function _G.AutoDelete_ScheduleMerchantAudit(delaySeconds)
+	local audit = _G.AutoDelete_MerchantAudit
+	audit.peeConfirmationsPending = (audit.peeConfirmationsPending or 0) + 1
+	audit.peePending = true
+	AfterDelay(delaySeconds or 0.2, function()
+		local currentAudit = _G.AutoDelete_MerchantAudit
+		if currentAudit.peeConfirmationsPending and currentAudit.peeConfirmationsPending > 0 then
+			currentAudit.peeConfirmationsPending = currentAudit.peeConfirmationsPending - 1
+			_G.AutoDelete_FinalizeMerchantAudit("Project Ebonhold Scrap")
+			currentAudit.peePending = currentAudit.peeConfirmationsPending > 0
+		end
+	end)
+	return true
+end
+
+function _G.AutoDelete_DiscardProjectEbonholdSellRequest()
+	local audit = _G.AutoDelete_MerchantAudit
+	if not audit or not audit.peeRequests or #audit.peeRequests == 0 then return false end
+	table.remove(audit.peeRequests, 1)
+	local nextRequest = audit.peeRequests[1]
+	if nextRequest then
+		audit.peeRequestSnapshot = nextRequest.snapshot
+		audit.peeRequestCandidates = nextRequest.candidates
+		audit.peeRequestAutoDeleteAtStart = nextRequest.autoDeleteAtStart
+		audit.peeRequestExternalAtStart = nextRequest.externalAtStart
+	else
+		audit.peeRequestSnapshot = nil
+		audit.peeRequestCandidates = {}
+		audit.peeRequestAutoDeleteAtStart = {}
+		audit.peeRequestExternalAtStart = {}
+	end
+	return true
+end
+
+function _G.AutoDelete_HandleProjectEbonholdMessage(prefix, payload, dist, sender)
+	local project = _G.ProjectEbonhold
+	if not project or prefix ~= (_G.AutoDelete_AffixServerPrefix or "AAM0x9") then return false end
+	if dist ~= "WHISPER" then return false end
+	local playerName = UnitName and UnitName("player") or nil
+	local function NormalizeSender(name)
+		name = string.lower(tostring(name or ""))
+		return name:match("^([^-]+)") or name
+	end
+	if not playerName or not sender
+		or NormalizeSender(sender) ~= NormalizeSender(playerName) then
+		return false
+	end
+	local rawPayload = tostring(payload or "")
+	local eventId = tonumber(rawPayload:match("^(%d+)"))
+	local junkSoldEvent = project.SS and project.SS.SEND_JUNK_SOLD or 12
+	if eventId ~= junkSoldEvent then return false end
+	local body = rawPayload:match("^%d+\t(.*)$")
+	if not body or body == "" then
+		_G.AutoDelete_DiscardProjectEbonholdSellRequest()
+		return false
+	end
+	local itemCount = tonumber(body:match("^(%d+)|"))
+	if itemCount and itemCount <= 0 then
+		_G.AutoDelete_DiscardProjectEbonholdSellRequest()
+		return false
+	end
+	local audit = _G.AutoDelete_MerchantAudit
+	local counters = _G.AutoDelete_ExternalActionAudit
+	counters.peeScrapConfirmations = (counters.peeScrapConfirmations or 0) + 1
+	if audit.active or audit.baselineSnapshot then
+		_G.AutoDelete_ScheduleMerchantAudit(0.2)
+	else
+		_G.AutoDelete_RecordExternalAction({
+			itemName = "Project Ebonhold Scrap sale batch",
+			action = "sold",
+			reason = "Project Ebonhold confirmed an external merchant sale without an AutoDelete bag baseline.",
+			sourceRule = "External merchant sale (Project Ebonhold Scrap)",
+			sourceAddon = "ProjectEbonholdEnhanced",
+			actor = "Project Ebonhold Scrap",
+		})
+	end
+	return true
+end
+
 -- Merchant-state flag for the auto-open feature. UseContainerItem at a
 -- vendor SELLS the item instead of opening it, so auto-open must never
 -- fire while a vendor is or has just been open. This flag is set at
@@ -2568,6 +3134,9 @@ local function SnapshotAllBags()
 			end
 		end
 	end
+	if _G.AutoDelete_CaptureInventoryAuditSnapshot then
+		_G.AutoDelete_CaptureInventoryAuditSnapshot()
+	end
 end
 
 local function RefreshSnapshotSlot(bag, slot)
@@ -2590,18 +3159,112 @@ hooksecurefunc("UseContainerItem", function(bag, slot)
 	local key = bag .. ":" .. slot
 	local snap = merchantBagSnapshot[key]
 	if snap and snap.link then
-		local _, _, _, _, _, _, _, _, _, _, sellPrice = GetItemInfo(snap.link)
-		if sellPrice and sellPrice > 0 then
-			local copper = sellPrice * (snap.count or 1)
-			BumpStat("itemsSold", 1)
-			BumpStat("goldEarned", copper)
-		end
+		-- hooksecurefunc runs after Blizzard's handler, but the bag update can
+		-- still be asynchronous (and the call may have been rejected). Defer
+		-- attribution until the slot proves that the captured item/count left.
+		local beforeLink = snap.link
+		local beforeCount = snap.count or 1
+		local _, _, _, _, _, _, _, _, _, _, sellPrice = GetItemInfo(beforeLink)
+		AfterDelay(0.1, function()
+			local currentLink = GetContainerItemLink(bag, slot)
+			local _, currentCount = GetContainerItemInfo(bag, slot)
+			local sold = 0
+			if currentLink ~= beforeLink then
+				sold = beforeCount
+			elseif (currentCount or beforeCount) < beforeCount then
+				sold = beforeCount - (currentCount or 0)
+			end
+			if sold > 0 then
+				if sellPrice and sellPrice > 0 then
+					BumpStat("itemsSold", 1)
+					BumpStat("goldEarned", sellPrice * sold)
+				end
+				if _G.AutoDelete_RecordExternalMerchantSale then
+					_G.AutoDelete_RecordExternalMerchantSale(
+						beforeLink, sold, bag, slot, "Other addon or player")
+				end
+			end
+			RefreshSnapshotSlot(bag, slot)
+		end)
 	end
-
-	-- Refresh the snapshot for this slot after the sell completes. Use a
-	-- short delay so the bag has time to update.
-	AfterDelay(0.1, function() RefreshSnapshotSlot(bag, slot) end)
 end)
+
+-- Capture the item that was picked up so an external DeleteCursorItem call
+-- can be attributed after the protected API clears the cursor. AutoDelete's
+-- own delete drain raises AutoDelete_DeleteInProgress around these calls.
+hooksecurefunc("PickupContainerItem", function(bag, slot)
+	if _G.AutoDelete_DeleteInProgress then return end
+	if not bag or not slot or not CursorHasItem or not CursorHasItem() then return end
+	local snapshot = _G.AutoDelete_InventoryAuditSnapshot
+	local entry = snapshot and snapshot.slots and snapshot.slots[bag .. ":" .. slot]
+	if entry and entry.link then
+		_G.AutoDelete_PendingExternalCursorDelete = {
+			link = entry.link,
+			count = entry.count or 1,
+			bag = bag,
+			slot = slot,
+			at = GetTime(),
+		}
+	end
+end)
+
+if type(SplitContainerItem) == "function" then
+	hooksecurefunc("SplitContainerItem", function(bag, slot, amount)
+		if _G.AutoDelete_DeleteInProgress then return end
+		if not bag or not slot or not CursorHasItem or not CursorHasItem() then return end
+		local snapshot = _G.AutoDelete_InventoryAuditSnapshot
+		local entry = snapshot and snapshot.slots and snapshot.slots[bag .. ":" .. slot]
+		if entry and entry.link then
+			_G.AutoDelete_PendingExternalCursorDelete = {
+				link = entry.link,
+				count = amount or 1,
+				bag = bag,
+				slot = slot,
+				at = GetTime(),
+			}
+		end
+	end)
+end
+
+if type(DeleteCursorItem) == "function" then
+	hooksecurefunc("DeleteCursorItem", function()
+		if _G.AutoDelete_DeleteInProgress then return end
+		local pending = _G.AutoDelete_PendingExternalCursorDelete
+		_G.AutoDelete_PendingExternalCursorDelete = nil
+		if not pending or (GetTime() - (pending.at or 0)) > 5 then return end
+		_G.AutoDelete_RecordExternalAction({
+			itemName = GetItemInfo(pending.link) or pending.link,
+			itemId = GetItemIDFromLink(pending.link),
+			itemLink = pending.link,
+			quantity = pending.count or 1,
+			action = "deleted",
+			reason = "External inventory delete; DeleteCursorItem executed outside AutoDelete.",
+			sourceRule = "External inventory delete (not AutoDelete)",
+			sourceAddon = "Other addon or player",
+			actor = "External inventory action",
+			bag = pending.bag,
+			slot = pending.slot,
+		})
+	end)
+end
+
+-- A picked-up bag item can be swapped into an equipment slot or cleared
+-- before DeleteCursorItem runs. Clear the pending attribution in those
+-- cases so a later, unrelated delete cannot inherit stale bag metadata.
+if type(PickupInventoryItem) == "function" then
+	hooksecurefunc("PickupInventoryItem", function()
+		if not _G.AutoDelete_DeleteInProgress then
+			_G.AutoDelete_PendingExternalCursorDelete = nil
+		end
+	end)
+end
+if type(ClearCursor) == "function" then
+	hooksecurefunc("ClearCursor", function()
+		if not _G.AutoDelete_DeleteInProgress then
+			_G.AutoDelete_PendingExternalCursorDelete = nil
+		end
+	end)
+end
 
 -- ============================================================================
 -- Profile Management (copy settings from another character)
@@ -3454,6 +4117,7 @@ local function DeleteItems()
 							link  = itemLink,
 							name  = itemName,
 							id    = itemId,
+							count = itemCount or 1,
 							sourceRule = deleteSourceRule or "Delete scanner",
 							keepOne = onKeepOneList,
 							keepOneUnits = keepOneUnitsToDelete,
@@ -3874,6 +4538,7 @@ function _G.AutoDelete_DrainDeleteQueue(now)
 		_G.AutoDelete_SelfBagUpdateUntil = now + 0.5
 		local _pApi = AutoDelete_PerfBegin("DeleteItems/api-delete")
 		ClearCursor()
+		_G.AutoDelete_DeleteInProgress = true
 		if entry.keepOne and entry.keepOneAction == "split-delete" then
 			if type(SplitContainerItem) == "function" then
 				SplitContainerItem(entry.bag, entry.slot, entry.keepOneUnits or 1)
@@ -3883,6 +4548,7 @@ function _G.AutoDelete_DrainDeleteQueue(now)
 			PickupContainerItem(entry.bag, entry.slot)
 			if CursorHasItem() then DeleteCursorItem(); ClearCursor() end
 		end
+		_G.AutoDelete_DeleteInProgress = false
 		AutoDelete_PerfEnd("DeleteItems/api-delete", _pApi)
 		AutoDelete_PerfCount("DeleteItems/items-deleted", 1)
 		BumpStat("itemsDeleted", 1)
@@ -3890,8 +4556,9 @@ function _G.AutoDelete_DrainDeleteQueue(now)
 			_G.AutoDelete_RecordDecision({
 				itemName = entry.name,
 				itemId = entry.id,
-				action = "deleted",
-				reason = entry.keepOne and "KeepOne extra unit(s) deleted"
+						action = "deleted",
+						quantity = entry.keepOne and entry.keepOneUnits or entry.count or 1,
+						reason = entry.keepOne and "KeepOne extra unit(s) deleted"
 					or (entry.keepStack and "KeepStack extra stack deleted")
 					or (entry.singleAffix and "KeepOne Missing Affix extra item deleted")
 					or "Queued delete executed",
@@ -4136,6 +4803,17 @@ local GEAR_SLOTS = {
 	INVTYPE_HOLDABLE = true, INVTYPE_RELIC = true,
 }
 
+-- Affixes are item effects, not a generic suffix match. Restrict the
+-- name/tooltip classifier to real equippable armor or weapons so ordinary
+-- items such as "Tabard of Fury" cannot inherit a dot merely because Fury
+-- is also the name of a learned affix.
+function _G.AutoDelete_IsAffixEligibleItem(link)
+	if not link then return false end
+	local _, _, _, _, _, itemClass, _, _, equipSlot = GetItemInfo(link)
+	if itemClass ~= "Armor" and itemClass ~= "Weapon" then return false end
+	return equipSlot and GEAR_SLOTS[equipSlot] == true or false
+end
+
 -- "Weapon" for the BoE weapons iLvl range covers anything a Hands/Weapon
 -- affix can be applied to on PE: main-hand, off-hand, two-handers, shields,
 -- off-hand holdables (tomes, orbs), ranged (bows), ranged-right (guns,
@@ -4247,13 +4925,13 @@ _G.AutoDelete_TooltipCache = _G.AutoDelete_TooltipCache or {
 -- AutoDelete_ExtractAffixLevel) changes between addon builds, cached values from
 -- prior loads can disagree with what the new code would produce
 -- (e.g. an item that used to cache as `true` boolean now needs to be
--- 1-4; an item that used to cache at the wrong level under an Arabic-
--- only parser needs to re-classify under the Roman-numeral parser).
+-- represented by a tier, or an item cached under an older parser). The
+-- parser must re-classify it under the Roman-numeral parser.
 -- /reload only re-runs this file, it doesn't drop the global table,
 -- so we drop the affected sub-cache here when the version doesn't
 -- match. Bump _CACHE_VERSION whenever parsing semantics change.
 do
-	local _CACHE_VERSION = 10
+	local _CACHE_VERSION = 11
 	if _G.AutoDelete_TooltipCache._cacheVersion ~= _CACHE_VERSION then
 		_G.AutoDelete_TooltipCache.affix     = {}
 		_G.AutoDelete_TooltipCache.affixName = {}
@@ -4379,24 +5057,36 @@ function _G.AutoDelete_ScanBagItemMarkers(bag, slot, link)
 		end
 	end
 	boeTip:Hide()
-	-- Determine affix tier. The @affix@ tooltip markers tell us an item
-	-- HAS an affix, but the actual tier (I-V) is encoded as a trailing
-	-- Roman numeral on the item NAME. If the marker is hidden/missing,
-	-- fall back to PE's known affix names so learned affixes still obey
-	-- No Auto-Sell tier protection.
+	-- Determine affix tier. PEE's server-fed affix-name mirror is the
+	-- authoritative source for hidden bag scans: the addon docs note that
+	-- SetBagItem/SetInventoryItem tooltips do not guarantee raw @affix@
+	-- markers. The marker remains a fallback for items not yet represented
+	-- in the mirror (for example, before the learned-affix packet arrives).
 	local itemName = GetItemInfo(link)
 	_G.AutoDelete_TooltipCache.affixName[link] = tooltipName or itemName
 	local affixLevel = false
-	if hasAffixMarker then
-		affixLevel = AutoDelete_ExtractAffixLevel(itemName) or 1
+	local affixEligible = not _G.AutoDelete_IsAffixEligibleItem
+		or _G.AutoDelete_IsAffixEligibleItem(link)
+	local knownAffixLevel = affixEligible and AutoDelete_ExtractKnownAffixLevel(itemName) or nil
+	if knownAffixLevel then
+		affixLevel = knownAffixLevel
 		if _G.AutoDelete_DebugSell then
 			print(string.format(
-				"|cffff8000[AutoDelete DEBUG]|r affix-marker found: name='%s' -> tier=%d",
-				tostring(itemName), affixLevel))
+				"|cffff8000[AutoDelete DEBUG]|r affix-name mirror: name='%s' -> tier=%d%s",
+				tostring(itemName), affixLevel,
+				hasAffixMarker and " (marker also present)" or ""))
+		end
+	elseif hasAffixMarker then
+		if affixEligible then
+			affixLevel = AutoDelete_ExtractAffixLevel(itemName) or 1
+			if _G.AutoDelete_DebugSell then
+				print(string.format(
+					"|cffff8000[AutoDelete DEBUG]|r affix-marker found: name='%s' -> tier=%d",
+					tostring(itemName), affixLevel))
+			end
 		end
 	else
-		affixLevel = AutoDelete_ExtractKnownAffixLevel(itemName) or false
-		if not affixLevel and _G.AutoDelete_GetWeaponProcAffixKeyForSlot
+		if affixEligible and not affixLevel and _G.AutoDelete_GetWeaponProcAffixKeyForSlot
 			and _G.AutoDelete_GetWeaponProcAffixKeyForSlot(bag, slot, link) then
 			affixLevel = 1
 		end
@@ -4515,48 +5205,15 @@ function _G.AutoDelete_GetRecipeBindState(bag, slot)
 	return "boe"
 end
 
--- Affix Protection: PE wraps server-set affix tooltip lines with literal
--- @affix@TEXT@affix@ markers. Reuses the same scan-tooltip pattern as
--- IsBindOnEquip. Returns true if any tooltip line on the given bag slot
--- contains the @affix@ marker.
+-- Affix Protection uses the same hidden scan tooltip as the BoE and
+-- soulbound checks. PEE documents that @affix@ markers are guaranteed in
+-- visible GameTooltip/ItemRefTooltip text, but may be absent from hidden
+-- SetBagItem/SetInventoryItem scans. The combined scan therefore records
+-- marker presence only as a compatibility fallback; classification prefers
+-- the server-fed name mirror and its trailing Roman tier (I-VI).
 --
--- Tooltip compatibility: this uses our custom-named tooltip frame
--- (AutoDelete_BoETip), not GameTooltip or ItemRefTooltip. Standard tooltip
--- recolor hooks target the two standard
--- named tooltips by reference, so they do NOT modify our scan tooltip's
--- text. The raw @affix@ markers pass through untouched. PE's own affix
--- detection uses this exact pattern (extraction.lua: EbonholdAffixScanTooltip)
--- so if it works for them in any configuration, it works for us too.
---
--- Defense in depth: we scan BOTH the left and right text columns and
--- emit a debug print when /del debug is active so the user can verify
--- the scan is finding what it should.
--- Extract the affix level (1-4) from a tooltip line that contains the
--- @affix@TEXT@affix@ marker pair. PE encodes the level as a Roman
--- numeral inside the markers: `@affix@I@affix@` / `@affix@II@affix@` /
--- `@affix@III@affix@` / `@affix@IV@affix@`. Returns the level on hit,
--- or 1 (default to white/lowest tier) if the markers are present but
--- no parseable level is found. Returns false if no marker pair on the
--- line at all.
---
--- Color mapping for AutoDelete_SetButtonAffixDot:
---   1 -> white (#FFFFFF)   common-tier affix    (Roman "I")
---   2 -> green (#1EFF00)   uncommon-tier affix  (Roman "II")
---   3 -> blue  (#0070DD)   rare-tier affix      (Roman "III")
---   4 -> purple(#A335EE)   epic-tier affix      (Roman "IV")
---
--- Robustness:
---   * Whitespace inside the markers is tolerated via a trim-then-exact
---     check on the inner string.
---   * If the inner content has extra text around the numeral (some PE
---     builds wrap it as "Tier II" or "Rank IV"), we fall back to a
---     longest-first substring search. Longest-first matters: "III"
---     contains "II" contains "I" as substrings, so searching shorter
---     numerals first would misclassify higher tiers as lower ones.
---   * Arabic digit fallback (1-4) is kept for forward compatibility in
---     case a future PE build switches encoding.
---   * Last resort: markers present but no numeral parsed -> level 1.
--- Extract the affix tier (1-5) from an item NAME.
+-- The dot color mapping is kept below next to the renderer's palette.
+-- Extract the affix tier (1-6) from an item NAME.
 --
 -- PE encodes the affix tier as a trailing Roman numeral on the item
 -- name (NOT inside the @affix@ tooltip markers -- those wrap the
@@ -4569,13 +5226,13 @@ end
 --   "Lola's Lifegiving Branch of Iron Will III"       -> 3
 --   "Hydra-fang Necklace of Cold II"                  -> 2
 --   "Milan's Mastercraft Band of Block IV"            -> 4
---   (PE supports up to V too -- "Foo of Bar V" -> 5)
+--   (PE supports Tier VI too -- "Foo of Bar VI" -> 6)
 --
--- Returns 1-5 if a trailing Roman is present, nil otherwise. The
+-- Returns 1-6 if a trailing Roman is present, nil otherwise. The
 -- caller (ScanBagItemMarkers) decides what to do with a nil result
 -- when an affix marker IS present on the item -- currently defaults
 -- to tier 1 so the dot still renders.
-local AFFIX_ROMAN_TO_NUM = { i = 1, ii = 2, iii = 3, iv = 4, v = 5 }
+local AFFIX_ROMAN_TO_NUM = { i = 1, ii = 2, iii = 3, iv = 4, v = 5, vi = 6 }
 function _G.AutoDelete_ExtractAffixLevel(itemName)
 	if not itemName then return nil end
 	-- Lowercase + match a trailing Roman numeral run anchored at end of
@@ -4834,6 +5491,20 @@ function _G.AutoDelete_RefreshOwnedAffixes()
 	_G.AutoDelete_KnownAffixes = known
 	_G.AutoDelete_OwnedAffixCount = count
 	_G.AutoDelete_OwnedAffixAliasVersion = _G.AutoDelete_AffixAliasVersionCurrent
+	-- A bag may have been scanned before the server packet arrived. Drop
+	-- cached false/old-tier decisions so the new mirror can classify those
+	-- links (including newly introduced Tier VI names) immediately.
+	if _G.AutoDelete_TooltipCache then
+		_G.AutoDelete_TooltipCache.affix = {}
+	end
+	-- The deferred dot renderer keeps a second per-link cache. Clear that
+	-- table in place as well; its local alias is created later in the file,
+	-- so replacing the table here would leave the renderer holding stale data.
+	if _G.AutoDelete_AffixLinkCache then
+		for link in pairs(_G.AutoDelete_AffixLinkCache) do
+			_G.AutoDelete_AffixLinkCache[link] = nil
+		end
+	end
 	if _G.AutoDelete_DebugSell then
 		print(string.format(
 			"|cffff8000[AutoDelete DEBUG]|r owned-affix map rebuilt: %d learned affixes mirrored from server (alias expansion included).",
@@ -4928,13 +5599,18 @@ function _G.AutoDelete_GetMissingAffixColorLabel(profile)
 end
 
 local function HasAffix(bag, slot)
-	-- Phase D cache: @affix@ marker is server-attached to a specific item
-	-- instance and never changes mid-session. itemLink is a stable per-
-	-- instance key. Cache value: 1-4 on affix hit (carries level for the
+	-- Phase D cache: affix classification is server/name-backed (with a
+	-- marker fallback) for a specific item instance and never changes
+	-- mid-session. itemLink is a stable per-
+	-- instance key. Cache value: 1-6 on affix hit (carries level for the
 	-- dot renderer), false on miss. Skip cache when debug is on so every
 	-- call dumps fresh tooltip lines.
 	local debug = _G.AutoDelete_DebugSell
 	local link = GetContainerItemLink(bag, slot)
+	if link and _G.AutoDelete_IsAffixEligibleItem
+		and not _G.AutoDelete_IsAffixEligibleItem(link) then
+		return false
+	end
 	if link and not debug then
 		local cached = _G.AutoDelete_TooltipCache.affix[link]
 		if cached ~= nil then return cached end
@@ -4974,23 +5650,28 @@ local function HasAffix(bag, slot)
 		end
 		boeTip:Hide()
 		local foundLevel = false
-		if hasAffixMarker then
-			local itemName = link and GetItemInfo(link) or nil
+		local itemName = link and GetItemInfo(link) or nil
+		local knownLevel = AutoDelete_ExtractKnownAffixLevel(itemName)
+		if knownLevel then
+			foundLevel = knownLevel
+			print(string.format(
+				"|cffff8000[AutoDelete DEBUG]|r HasAffix bag=%d slot=%d lines=%d name='%s' level=%d (known-affix name mirror)%s",
+				bag, slot, n, tostring(itemName), foundLevel,
+				hasAffixMarker and " + @affix@ marker" or ""))
+		elseif hasAffixMarker then
 			foundLevel = AutoDelete_ExtractAffixLevel(itemName) or 1
 			print(string.format(
 				"|cffff8000[AutoDelete DEBUG]|r HasAffix bag=%d slot=%d lines=%d name='%s' level=%d%s",
 				bag, slot, n, tostring(itemName), foundLevel,
 				foundLine and (" | " .. foundLine) or ""))
 		else
-			local itemName = link and GetItemInfo(link) or nil
-			foundLevel = AutoDelete_ExtractKnownAffixLevel(itemName) or false
 			if not foundLevel and link and _G.AutoDelete_GetWeaponProcAffixKeyForSlot
 				and _G.AutoDelete_GetWeaponProcAffixKeyForSlot(bag, slot, link) then
 				foundLevel = 1
 			end
 			if foundLevel then
 				print(string.format(
-					"|cffff8000[AutoDelete DEBUG]|r HasAffix bag=%d slot=%d lines=%d name='%s' level=%d (known-affix name fallback)",
+					"|cffff8000[AutoDelete DEBUG]|r HasAffix bag=%d slot=%d lines=%d name='%s' level=%d (weapon-proc fallback)",
 					bag, slot, n, tostring(itemName), foundLevel))
 			else
 				print(string.format(
@@ -5035,19 +5716,32 @@ end
 do
 
 -- HasAffix variant for items NOT in bags (Delete / Sell list entries the
--- user added but isn't currently holding). SetHyperlink shows the item
--- template tooltip, which still gets PE's server-injected @affix@ line
--- because the marker is on the item record. Cheap one-shot scan.
+-- user added but isn't currently holding). Prefer the server-fed name
+-- mirror; use the item-template marker only as a compatibility fallback
+-- when that packet does not contain the item yet.
 local function HasAffixByLink(link)
 	if not link then return false end
+	if _G.AutoDelete_IsAffixEligibleItem
+		and not _G.AutoDelete_IsAffixEligibleItem(link) then
+		return false
+	end
 	-- Phase D cache: same store as the bag-slot variant. Cache value:
-	-- 1-4 on hit (tier), false on miss.
+	-- 1-6 on hit (tier), false on miss.
 	local cached = _G.AutoDelete_TooltipCache.affix[link]
 	if cached ~= nil then return cached end
-	-- Scan the item-template tooltip for the @affix@ marker. We only
-	-- need to detect PRESENCE here; the actual tier comes from the
-	-- item name (PE encodes it as a trailing Roman numeral). See
-	-- AutoDelete_ExtractAffixLevel for the name-parsing details.
+	-- Prefer the server-fed name mirror before scanning. PEE's hidden
+	-- SetHyperlink/SetBagItem tooltip path does not guarantee raw @affix@
+	-- markers, while the mirror contains all names in the learned-affix
+	-- packet (including newly added tiers).
+	local itemName = GetItemInfo(link)
+	local knownLevel = AutoDelete_ExtractKnownAffixLevel(itemName)
+	if knownLevel then
+		_G.AutoDelete_TooltipCache.affix[link] = knownLevel
+		return knownLevel
+	end
+	-- Marker scan is the fallback for item templates not yet represented in
+	-- the server mirror. We only need to detect PRESENCE here; the actual
+	-- tier comes from the item name (trailing Roman numeral).
 	boeTip:Hide()
 	boeTip:SetOwner(boeTipOwner, "ANCHOR_NONE")
 	boeTip:ClearLines()
@@ -5070,11 +5764,9 @@ local function HasAffixByLink(link)
 		end
 	end
 	boeTip:Hide()
-	local itemName = GetItemInfo(link)
 	if not hasAffixMarker then
-		local fallbackLevel = AutoDelete_ExtractKnownAffixLevel(itemName) or false
-		_G.AutoDelete_TooltipCache.affix[link] = fallbackLevel
-		return fallbackLevel
+		_G.AutoDelete_TooltipCache.affix[link] = false
+		return false
 	end
 	-- Marker present: resolve the tier from the item name. Default to
 	-- tier 1 if the name has no trailing Roman numeral (still better
@@ -5198,7 +5890,7 @@ local function ScanLearnedAffixes(requestFresh)
 				end
 				local key = string.lower(base)
 				local tier = AutoDelete_ExtractAffixLevel(entry.name) or tonumber(entry.difficulty) or 0
-				if tier < 1 or tier > 5 then tier = 1 end
+				if tier < 1 or tier > 6 then tier = 1 end
 				local family = families[key]
 				if not family then
 					family = {
@@ -5318,16 +6010,17 @@ end  -- end of audit `do` block
 -- Affix dot indicator on bag slot buttons
 -- ============================================================================
 -- Affix-level marker in the bottom-left of every bag slot that contains
--- an affixed item. Color encodes the affix level (1-4) using the WoW
+-- an affixed item. Color encodes the affix level (1-6) using the WoW/PE
 -- item-quality palette so the dot reads the same way as item borders:
---   1 white (common), 2 green (uncommon), 3 blue (rare), 4 purple (epic).
+--   1 white, 2 green, 3 blue, 4 purple, 5 orange, 6 red (PE Tier VI).
 --
 -- Cache by item LINK so we don't run a tooltip scan every time
 -- ContainerFrame_Update fires (which is often). When an item moves
 -- between slots its link is unchanged, so we get a cache hit. When the
 -- slot empties or holds a different item, the new link triggers a fresh
--- HasAffix scan. Cache stores the level (1-4) on hit, false on miss.
-local affixLinkCache = {}
+-- HasAffix scan. Cache stores the level (1-6) on hit, false on miss.
+_G.AutoDelete_AffixLinkCache = _G.AutoDelete_AffixLinkCache or {}
+local affixLinkCache = _G.AutoDelete_AffixLinkCache
 
 -- ============================================================================
 -- Deferred affix-scan queue
@@ -5435,6 +6128,11 @@ end
 
 local function ClassifyAffixByLink(link, bag, slot, button)
 	if not link then return false end
+	if _G.AutoDelete_IsAffixEligibleItem
+		and not _G.AutoDelete_IsAffixEligibleItem(link) then
+		affixLinkCache[link] = false
+		return false
+	end
 	local cached = affixLinkCache[link]
 	if cached ~= nil then return cached end
 	-- Cache miss. If the caller passed a button (= dot-rendering path),
@@ -5454,7 +6152,7 @@ end
 
 -- Color table indexed by affix level. Values are the standard WoW item-
 -- quality RGB tints so a player who already reads quality borders
--- instinctively understands the dot color. Levels outside 1-5 fall back
+-- instinctively understands the dot color. Levels outside 1-6 fall back
 -- to level 1 (white) -- safe default for unrecognized PE name formats.
 -- Tier 5 is rare on PE but supported; coloring it WoW-legendary orange
 -- (#FF8000) matches PE's own affix-tier conventions in extraction.lua.
@@ -5464,6 +6162,7 @@ local AFFIX_DOT_COLORS = {
 	[3] = { 0.00, 0.44, 0.87 },   -- #0070DD blue    (rare)
 	[4] = { 0.64, 0.21, 0.93 },   -- #A335EE purple  (epic)
 	[5] = { 1.00, 0.50, 0.00 },   -- #FF8000 orange  (legendary)
+	[6] = { 1.00, 0.12, 0.12 },   -- #FF1F1F red     (PE Tier VI)
 }
 -- 9px dot inside a 12px black backing ring. Sizes were 12+16 in v3.19;
 -- shrunk to 9+12 in v3.20 because the larger dot covered too much of
@@ -5559,7 +6258,7 @@ local affixDotVersion = 0
 -- Blizzard bag hook and the ElvUI B:UpdateSlot hook share one logic
 -- path. Returns (affixLevel, colorOverride) suitable for direct pass
 -- into AutoDelete_SetButtonAffixDot:
---   * affixLevel = 1-5 or false (false hides the dot)
+--   * affixLevel = 1-6 or false (false hides the dot)
 --   * colorOverride = nil (use tier color from AFFIX_DOT_COLORS) or
 --     a {r,g,b} table forcing a specific color
 --
@@ -6009,6 +6708,7 @@ _G.AutoDelete_AffixTierProtectionFields = {
 	[3] = "protectAffixTier3",
 	[4] = "protectAffixTier4",
 	[5] = "protectAffixTier5",
+	[6] = "protectAffixTier6",
 }
 
 function _G.AutoDelete_HasAnyAffixTierProtection(profile)
@@ -7301,6 +8001,9 @@ local function SellItems(silent)
 						end
 						-- Flag this call so the UseContainerItem hook skips
 						-- (we record the BumpStat directly below).
+						if _G.AutoDelete_RecordMerchantOwnedSale then
+							_G.AutoDelete_RecordMerchantOwnedSale(itemLink, itemCount or 1)
+						end
 						autoDeleteSelling = true
 						UseContainerItem(bag, slot)
 						autoDeleteSelling = false
@@ -7317,6 +8020,7 @@ local function SellItems(silent)
 								itemName = name,
 								itemId = itemId,
 								action = "sold",
+								quantity = itemCount or 1,
 								reason = "Vendor sale executed",
 								sourceRule = (sellReason == "list" and "Sell list")
 									or (sellReason == "knownRecipe" and "Sell Filters: Sell Known Recipes")
@@ -8890,17 +9594,6 @@ end
 -- Public-ish accessors (used by the Options UI refresh code and the scan).
 local function CharacterCanDisenchant() return cachedDisenchantKnown end
 
--- iLvl floors for Disenchant. Items below the floor for their quality
--- cannot be disenchanted on the live 3.3.5a client; targeting them just
--- wastes a keypress. Numbers are conservative (Blizzard's published values).
--- These are used when the profile's disenchantIlvlMin is 0 (the default,
--- meaning "use the mechanical floor"); a non-zero profile value overrides
--- the per-quality default with a single global floor.
-local DE_UNCOMMON_FLOOR = 5
-local DE_RARE_FLOOR     = 55
-local DE_EPIC_FLOOR     = 95
--- Upper bounds left open; the spell handles "above max" by refusing to cast.
-
 -- Returns true if (bag, slot) holds an item that the disenchant macro
 -- should target, given the current profile. Caller is responsible for
 -- the disenchantEnabled gate and the CharacterCanDisenchant check.
@@ -8928,32 +9621,22 @@ function _G.AutoDelete_IsDisenchantable_IgnoringKeep(profile, bag, slot)
 	-- matches the live game strings exactly.
 	if itemType ~= "Armor" and itemType ~= "Weapon" then return false end
 
-	-- Quality gate. Each tier has its own toggle and its own mechanical
-	-- iLvl floor; the profile's disenchantIlvlMin overrides the floor when
-	-- set, disenchantIlvlMax adds an optional ceiling. Both are zero by
-	-- default ("no override / no cap").
+	-- Quality and configured item-level gates. The visible DE range is the
+	-- complete range: no hidden quality-specific minimum is imposed.
 	ilvl = ilvl or 0
-	local effectiveFloor, effectiveCeiling
 	if quality == 2 then
 		if not profile.disenchantUncommon then return false end
-		effectiveFloor = DE_UNCOMMON_FLOOR
 	elseif quality == 3 then
 		if not profile.disenchantRare then return false end
-		effectiveFloor = DE_RARE_FLOOR
 	elseif quality == 4 then
 		if not profile.disenchantEpic then return false end
-		effectiveFloor = DE_EPIC_FLOOR
 	else
 		return false
 	end
-	-- Profile-level overrides. Non-zero values replace the per-quality floor
-	-- or impose a ceiling; zero leaves the default behavior intact.
-	local floorOverride = tonumber(profile.disenchantIlvlMin) or 0
-	if floorOverride > 0 then effectiveFloor = floorOverride end
-	local ceilingOverride = tonumber(profile.disenchantIlvlMax) or 0
-	if ceilingOverride > 0 then effectiveCeiling = ceilingOverride end
+	local effectiveFloor = tonumber(profile.disenchantIlvlMin) or 0
+	local effectiveCeiling = tonumber(profile.disenchantIlvlMax) or 0
 	if ilvl < effectiveFloor then return false end
-	if effectiveCeiling and ilvl > effectiveCeiling then return false end
+	if effectiveCeiling > 0 and ilvl > effectiveCeiling then return false end
 
 	-- Bind-state gate. An item in the player's bags is in exactly one of
 	-- three states for our purposes:
@@ -9601,6 +10284,40 @@ function _G.AutoDelete_IsProcessIgnoreAction(action)
 	return action == "disenchant" or action == "mill" or action == "prospect"
 end
 
+function _G.AutoDelete_BuildProcessRuleContext(profile)
+	local deleteNames, deleteIDs = BuildWantedSets(profile.listText, "delete-list")
+	local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
+	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
+	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
+	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
+	return {
+		deleteNames = deleteNames,
+		deleteIDs = deleteIDs,
+		sellNames = sellNames,
+		sellIDs = sellIDs,
+		keepNames = keepNames,
+		keepIDs = keepIDs,
+		keepOneIDs = keepOneIDs,
+		keepStackIDs = keepStackIDs,
+		keepOneSeenUnits = {},
+		singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames),
+	}
+end
+
+-- Sell is contextual: a sell-matching item may also remain independently
+-- available to One-Key Disenchant. This helper evaluates only the DE side.
+function _G.AutoDelete_GetDisenchantProcessMatch(profile, bag, slot, link, ignored, ruleCtx)
+	if not profile or not profile.disenchantEnabled or not CharacterCanDisenchant() or ignored then return nil end
+	ruleCtx = ruleCtx or _G.AutoDelete_BuildProcessRuleContext(profile)
+	if not _G.AutoDelete_IsDisenchantable(profile, bag, slot,
+		ruleCtx.singleAffixPlan, ruleCtx.keepIDs, ruleCtx.keepNames,
+		ruleCtx.keepOneIDs, ruleCtx.keepStackIDs) then
+		return nil
+	end
+	local name = GetItemInfo(link)
+	return "disenchant", "Eligible for disenchant", "One-Key Disenchant", name, true
+end
+
 function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignored, ruleCtx)
 	local name, _, itemQuality, ilvl, _, itemClass, itemSubType, _, equipSlot, _, vendorPrice = GetItemInfo(link)
 	local isQuestItem = (itemClass == "Quest")
@@ -9794,7 +10511,7 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 	local isMillable       = _G.AutoDelete_IsMillable
 	local isProspectable   = _G.AutoDelete_IsProspectable
 	local isOpenable       = _G.AutoDelete_IsOpenable
-	if not ignored then
+	if profile.disenchantEnabled and CharacterCanDisenchant() and not ignored then
 		if isDisenchantableIgnoringKeep and isDisenchantableIgnoringKeep(profile, bag, slot) then
 			local deProtected, deProtectReason = false, nil
 			if _G.AutoDelete_IsDestructiveRuleProtected then
@@ -9815,7 +10532,11 @@ function _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignore
 		end
 		if isDisenchantable and isDisenchantable(profile, bag, slot, singleAffixPlan, keepIDs, keepNames, keepOneIDs, keepStackIDs) then
 			return "disenchant", "Eligible for disenchant", "One-Key Disenchant", name, true
-		elseif isMillable and isMillable(profile, bag, slot) then
+		end
+	end
+
+	if not ignored then
+		if isMillable and isMillable(profile, bag, slot) then
 			return "mill", "Eligible for milling", "One-Key Mill", name, true
 		elseif isProspectable and isProspectable(profile, bag, slot) then
 			return "prospect", "Eligible for prospecting", "One-Key Prospect", name, true
@@ -9839,30 +10560,46 @@ end
 --   { bag, slot, itemId, link, name, action, count, variantNames }
 -- action is one of the keys in PROCESS_ACTIONS. Returned rows are deduped by
 -- action + itemId because PE affix names can differ while the base item ID is
--- the same. The first matching slot is used for arming; after that item is
--- processed, a refresh can surface the next matching copy.
+-- the same. A Sell match may also produce a separate DE row because vendor
+-- selling and One-Key Disenchant are independent. The first matching slot is
+-- used for arming; after that item is processed, a refresh can surface the
+-- next matching copy.
+function _G.AutoDelete_AddProcessScanEntry(results, seen, bag, slot, id, link, action, reason, sourceRule, name, processAction, overlap)
+	if not action then return end
+	local key = action .. ":" .. tostring(id)
+	if action == "kept" then key = key .. ":" .. tostring(reason) .. ":" .. tostring(sourceRule) end
+	local existing = seen[key]
+	if existing then
+		existing.count = (existing.count or 1) + 1
+		if overlap then existing.overlapCount = (existing.overlapCount or 0) + 1 end
+		if name ~= "?" and Normalize(name) ~= Normalize(existing.name) then
+			existing.variantNames = true
+		end
+		return
+	end
+	local entry = {
+		bag = bag,
+		slot = slot,
+		itemId = id,
+		link = link,
+		name = name or "?",
+		action = action,
+		reason = reason,
+		sourceRule = sourceRule,
+		processAction = processAction,
+		overlapCount = overlap and 1 or 0,
+		count = 1,
+	}
+	seen[key] = entry
+	table.insert(results, entry)
+end
+
 local function ProcessScan(profile)
 	local results = {}
 	if not profile then return results end
 	local ignored = GetProcessIgnoredTable()
 	local seen = {}
-	local deleteNames, deleteIDs = BuildWantedSets(profile.listText, "delete-list")
-	local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
-	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
-	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
-	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
-	local ruleCtx = {
-		deleteNames = deleteNames,
-		deleteIDs = deleteIDs,
-		sellNames = sellNames,
-		sellIDs = sellIDs,
-		keepNames = keepNames,
-		keepIDs = keepIDs,
-		keepOneIDs = keepOneIDs,
-		keepStackIDs = keepStackIDs,
-		keepOneSeenUnits = {},
-	}
-	ruleCtx.singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
+	local ruleCtx = _G.AutoDelete_BuildProcessRuleContext(profile)
 
 	for bag = 0, NUM_BAG_SLOTS do
 		local slots = GetContainerNumSlots(bag) or 0
@@ -9873,31 +10610,15 @@ local function ProcessScan(profile)
 				if id then
 					local action, reason, sourceRule, name, processAction =
 						_G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, ignored[id], ruleCtx)
-					if action then
-						local key = action .. ":" .. tostring(id)
-						if action == "kept" then key = key .. ":" .. tostring(reason) .. ":" .. tostring(sourceRule) end
-						local existing = seen[key]
-						if existing then
-							existing.count = (existing.count or 1) + 1
-							if name ~= "?" and Normalize(name) ~= Normalize(existing.name) then
-								existing.variantNames = true
-							end
-						else
-							local entry = {
-							bag    = bag,
-							slot   = slot,
-							itemId = id,
-							link   = link,
-							name   = name or "?",
-							action = action,
-							reason = reason,
-							sourceRule = sourceRule,
-							processAction = processAction,
-							count  = 1,
-							}
-							seen[key] = entry
-							table.insert(results, entry)
-						end
+					_G.AutoDelete_AddProcessScanEntry(results, seen, bag, slot, id, link,
+						action, reason, sourceRule, name, processAction)
+					-- Sell is the only cleanup action that may coexist with a
+					-- one-key action. Keep the Sell row and add a separate DE row.
+					if action == "sell" then
+						local deAction, deReason, deRule, deName, deProcessAction =
+							_G.AutoDelete_GetDisenchantProcessMatch(profile, bag, slot, link, ignored[id], ruleCtx)
+						_G.AutoDelete_AddProcessScanEntry(results, seen, bag, slot, id, link,
+							deAction, deReason, deRule, deName, deProcessAction, true)
 					end
 				end
 			end
@@ -9912,27 +10633,19 @@ function _G.AutoDelete_EvaluateCurrentProcessSlot(profile, bag, slot)
 	if not link then return nil end
 	local id = GetItemIDFromLink(link)
 	if not id then return nil end
-	local deleteNames, deleteIDs = BuildWantedSets(profile.listText, "delete-list")
-	local sellNames, sellIDs = BuildWantedSets(profile.sellListText, "sell-list")
-	local keepNames, keepIDs = BuildWantedSets(profile.whitelistText, "keep-list")
-	local keepOneIDs = select(2, BuildWantedSets(profile.keepOneText, "keepone-list"))
-	local keepStackIDs = select(2, BuildWantedSets(profile.keepStackText, "keepstack-list"))
-	local ruleCtx = {
-		deleteNames = deleteNames,
-		deleteIDs = deleteIDs,
-		sellNames = sellNames,
-		sellIDs = sellIDs,
-		keepNames = keepNames,
-		keepIDs = keepIDs,
-		keepOneIDs = keepOneIDs,
-		keepStackIDs = keepStackIDs,
-		keepOneSeenUnits = {},
-		singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames),
-	}
+	local ruleCtx = _G.AutoDelete_BuildProcessRuleContext(profile)
 	return _G.AutoDelete_EvaluateProcessEntry(profile, bag, slot, link, id, IsProcessIgnored(id), ruleCtx)
 end
 
 function _G.AutoDelete_ProcessSlotMatchesAction(profile, action, bag, slot)
+	if action == "disenchant" then
+		local link = GetContainerItemLink(bag, slot)
+		local id = link and GetItemIDFromLink(link) or nil
+		if not link or not id then return false, "Item is no longer in that bag slot" end
+		local deAction, reason = _G.AutoDelete_GetDisenchantProcessMatch(
+			profile, bag, slot, link, IsProcessIgnored(id))
+		return deAction == "disenchant", reason
+	end
 	local currentAction, reason, _, _, processAction = _G.AutoDelete_EvaluateCurrentProcessSlot(profile, bag, slot)
 	return currentAction == action and processAction == true, reason
 end
@@ -9944,7 +10657,7 @@ local function ProcessScanCounts(profile)
 	local counts = { total = 0, copies = 0, delete = 0, sell = 0, disenchant = 0, mill = 0, prospect = 0, open = 0, kept = 0 }
 	for _, entry in ipairs(ProcessScan(profile)) do
 		counts.total = counts.total + 1
-		counts.copies = counts.copies + (entry.count or 1)
+		counts.copies = counts.copies + math.max(0, (entry.count or 1) - (entry.overlapCount or 0))
 		counts[entry.action] = (counts[entry.action] or 0) + 1
 	end
 	return counts
@@ -9973,12 +10686,11 @@ local function ProcessArm(action, bag, slot)
 	if bag and slot then
 		local db = GetDB()
 		local profile = select(1, GetActiveProfile(db))
-		local currentAction, currentReason, _, _, processAction
-		if profile and link then
-			currentAction, currentReason, _, _, processAction =
-				_G.AutoDelete_EvaluateCurrentProcessSlot(profile, bag, slot)
+		local matchesAction, currentReason = false, nil
+		if profile and link and _G.AutoDelete_ProcessSlotMatchesAction then
+			matchesAction, currentReason = _G.AutoDelete_ProcessSlotMatchesAction(profile, action, bag, slot)
 		end
-		if currentAction ~= action or not processAction then
+		if not matchesAction then
 			return false, currentReason or "blocked"
 		end
 	end
@@ -10347,11 +11059,11 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 	table.insert(lines, "")
 	table.insert(lines, "Affix dot:")
 	if not bag or not slot or not itemLink then
-		table.insert(lines, "  Unknown. Item must be in a bag slot to scan tooltip markers.")
+		table.insert(lines, "  Unknown. Item must be in a bag slot to classify its affix.")
 	else
 		local tier = ClassifyAffixByLink(itemLink, bag, slot, nil)
 		if not tier then
-			table.insert(lines, "  Hidden. No @affix@ marker found.")
+			table.insert(lines, "  Hidden. No @affix@ marker or server-known affix name matched.")
 		elseif cachedProfile and cachedProfile.showAffixDot == false then
 			table.insert(lines, "  Hidden. Show affix dot is off.")
 		else
@@ -10402,7 +11114,6 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 					table.insert(lines, "  Grouped copies: " .. tostring(entry.count) .. " share this item ID.")
 				end
 				found = true
-				break
 			end
 		end
 	end
@@ -10420,7 +11131,6 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 					table.insert(lines, "  Grouped copies: " .. tostring(entry.count) .. " share this item ID.")
 				end
 				found = true
-				break
 			end
 		end
 	end
@@ -10506,7 +11216,8 @@ function _G.AutoDelete_BuildDiagnosticReport()
 			.. " II=" .. tostring(profile.protectAffixTier2)
 			.. " III=" .. tostring(profile.protectAffixTier3)
 			.. " IV=" .. tostring(profile.protectAffixTier4)
-			.. " V=" .. tostring(profile.protectAffixTier5),
+			.. " V=" .. tostring(profile.protectAffixTier5)
+			.. " VI=" .. tostring(profile.protectAffixTier6),
 		"  Learned affixes mirrored: " .. owned,
 		"",
 		"Process Bags:",
@@ -10525,8 +11236,26 @@ function _G.AutoDelete_BuildDiagnosticReport()
 		"  Perf enabled: " .. tostring(_G.AutoDelete_PerfEnabled),
 		"  Spike debug: " .. tostring(_G.AutoDelete_SpikeDebug),
 		"  ElvUI hook disabled: " .. tostring(_G.AutoDelete_ElvUIHookDisabled),
+		"  Native bag click hook: " .. tostring(_G.AutoDelete_BagAltRightClickHookInstalled or false),
+		"  Modified bag click hook: " .. tostring(_G.AutoDelete_BagAltRightModifiedHookInstalled or false),
 		"  Decision history entries: " .. tostring(decisionCount),
+		"",
+		"External action audit:",
+		"  PEE Scrap confirmations: " .. tostring((_G.AutoDelete_ExternalActionAudit or {}).peeScrapConfirmations or 0),
+		"  External merchant sells: " .. tostring((_G.AutoDelete_ExternalActionAudit or {}).externalMerchantSells or 0),
+		"  External deletes: " .. tostring((_G.AutoDelete_ExternalActionAudit or {}).externalDeletes or 0),
+		"  Merchant audit active: " .. tostring((_G.AutoDelete_MerchantAudit or {}).active or false),
+		"  PEE requests queued: " .. tostring(#((_G.AutoDelete_MerchantAudit or {}).peeRequests or {})),
 	}
+	local lastExternal = _G.AutoDelete_ExternalActionAudit and _G.AutoDelete_ExternalActionAudit.last
+	if lastExternal then
+		table.insert(lines, "  Last external action: " .. tostring(lastExternal.action)
+			.. " | " .. tostring(lastExternal.itemName)
+			.. " | " .. tostring(lastExternal.actor))
+		table.insert(lines, "  Last external reason: " .. tostring(lastExternal.reason))
+	else
+		table.insert(lines, "  Last external action: none recorded this session")
+	end
 	return table.concat(lines, "\n")
 end
 
@@ -11609,6 +12338,7 @@ end
 -- PLAYER_LOGIN        -> print loaded notice, install MerchantFrame.Hide
 --                        wrappers, schedule the post-login ElvUI button
 --                        creation + welcome popup (2s delay)
+-- CHAT_MSG_ADDON      -> learned-affix packet + PEE Scrap sale attribution
 -- BAG_UPDATE          -> request a delete-scan + rewire secure buttons +
 --                        refresh process panel + bag-space warning
 -- BAG_UPDATE_DELAYED  -> request a delete-scan (Wrath: rarely fires; harmless)
@@ -11626,14 +12356,26 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4)
 	if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
 		GetDB()
 		RefreshCachedProfile()
+		if _G.AutoDelete_InstallProjectEbonholdAuditHook then
+			_G.AutoDelete_InstallProjectEbonholdAuditHook()
+		end
 		if _G.AutoDelete_RegisterAffixServerPrefix then
 			_G.AutoDelete_RegisterAffixServerPrefix()
 		end
 		return
 	end
+	if event == "ADDON_LOADED" then
+		-- PEE may load before or after AutoDelete; retry on every addon load.
+		if _G.AutoDelete_InstallProjectEbonholdAuditHook then
+			_G.AutoDelete_InstallProjectEbonholdAuditHook()
+		end
+	end
 	if event == "CHAT_MSG_ADDON" then
 		if _G.AutoDelete_HandleAffixServerMessage then
 			_G.AutoDelete_HandleAffixServerMessage(arg1, arg2, arg3, arg4)
+		end
+		if _G.AutoDelete_HandleProjectEbonholdMessage then
+			_G.AutoDelete_HandleProjectEbonholdMessage(arg1, arg2, arg3, arg4)
 		end
 		return
 	end
@@ -11671,6 +12413,12 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4)
 	end
 	if event == "PLAYER_LOGIN" then
 		RefreshCachedProfile()
+		if _G.AutoDelete_InstallProjectEbonholdAuditHook then
+			_G.AutoDelete_InstallProjectEbonholdAuditHook()
+		end
+		if _G.AutoDelete_CaptureInventoryAuditSnapshot then
+			_G.AutoDelete_CaptureInventoryAuditSnapshot()
+		end
 		print("|cffff8000[AutoDelete]|r loaded. Type |cff00ff00/del|r to configure.")
 		if AutoDelete_RegisterAffixServerPrefix then
 			AutoDelete_RegisterAffixServerPrefix()
@@ -11930,12 +12678,18 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4)
 		-- a BAG_UPDATE. The flag stays true until the post-close grace expires.
 		merchantOpen = true
 		RefreshCachedProfile()
+		if _G.AutoDelete_InstallProjectEbonholdAuditHook then
+			_G.AutoDelete_InstallProjectEbonholdAuditHook()
+		end
 		sellSessionCount = 0
 		sellSessionCopper = 0
 		sellDryTicks = 0
 		-- Snapshot bags so the UseContainerItem hook can identify what the
 		-- player just sold (the slot is empty by the time the hook fires).
 		SnapshotAllBags()
+		if _G.AutoDelete_BeginMerchantAudit then
+			_G.AutoDelete_BeginMerchantAudit()
+		end
 		-- Sample inventory worth BEFORE selling (otherwise we'd always sample
 		-- post-sell bags, underselling the average).
 		SampleInventoryWorth()
@@ -11965,6 +12719,12 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4)
 			local catchupAt = GetTime() + 0.15
 			scanner.nextButtonRefreshAt = catchupAt
 			scanner.nextPanelRefreshAt  = catchupAt
+		end)
+		AfterDelay(MERCHANT_CLOSE_GRACE + 0.25, function()
+			if _G.AutoDelete_MerchantAudit and _G.AutoDelete_MerchantAudit.active
+				and not _G.AutoDelete_MerchantAudit.peePending then
+				_G.AutoDelete_EndMerchantAudit()
+			end
 		end)
 		local hadUnprintedSellSession = sellSessionCount > 0
 		local hadSellSession = hadUnprintedSellSession or _G.AutoDelete_SellSessionHadSalesSinceOpen
@@ -12081,6 +12841,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4)
 	RefreshCachedProfile()
 	RequestScan()
 	local now = GetTime()
+	if not CursorHasItem() then
+		_G.AutoDelete_PendingExternalCursorDelete = nil
+	end
 	-- Burst-quiescence timestamp: the scanner OnUpdate uses this to
 	-- defer DeleteItems while BAG_UPDATEs are still arriving (scav AOE
 	-- loot, mailbox take-all, quest chain rewards). See scanner OnUpdate
@@ -12099,6 +12862,9 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4)
 	if not merchantOpen then
 		scanner.nextButtonRefreshAt = now + 0.15
 		scanner.nextPanelRefreshAt  = now + 0.15
+	end
+	if _G.AutoDelete_CaptureInventoryAuditSnapshot then
+		_G.AutoDelete_CaptureInventoryAuditSnapshot()
 	end
 	-- (Bag-space chat warning removed v3.20. The Goblin Merchant appearing
 	-- IS the visual "bags filling up" signal; the chat print was redundant
@@ -13677,9 +14443,16 @@ function _G.AutoDelete_ResolveBagSlotFromModifiedClickButton(buttonFrame)
 
 	if bag == nil and buttonFrame.GetParent then
 		local parent = buttonFrame:GetParent()
-		if parent and parent.GetID then
-			local ok, value = pcall(parent.GetID, parent)
-			if ok then bag = value end
+		if parent then
+			if parent.GetBagID then
+				local ok, value = pcall(parent.GetBagID, parent)
+				if ok then bag = value end
+			end
+			bag = bag or parent.bagID or parent.BagID or parent.bag or parent.Bag
+			if bag == nil and parent.GetID then
+				local ok, value = pcall(parent.GetID, parent)
+				if ok then bag = value end
+			end
 		end
 	end
 
@@ -13711,8 +14484,15 @@ function _G.AutoDelete_OpenBagAltRightMenu(buttonFrame, mouseButton)
 	local consume, bag, slot, link, itemId = _G.AutoDelete_ShouldConsumeBagAltRight(buttonFrame, mouseButton)
 	if not consume then return false end
 	if _G.AutoDelete_DebugSell then
-		print("|cffff8000[AutoDelete DEBUG]|r Alt+Right menu via ContainerFrameItemButton_OnModifiedClick. link=" .. tostring(link))
+		print("|cffff8000[AutoDelete DEBUG]|r Alt+Right menu via native bag click hook. link=" .. tostring(link))
 	end
+	local now = GetTime and GetTime() or 0
+	if _G.AutoDelete_BagQuickMenuLastItemId == itemId
+		and now - (_G.AutoDelete_BagQuickMenuLastAt or 0) < 0.25 then
+		return true
+	end
+	_G.AutoDelete_BagQuickMenuLastItemId = itemId
+	_G.AutoDelete_BagQuickMenuLastAt = now
 	_G.AutoDelete_ShowItemQuickMenu({ itemId = itemId, link = link, bag = bag, slot = slot })
 	return true
 end
@@ -13767,15 +14547,32 @@ end
 -- wrapper so pure Alt+Right can be consumed before Blizzard falls through to
 -- normal item use. All other clicks call the original dispatcher.
 function _G.AutoDelete_InstallBagAltRightHook()
-	if _G.AutoDelete_BagAltRightHookInstalled then return true end
-	if type(ContainerFrameItemButton_OnModifiedClick) ~= "function" then return false end
-	_G.AutoDelete_Original_ContainerFrameItemButton_OnModifiedClick = ContainerFrameItemButton_OnModifiedClick
-	ContainerFrameItemButton_OnModifiedClick = function(self, button)
-		if _G.AutoDelete_OpenBagAltRightMenu(self, button) then return end
-		return _G.AutoDelete_Original_ContainerFrameItemButton_OnModifiedClick(self, button)
+	local installed = false
+	-- The vanilla bag path can dispatch through OnClick without reaching the
+	-- modified-click helper. Wrap both entry points so ElvUI and Blizzard bags
+	-- receive the same Alt+Right behavior.
+	if not _G.AutoDelete_BagAltRightClickHookInstalled
+		and type(ContainerFrameItemButton_OnClick) == "function" then
+		_G.AutoDelete_Original_ContainerFrameItemButton_OnClick = ContainerFrameItemButton_OnClick
+		ContainerFrameItemButton_OnClick = function(self, button)
+			if _G.AutoDelete_OpenBagAltRightMenu(self, button) then return end
+			return _G.AutoDelete_Original_ContainerFrameItemButton_OnClick(self, button)
+		end
+		_G.AutoDelete_BagAltRightClickHookInstalled = true
 	end
-	_G.AutoDelete_BagAltRightHookInstalled = true
-	return true
+	if not _G.AutoDelete_BagAltRightModifiedHookInstalled
+		and type(ContainerFrameItemButton_OnModifiedClick) == "function" then
+		_G.AutoDelete_Original_ContainerFrameItemButton_OnModifiedClick = ContainerFrameItemButton_OnModifiedClick
+		ContainerFrameItemButton_OnModifiedClick = function(self, button)
+			if _G.AutoDelete_OpenBagAltRightMenu(self, button) then return end
+			return _G.AutoDelete_Original_ContainerFrameItemButton_OnModifiedClick(self, button)
+		end
+		_G.AutoDelete_BagAltRightModifiedHookInstalled = true
+	end
+	installed = _G.AutoDelete_BagAltRightClickHookInstalled
+		or _G.AutoDelete_BagAltRightModifiedHookInstalled
+	_G.AutoDelete_BagAltRightHookInstalled = installed or false
+	return installed
 end
 _G.AutoDelete_InstallBagAltRightHook()
 

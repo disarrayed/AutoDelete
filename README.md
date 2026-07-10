@@ -48,6 +48,7 @@ Quest items are protected from every auto-rule, regardless of list state.
 - ElvUI and Bagnon bag windows can show Delete, Sell, and Keep buttons.
 - Drop an item on a button to add it to that list.
 - Right-click a button to jump to that list's tab.
+- Alt+Right-click works on both Blizzard's native bags and ElvUI bags to open the item quick-action menu.
 
 **Sell rules**
 
@@ -69,18 +70,24 @@ Four independent categories.
 - Cosmetic slots (shirts, tabards) and quest items are always protected
 
 **Affix Protection** (Affix tab)
-- Tier I-V checkboxes protect matching affix tiers before Delete, Sell, or One-Key Disenchant rules
+- Tier I-VI checkboxes protect matching affix tiers before Delete, Sell, or One-Key Disenchant rules
 - "Refresh List" scans your Delete / Sell lists for items the filter would now save
 - "Update Affix List" asks the server for your learned affixes and opens AutoDelete's PEEv1-style affix mirror with Armor, Weapon, and Learned filters, search, family selection, tier icons, descriptions, and learned/locked states. It does not depend on PEE being loaded.
 - **Show/Keep Missing Affix**: only show the affix dot on items whose affixes you haven't learned yet and protect those missing affixes from Delete, Sell, and One-Key Disenchant cleanup.
 - **Missing Affix Color**: choose the dot color for affixes your account has not learned. Defaults to `#ff3b41`.
 - **KeepOne Missing Affix**: protect one gear item for each missing affix from Delete, Sell, and One-Key Disenchant rules. Duplicate missing-affix gear can still clear through normal cleanup rules. It is a toggle, not a list, and learned affixes are ignored.
+- Affix dots are limited to eligible armor/weapon gear slots; cosmetic items such as tabards do not inherit dots from matching names.
 
 **Companion management**
 - Auto-summon Greedy Scavenger and Goblin Merchant
 - **Auto-Close after sell** is on the Pets tab in the Summon Merchant card: checked closes the vendor after AutoDelete finishes selling, unchecked leaves the vendor open.
 - **Only in Combat** gates every automatic Greedy Scavenger summon, including After sell and After vendor close
 - **No Group Summons** blocks automatic Greedy Scavenger and Goblin Merchant summons while you are in a party or raid
+
+**Project Ebonhold Scrap coexistence**
+- PEE's Scrap/Junk Selling module is a separate server-side seller. It does not read AutoDelete's Keep list, affix protection, or Sell/DE decisions.
+- Keep PEE's **Sell EVERYTHING** off, and avoid PEE always-sell rules for gear you protect in AutoDelete. Both sellers can react to the same merchant window.
+- Decision History and `/del report` label PEE Scrap, external merchant, player, and other-addon actions as **not AutoDelete** when they can be attributed. Manual vendor sales are confirmed from a bag delta; PEE confirmations are correlated to request-time Scrap candidates, with a batch-level entry when the server provides no item-level delta.
 - Mount-aware dismiss and re-summon
 - Stuck detection via loot-event tracking
 - Three-state Goblin defer: won't summon until AutoDelete has had a chance to clear bags

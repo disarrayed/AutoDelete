@@ -937,6 +937,7 @@ local DEFAULT_PROFILE = {
 	protectAffixTier3    = false,
 	protectAffixTier4    = false,
 	protectAffixTier5    = false,
+	protectAffixTier6    = false,
 	affixCollectionMode  = false,
 	keepSingleMissingAffix = false,
 	missingAffixColor    = "red",
@@ -1020,12 +1021,14 @@ local function EnsureProfileFields(p)
 		or p.protectAffixTier3 ~= nil
 		or p.protectAffixTier4 ~= nil
 		or p.protectAffixTier5 ~= nil
+		or p.protectAffixTier6 ~= nil
 	if not hasAffixTierProtection and p.protectAffixFromSell == true then
 		p.protectAffixTier1 = true
 		p.protectAffixTier2 = true
 		p.protectAffixTier3 = true
 		p.protectAffixTier4 = true
 		p.protectAffixTier5 = true
+		p.protectAffixTier6 = true
 	end
 
 	if p.qualityActionJunk == nil and (p.autoGray == true or p.autoGray == "delete") then
@@ -1811,7 +1814,10 @@ local function RenderProcessPanelRows()
 	end
 
 	local copies = 0
-	for _, entry in ipairs(results) do copies = copies + (entry.count or 1) end
+	for _, entry in ipairs(results) do
+		local overlapCopies = currentFilter == "all" and (entry.overlapCount or 0) or 0
+		copies = copies + math.max(0, (entry.count or 1) - overlapCopies)
+	end
 	if ignoredCount > 0 then
 		if copies > total then
 			footerCount:SetText(total .. "/" .. allTotal .. " rows (" .. copies .. " copies), " .. ignoredCount .. " ignored")
@@ -1870,15 +1876,16 @@ local AFFIX_LIST_VISIBLE_ROWS = 9
 local AFFIX_LIST_SCROLLBAR_WIDTH = 8
 local AFFIX_LIST_HEIGHT = AFFIX_LIST_ROW_HEIGHT * AFFIX_LIST_VISIBLE_ROWS + AFFIX_LIST_PAD * 2
 local AFFIX_SEARCH_W = SIDE_PANEL_WIDTH - PANEL_INSET * 2
-local TIER_ICON_SIZE = 40
-local TIER_GAP = 8
-local TIER_ROMANS = { "I", "II", "III", "IV", "V" }
+local TIER_ICON_SIZE = 34
+local TIER_GAP = 6
+local TIER_ROMANS = { "I", "II", "III", "IV", "V", "VI" }
 local TIER_COLORS = {
 	[1] = { 1, 1, 1 },
 	[2] = { 0.1, 1.0, 0.1 },
 	[3] = { 0.0, 0.4, 1.0 },
 	[4] = { 0.6, 0.2, 1.0 },
 	[5] = { 1.0, 0.5, 0.0 },
+	[6] = { 1.0, 0.12, 0.12 },
 }
 local TIER_COUNT = #TIER_ROMANS
 local TIER_TOTAL_W = TIER_ICON_SIZE * TIER_COUNT + TIER_GAP * (TIER_COUNT - 1)
@@ -4548,7 +4555,7 @@ local function BuildUI(self)
 				label = "Affix",
 				title = "Affix",
 				sections = {
-					{ icon = "Interface\\Icons\\Spell_Holy_DivineProtection", title = "Affix Protection", body = "No Auto-Sell protects the checked tiers I-V before Delete, Sell, or One-Key Disenchant rules. Keep still wins first. Checked tiers are a hard stop for matching affix items." },
+					{ icon = "Interface\\Icons\\Spell_Holy_DivineProtection", title = "Affix Protection", body = "No Auto-Sell protects the checked tiers I-VI before Delete, Sell, or One-Key Disenchant rules. Keep still wins first. Checked tiers are a hard stop for matching affix items." },
 					{ icon = "Interface\\Icons\\Spell_Nature_WispSplode", title = "Affix Display", body = "Show affix dot marks affixed bag items by tier. The selected missing-affix color means the account has not learned that affix. Show/Keep Missing Affix hides learned affixes and shows only missing-affix dots." },
 					{ icon = "Interface\\Icons\\INV_Misc_Gem_Amethyst_03", title = "KeepOne Missing Affix", body = "Protects one gear item for each missing affix from Delete, Sell, or One-Key Disenchant rules. Duplicate missing-affix gear can still clear through normal cleanup rules. It is a toggle, not a list, and it ignores learned affixes." },
 					{ icon = "Interface\\Icons\\INV_Misc_Spyglass_02", title = "Affix Tools", body = "Refresh List checks your Delete and Sell lists for affixed items and prints what it finds without changing anything. Update Affix List asks the server for learned affixes and opens AutoDelete's server-fed PEEv1-style affix mirror with Armor, Weapon, and Learned filters. Missing Affix Color opens a color picker for affixes your account has not learned." },
@@ -5157,7 +5164,7 @@ local function BuildUI(self)
 	--   Row 1: title
 	--   Row 2: No Auto-Sell label
 	--   Row 3: short explanation
-	--   Row 4: Tier I-V checkboxes in one row
+	--   Row 4: Tier I-VI checkboxes in one row
 	local card2Title = MakeText(aCard1, 11, C_ACCENT, "OUTLINE")
 	card2Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
 	card2Title:SetText("Affix Protection")
@@ -5232,6 +5239,7 @@ local function BuildUI(self)
 		MakeAffixTierToggle("III", "protectAffixTier3", 62),
 		MakeAffixTierToggle("IV",  "protectAffixTier4", 93),
 		MakeAffixTierToggle("V",   "protectAffixTier5", 124),
+		MakeAffixTierToggle("VI",  "protectAffixTier6", 155),
 	}
 
 	-- Affix Tab Card 2: Affix Display (moved from Filters tab in v3.20
@@ -8153,6 +8161,7 @@ local function BuildUI(self)
 			self._tglAffixTiers[3]:SetChecked(p.protectAffixTier3 == true)
 			self._tglAffixTiers[4]:SetChecked(p.protectAffixTier4 == true)
 			self._tglAffixTiers[5]:SetChecked(p.protectAffixTier5 == true)
+			self._tglAffixTiers[6]:SetChecked(p.protectAffixTier6 == true)
 		end
 		if self._tglSingleAffix then self._tglSingleAffix:SetChecked(p.keepSingleMissingAffix == true) end
 

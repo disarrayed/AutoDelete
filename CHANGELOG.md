@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 No changes yet.
 
+## [3.30] - 2026-07-10
+
+### Added
+
+- **Tier VI affixes are supported end to end.** Affix detection, protection, dot colors, migration, diagnostics, and the Affix Book now use Tiers I-VI.
+- **Hidden bag scans now prefer the Project Ebonhold affix mirror.** PEE's server-fed names classify affixes even when hidden `SetBagItem`/`SetHyperlink` tooltips omit `@affix@` markers; marker parsing remains a compatibility fallback.
+- **External merchant and delete actions are attributed separately.** Decision History and `/del report` now identify actions performed by PEE Scrap, the merchant, another addon, or the player instead of implying AutoDelete caused them. Manual sales require a confirmed bag delta; PEE Scrap confirmations use request-time candidates and FIFO correlation, with batch-level fallback when item-level evidence is unavailable.
+
+### Fixed
+
+- **Native bag menus and affix eligibility are corrected.** Alt+Right-click quick actions now work through Blizzard's native bag click path as well as ElvUI, and affix dots no longer appear on cosmetic/non-eligible items such as tabards.
+
 ## [3.29.1] - 2026-07-04
 
 ### Hot Fix
