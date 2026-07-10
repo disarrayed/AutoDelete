@@ -14486,13 +14486,6 @@ function _G.AutoDelete_OpenBagAltRightMenu(buttonFrame, mouseButton)
 	if _G.AutoDelete_DebugSell then
 		print("|cffff8000[AutoDelete DEBUG]|r Alt+Right menu via native bag click hook. link=" .. tostring(link))
 	end
-	local now = GetTime and GetTime() or 0
-	if _G.AutoDelete_BagQuickMenuLastItemId == itemId
-		and now - (_G.AutoDelete_BagQuickMenuLastAt or 0) < 0.25 then
-		return true
-	end
-	_G.AutoDelete_BagQuickMenuLastItemId = itemId
-	_G.AutoDelete_BagQuickMenuLastAt = now
 	_G.AutoDelete_ShowItemQuickMenu({ itemId = itemId, link = link, bag = bag, slot = slot })
 	return true
 end
@@ -14547,32 +14540,17 @@ end
 -- wrapper so pure Alt+Right can be consumed before Blizzard falls through to
 -- normal item use. All other clicks call the original dispatcher.
 function _G.AutoDelete_InstallBagAltRightHook()
-	local installed = false
-	-- The vanilla bag path can dispatch through OnClick without reaching the
-	-- modified-click helper. Wrap both entry points so ElvUI and Blizzard bags
-	-- receive the same Alt+Right behavior.
-	if not _G.AutoDelete_BagAltRightClickHookInstalled
-		and type(ContainerFrameItemButton_OnClick) == "function" then
-		_G.AutoDelete_Original_ContainerFrameItemButton_OnClick = ContainerFrameItemButton_OnClick
-		ContainerFrameItemButton_OnClick = function(self, button)
-			if _G.AutoDelete_OpenBagAltRightMenu(self, button) then return end
-			return _G.AutoDelete_Original_ContainerFrameItemButton_OnClick(self, button)
-		end
-		_G.AutoDelete_BagAltRightClickHookInstalled = true
+	if _G.AutoDelete_BagAltRightHookInstalled then return true end
+	if type(ContainerFrameItemButton_OnModifiedClick) ~= "function" then return false end
+	_G.AutoDelete_Original_ContainerFrameItemButton_OnModifiedClick = ContainerFrameItemButton_OnModifiedClick
+	ContainerFrameItemButton_OnModifiedClick = function(self, button)
+		if _G.AutoDelete_OpenBagAltRightMenu(self, button) then return end
+		return _G.AutoDelete_Original_ContainerFrameItemButton_OnModifiedClick(self, button)
 	end
-	if not _G.AutoDelete_BagAltRightModifiedHookInstalled
-		and type(ContainerFrameItemButton_OnModifiedClick) == "function" then
-		_G.AutoDelete_Original_ContainerFrameItemButton_OnModifiedClick = ContainerFrameItemButton_OnModifiedClick
-		ContainerFrameItemButton_OnModifiedClick = function(self, button)
-			if _G.AutoDelete_OpenBagAltRightMenu(self, button) then return end
-			return _G.AutoDelete_Original_ContainerFrameItemButton_OnModifiedClick(self, button)
-		end
-		_G.AutoDelete_BagAltRightModifiedHookInstalled = true
-	end
-	installed = _G.AutoDelete_BagAltRightClickHookInstalled
-		or _G.AutoDelete_BagAltRightModifiedHookInstalled
-	_G.AutoDelete_BagAltRightHookInstalled = installed or false
-	return installed
+	_G.AutoDelete_BagAltRightModifiedHookInstalled = true
+	_G.AutoDelete_BagAltRightClickHookInstalled = false
+	_G.AutoDelete_BagAltRightHookInstalled = true
+	return true
 end
 _G.AutoDelete_InstallBagAltRightHook()
 
