@@ -142,26 +142,67 @@ Four independent categories.
 
 ## ⌨️ Slash commands
 
+Run `/del help`, `/del ?`, or `/del commands` in-game for the same list.
+
 ```
 /del               Open the settings panel
+/del help          Show the command list (also: /del ? or /del commands)
 /del clean         Remove duplicate or conflicting item-list entries
 /del sell          Force a sell pass at the current vendor
 /del setup         Reopen the welcome popup
 /del process       Open the Process Bags inspection window
 /del report        Open a copyable diagnostic report
 /del processdebug  Open a Process Bags gate-by-gate diagnostic
+/del processdebug clear
+                   Clear Process Bags diagnostic caches and refresh the panel
 /del de history    Open recent One-Key Disenchant actions
+/del de history clear
+                   Clear One-Key Disenchant history for this session
 /del history       Open searchable recent sell / delete / keep decisions, including recipes
+/del history clear Clear the decision history for this session
 /del audit         Open a copyable item-list audit
+/del audit lists   Alias for /del audit
 /del audit fix     Apply safe list cleanup only
+/del audit lists fix
+                   Alias for /del audit fix
 /del affix         Open AutoDelete's server-fed PEEv1-style affix mirror
 /del debug         Toggle the auto-sell / auto-delete debug trace
-/del bench         Run a loot-burst performance benchmark (diagnostic)
-/del spike         Capture frame-level performance spikes (diagnostic)
+/del perf          Toggle performance instrumentation
+/del perf report   Print performance stats collected since /del perf was enabled
+/del perf reset    Clear performance stats and start counting from zero
+/del spike         Show spike-debug state and threshold
+/del spike on      Enable frame-level spike capture
+/del spike off     Disable frame-level spike capture
+/del spike <ms>    Set the spike threshold from 5 to 500 ms
+/del spike report  Open the saved spike report
+/del spike chat    Print the spike report to chat
+/del spike clear   Clear saved spike samples
+/del elvuihook     Show the ElvUI bag-hook diagnostic state
+/del elvuihook on  Enable AutoDelete's ElvUI bag-hook work
+/del elvuihook off Disable AutoDelete's ElvUI bag-hook work
+/del bench         Toggle the loot-burst performance benchmark
+/del bench start   Arm the benchmark
+/del bench stop    Stop and save the active benchmark
+/del bench cancel  Cancel the active benchmark without saving
+/del bench list    List saved benchmark runs
+/del bench compare Compare the last two benchmark runs
+/del bench show <name>
+                   Show one saved benchmark report
+/del bench delete <name>
+                   Delete one saved benchmark run
+/del bench <name>  Arm a benchmark with an explicit name
 /del goblin        Open a copyable Goblin Merchant summon diagnostic
 /del scav          Open a copyable Scavenger summon / retry / stuck-detection diagnostic
+/del pet           Alias for /del scav (also: /del pos)
+/del pos           Alias for /del scav
 /autodelete        Alias for /del
 ```
+
+The diagnostic commands do not change item lists or automatic sell/delete
+settings. `/del perf` and `/del spike` collect local performance data, while
+`/del bench` manages saved benchmark runs. `/del elvuihook off` is an ElvUI
+troubleshooting switch and stops AutoDelete's ElvUI bag-slot work until it is
+turned on again.
 
 ---
 

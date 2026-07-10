@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 No changes yet.
 
+## [3.30.1] - 2026-07-10
+
+### Hot Fix
+
+- **Restored Blizzard bag right-click behavior.** AutoDelete no longer replaces Blizzard's native bag `OnClick` dispatcher. Ordinary item clicks remain Blizzard-owned while Alt+Right-click quick actions use the guarded modified-click path.
+- **README command help is complete.** The player docs now include all slash-command aliases, diagnostic controls, benchmark subcommands, and history/cache clearing commands.
+
 ## [3.30] - 2026-07-10
 
 ### Added
