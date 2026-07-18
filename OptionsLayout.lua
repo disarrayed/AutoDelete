@@ -64,6 +64,34 @@ Layout.LIST_MAX_ROWS = 10
 Layout.CONTENT_W = 550
 Layout.TAB_CARD_GAP = 6
 Layout.SETTINGS_CARD_H = 92
+Layout.AFFIX_TIER_COUNT = 6
+Layout.AFFIX_TIER_CARD_PAD = 10
+Layout.AFFIX_TIER_ROW_H = 18
+Layout.AFFIX_TIER_BOX_SIZE = 12
+Layout.AFFIX_TIER_TEXT_GAP = 2
+Layout.AFFIX_TIER_MAX_LABEL_W = 11
+
+function Layout.AffixTierRowLayout(cardW)
+	cardW = cardW or math.floor((Layout.CONTENT_W - Layout.TAB_INNER_PAD * 2
+		- Layout.TAB_CARD_GAP * 2) / 3)
+	local innerW = cardW - Layout.AFFIX_TIER_CARD_PAD * 2
+	local rowW = innerW / Layout.AFFIX_TIER_COUNT
+	local xOffsets = {}
+	for tier = 1, Layout.AFFIX_TIER_COUNT do
+		xOffsets[tier] = (tier - 1) * rowW
+	end
+	return {
+		count = Layout.AFFIX_TIER_COUNT,
+		cardW = cardW,
+		innerW = innerW,
+		rowW = rowW,
+		xOffsets = xOffsets,
+		rowH = Layout.AFFIX_TIER_ROW_H,
+		boxSize = Layout.AFFIX_TIER_BOX_SIZE,
+		textGap = Layout.AFFIX_TIER_TEXT_GAP,
+		maxLabelWidth = Layout.AFFIX_TIER_MAX_LABEL_W,
+	}
+end
 
 function Layout.TabbedSectionHeight()
 	return Layout.TAB_STRIP_H + Layout.TAB_STRIP_GAP + Layout.TAB_CONTENT_H + Layout.TAB_INNER_PAD * 2
@@ -146,6 +174,8 @@ function Layout.BuildSellFiltersRects(frameHeight)
 		petMerchantCard.y + 6, petMerchantCard.w - 20, 20)
 	addRect("settings.pets.merchant.autoClose", petMerchantCard.name, petMerchantCard.x + 32,
 		petMerchantCard.y + 30, petMerchantCard.w - 42, 16)
+	addRect("settings.pets.merchant.autoCloseOnlyInCombat", petMerchantCard.name, petMerchantCard.x + 50,
+		petMerchantCard.y + 46, petMerchantCard.w - 60, 16)
 	yOff = consumeSection(yOff, settingsH)
 
 	addRect("sell.banner", "frame", 15, math.abs(yOff), 550, Layout.SELL_BANNER_H)

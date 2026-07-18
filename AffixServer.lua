@@ -2,6 +2,7 @@ local Server = {}
 
 Server.PREFIX = "AAM0x9"
 Server.REQUEST_LEARNED = 313
+Server.SEND_EXTRACTION_RESULT = 510
 Server.SEND_LEARNED = 513
 Server.REQUEST_THROTTLE_SECONDS = 5
 
@@ -21,10 +22,32 @@ function Server.ShouldAcceptMessage(prefix, payload, dist, sender, playerName)
 		return false, "payload"
 	end
 	local evtStr = payload:match("^(%d+)\t") or payload:match("^(%d+)$")
-	if tonumber(evtStr) ~= Server.SEND_LEARNED then
+	local evt = tonumber(evtStr)
+	if evt ~= Server.SEND_LEARNED and evt ~= Server.SEND_EXTRACTION_RESULT then
 		return false, "event"
 	end
 	return true
+end
+
+function Server.GetLearnedRefreshDelay(now, lastRequestAt, throttleSeconds, minimumDelay)
+	now = tonumber(now) or 0
+	lastRequestAt = tonumber(lastRequestAt) or 0
+	throttleSeconds = tonumber(throttleSeconds) or Server.REQUEST_THROTTLE_SECONDS
+	minimumDelay = tonumber(minimumDelay) or 0.75
+	if now <= 0 or lastRequestAt <= 0 or now < lastRequestAt then
+		return minimumDelay
+	end
+	local remaining = throttleSeconds - (now - lastRequestAt)
+	if remaining > minimumDelay then return remaining end
+	return minimumDelay
+end
+
+function Server.ExtractionResultNeedsLearnedRefresh(body)
+	if body == "OK" then return true end
+	if type(body) ~= "string" then return false end
+	local _, reason = body:match("^([^,]+),(.+)$")
+	if not reason then return false end
+	return reason:lower():find("already know this affix", 1, true) ~= nil
 end
 
 function Server.ParseEventPayload(payload)

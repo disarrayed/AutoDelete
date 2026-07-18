@@ -1620,22 +1620,21 @@ local DEFAULT_PROFILE = {
 	knownRecipeSellBoE      = true,
 	knownRecipeSellBoP      = true,
 	autoCloseMerchantAfterSell = true,
+	autoCloseMerchantOnlyInCombat = true,
 
 	-- ============================================================
 	-- Companion management (Goblin tab)
 	-- ============================================================
-	-- summonScavenger is the master toggle for ALL companion
-	-- features: it gates mount-aware dismiss/re-summon, the
-	-- stuck-detection re-summon, the after-sell + after-close
-	-- summons, AND the bag-full Goblin Merchant trigger. The
-	-- master AutoDelete `enabled` flag also gates this feature
-	-- group as a whole.
+	-- summonScavenger is the master toggle for companion automation.
+	-- It gates Scavenger recovery and summons, plus the Merchant option below.
+	-- summonOnlyInCombat affects Scavenger summons only; Merchant automation
+	-- uses summonMerchantWhenBagsFull and is allowed outside combat.
 	summonScavenger            = false,
 	summonAfterSell            = true,    -- summon scav after vendor sell completes
 	summonAfterClose           = false,   -- summon scav after vendor window closes
-	summonOnlyInCombat         = true,    -- gate ALL auto-summon paths on UnitAffectingCombat("player")
+	summonOnlyInCombat         = true,    -- gate automatic Scavenger summons on player combat
 	summonDisableInGroup       = false,   -- block Scavenger/Merchant auto-summons while in party or raid
-	summonMerchantWhenBagsFull = false,   -- summon Goblin Merchant when bags hit 0 free for 3s+
+	summonMerchantWhenBagsFull = false,   -- summon Merchant at the configured free-slot threshold after 1 settled second
 
 	-- ============================================================
 	-- Vendor extras (Goblin tab)
@@ -5279,10 +5278,12 @@ _G.AutoDelete_LearnedAffixes = _G.AutoDelete_LearnedAffixes or nil
 _G.AutoDelete_AffixServerHasData = _G.AutoDelete_AffixServerHasData or false
 _G.AutoDelete_AffixServerPrefix = _G.AutoDelete_AffixServerPrefix or (_G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.PREFIX) or "AAM0x9"
 _G.AutoDelete_AffixServerRequestLearned = _G.AutoDelete_AffixServerRequestLearned or (_G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.REQUEST_LEARNED) or 313
+_G.AutoDelete_AffixServerSendExtractionResult = _G.AutoDelete_AffixServerSendExtractionResult or (_G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.SEND_EXTRACTION_RESULT) or 510
 _G.AutoDelete_AffixServerSendLearned = _G.AutoDelete_AffixServerSendLearned or (_G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.SEND_LEARNED) or 513
 _G.AutoDelete_AffixPacketInflight = _G.AutoDelete_AffixPacketInflight or {}
 _G.AutoDelete_LastAffixServerRequestAt = _G.AutoDelete_LastAffixServerRequestAt or 0
 _G.AutoDelete_AffixServerRequestThrottleSeconds = _G.AutoDelete_AffixServerRequestThrottleSeconds or (_G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.REQUEST_THROTTLE_SECONDS) or 5
+_G.AutoDelete_AffixRefreshScheduledAt = _G.AutoDelete_AffixRefreshScheduledAt or nil
 _G.AutoDelete_OwnedAffixes = _G.AutoDelete_OwnedAffixes or {}
 _G.AutoDelete_KnownAffixes = _G.AutoDelete_KnownAffixes or {}
 _G.AutoDelete_OwnedAffixCount = _G.AutoDelete_OwnedAffixCount or 0
@@ -5347,6 +5348,10 @@ function _G.AutoDelete_ParseLearnedAffixesPayload(body)
 end
 
 function _G.AutoDelete_SetLearnedAffixesFromServer(body)
+	-- A packet received after an extraction result is already the fresh state
+	-- the pending request was meant to obtain. Cancel that one-shot so a manual
+	-- refresh or a server push cannot be followed by a redundant opcode 313.
+	_G.AutoDelete_AffixRefreshScheduledAt = nil
 	_G.AutoDelete_LearnedAffixes = _G.AutoDelete_ParseLearnedAffixesPayload(body)
 	_G.AutoDelete_AffixServerHasData = true
 	_G.AutoDelete_AffixServerLastReceivedAt = GetTime and GetTime() or 0
@@ -5401,6 +5406,53 @@ function _G.AutoDelete_RequestServerLearnedAffixes(reason, force)
 	return true, "requested"
 end
 
+-- Extraction changes the learned list on the server, but the extraction
+-- reply does not include the refreshed list. Schedule one direct request
+-- after the current request throttle clears. A pending request is shared by
+-- all extraction replies so a quick burst cannot spam opcode 313.
+function _G.AutoDelete_ScheduleLearnedAffixRefresh(reason)
+	local now = GetTime and GetTime() or 0
+	local scheduledAt = _G.AutoDelete_AffixRefreshScheduledAt
+	if scheduledAt and (now <= 0 or scheduledAt > now) then
+		return false, "scheduled"
+	end
+
+	local delay = 0.75
+	if _G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.GetLearnedRefreshDelay then
+		delay = _G.AutoDelete_AffixServer.GetLearnedRefreshDelay(
+			now,
+			_G.AutoDelete_LastAffixServerRequestAt or 0,
+			_G.AutoDelete_AffixServerRequestThrottleSeconds or 5,
+			delay)
+	end
+	local dueAt = now > 0 and (now + delay) or delay
+	_G.AutoDelete_AffixRefreshScheduledAt = dueAt
+	local function RequestWhenReady()
+		if _G.AutoDelete_AffixRefreshScheduledAt ~= dueAt then return end
+		local currentNow = GetTime and GetTime() or 0
+		local lastRequestAt = _G.AutoDelete_LastAffixServerRequestAt or 0
+		local throttle = _G.AutoDelete_AffixServerRequestThrottleSeconds or 5
+		local remaining = 0
+		if currentNow > 0 and lastRequestAt > 0 then
+			if currentNow < lastRequestAt then
+				remaining = throttle
+			else
+				remaining = throttle - (currentNow - lastRequestAt)
+			end
+		end
+		if remaining > 0 then
+			dueAt = currentNow + remaining
+			_G.AutoDelete_AffixRefreshScheduledAt = dueAt
+			AfterDelay(remaining, RequestWhenReady)
+			return
+		end
+		_G.AutoDelete_AffixRefreshScheduledAt = nil
+		_G.AutoDelete_RequestServerLearnedAffixes(reason or "extraction-result", true)
+	end
+	AfterDelay(delay, RequestWhenReady)
+	return true, "scheduled"
+end
+
 function _G.AutoDelete_HandleAffixServerMessage(prefix, payload, dist, sender)
 	local playerName = UnitName and UnitName("player") or nil
 	if _G.AutoDelete_AffixServer and _G.AutoDelete_AffixServer.ShouldAcceptMessage then
@@ -5420,6 +5472,15 @@ function _G.AutoDelete_HandleAffixServerMessage(prefix, payload, dist, sender)
 			evtStr, rest = payload:match("^(%d+)$"), ""
 		end
 		evt = tonumber(evtStr)
+	end
+	if evt == _G.AutoDelete_AffixServerSendExtractionResult then
+		local needsRefresh = _G.AutoDelete_AffixServer
+			and _G.AutoDelete_AffixServer.ExtractionResultNeedsLearnedRefresh
+			and _G.AutoDelete_AffixServer.ExtractionResultNeedsLearnedRefresh(rest)
+		if needsRefresh and _G.AutoDelete_ScheduleLearnedAffixRefresh then
+			_G.AutoDelete_ScheduleLearnedAffixRefresh("extraction-result")
+		end
+		return true
 	end
 	if evt ~= _G.AutoDelete_AffixServerSendLearned then return true end
 
@@ -6269,6 +6330,7 @@ local affixDotVersion = 0
 --   collection OFF, affix is missing   -> (tier, color) selected missing color
 --   collection ON, affix is owned      -> (false, nil)  hide (dup)
 --   collection ON, affix is missing    -> (tier, color) selected missing color
+--   collection ON, weapon unresolved   -> (false, nil)  hide false claim
 --
 -- Globalized so the deferred-scan queue (ProcessAffixScanQueue, declared
 -- earlier in the file) can call it without a forward-reference dance.
@@ -6292,7 +6354,15 @@ function _G.AutoDelete_DecideDot(link, bag, slot, button)
 	local itemName = _G.AutoDelete_GetAffixDisplayName
 		and _G.AutoDelete_GetAffixDisplayName(link, bag, slot, GetItemInfo(link))
 		or GetItemInfo(link)
-	local owned = AutoDelete_IsAffixOwnedByItemName(itemName)
+	local owned, _, resolution = _G.AutoDelete_GetAffixOwnershipForSlot(
+		itemName, bag, slot, link)
+	if resolution == "unresolved-weapon"
+		and cachedProfile and cachedProfile.affixCollectionMode then
+		-- The server packet does not publish an item-to-affix mapping for
+		-- most fixed proc weapons. In Only Missing mode, do not turn that
+		-- lack of identity into a false "unlearned" attention dot.
+		return false, nil
+	end
 	if owned == nil then
 		return tier, nil
 	end
@@ -6337,6 +6407,31 @@ function _G.AutoDelete_GetAffixKeyForItemName(itemName)
 	return best
 end
 
+-- Resolve ownership using the bag slot as well as the visible item name.
+-- Ordinary random-property affixes still use their server-known suffix.
+-- Fixed unique proc weapons cannot be joined to a server spell ID because
+-- packet 513 does not include item IDs. Treat those weapons as tri-state
+-- "unresolved", not "unlearned", so collection mode never makes a claim the
+-- server data cannot support.
+function _G.AutoDelete_GetAffixOwnershipForSlot(itemName, bag, slot, link)
+	if not _G.AutoDelete_AffixServerHasData
+		or type(_G.AutoDelete_LearnedAffixes) ~= "table" then
+		return nil, nil, "server-unavailable"
+	end
+
+	_G.AutoDelete_EnsureOwnedAffixMirror()
+	local nameKey = _G.AutoDelete_GetAffixKeyForItemName(itemName)
+	if nameKey then
+		return _G.AutoDelete_OwnedAffixes[nameKey] == true, nameKey, "name"
+	end
+
+	local procKey = _G.AutoDelete_GetWeaponProcAffixKeyForSlot
+		and _G.AutoDelete_GetWeaponProcAffixKeyForSlot(bag, slot, link)
+	if procKey then return nil, procKey, "unresolved-weapon" end
+
+	return AutoDelete_IsAffixOwnedByItemName(itemName), nil, "name-unmatched"
+end
+
 function _G.AutoDelete_IsSingleAffixSlot(itemClass, equipSlot)
 	if not equipSlot or not GEAR_SLOTS[equipSlot] then return false end
 	return itemClass == "Armor" or itemClass == "Weapon"
@@ -6346,9 +6441,10 @@ function _G.AutoDelete_GetMissingAffixKeyForSlot(profile, bag, slot, link, itemN
 	if not profile or profile.keepSingleMissingAffix ~= true then return nil end
 	if not _G.AutoDelete_IsSingleAffixSlot(itemClass, equipSlot) then return nil end
 	if not HasAffix(bag, slot) then return nil end
-	local owned = AutoDelete_IsAffixOwnedByItemName(itemName)
+	local owned, affixKey = _G.AutoDelete_GetAffixOwnershipForSlot(
+		itemName, bag, slot, link)
 	if owned ~= false then return nil end
-	return _G.AutoDelete_GetAffixKeyForItemName(itemName)
+	return affixKey or _G.AutoDelete_GetAffixKeyForItemName(itemName)
 		or (_G.AutoDelete_GetWeaponProcAffixKeyForSlot
 			and _G.AutoDelete_GetWeaponProcAffixKeyForSlot(bag, slot, link))
 end
@@ -6725,8 +6821,10 @@ function _G.AutoDelete_IsMissingAffixHardStop(profile, bag, slot, itemLink, sing
 	end
 	if singleAffixSlot and singleAffixSlot.extra then return false, nil end
 	if not HasAffix(bag, slot) then return false, nil end
-	local itemName = GetItemInfo(itemLink)
-	local owned = AutoDelete_IsAffixOwnedByItemName(itemName)
+	local itemName = _G.AutoDelete_GetAffixDisplayName
+		and _G.AutoDelete_GetAffixDisplayName(itemLink, bag, slot, GetItemInfo(itemLink))
+		or GetItemInfo(itemLink)
+	local owned = _G.AutoDelete_GetAffixOwnershipForSlot(itemName, bag, slot, itemLink)
 	if owned == false then return true, "missing" end
 	if owned == nil then return true, "unknown" end
 	return false, nil
@@ -6851,17 +6949,19 @@ end
 -- CallCompanion's atomic-toggle behavior.
 local function IsOtherCompanionSummoned(skipName)
 	local n = GetNumCompanions("CRITTER")
-	if not n or n <= 0 then return false end
+	if not n or n <= 0 then return false, nil end
 	skipName = string.lower(skipName or "")
 	for i = 1, n do
-		local _, cName, _, _, summoned = GetCompanionInfo("CRITTER", i)
+		local creatureId, cName, _, _, summoned = GetCompanionInfo("CRITTER", i)
 		if (summoned == 1 or summoned == true) and cName then
 			if not string.find(string.lower(cName), skipName) then
-				return true
+				local companionKey = creatureId and ("id:" .. tostring(creatureId))
+					or ("name:" .. string.lower(cName))
+				return true, companionKey
 			end
 		end
 	end
-	return false
+	return false, nil
 end
 
 -- Per-pet cooldown gate so we don't fire CallCompanion for the SAME pet
@@ -6890,6 +6990,13 @@ _G.AutoDelete_CompanionSummonOwnerUntil = 0
 _G.AutoDelete_GoblinAutoBackoffS = 30
 _G.AutoDelete_GoblinAutoBackoffUntil = 0
 _G.AutoDelete_SummonFailureChatUntil = _G.AutoDelete_SummonFailureChatUntil or {}
+
+-- A companion intentionally dismissed for a pet handoff can remain marked as
+-- summoned briefly on Project Ebonhold. Treat that same identity as expected
+-- stale state, but stop if a genuinely different companion appears.
+function _G.AutoDelete_ShouldAbortCompanionHandoff(expectedKey, currentKey)
+	return currentKey ~= nil and currentKey ~= expectedKey
+end
 
 function _G.AutoDelete_AcquireCompanionSummon(owner, duration)
 	local now = GetTime()
@@ -6926,16 +7033,14 @@ end
 
 function _G.AutoDelete_ShouldMerchantHavePriority(profile)
 	profile = profile or cachedProfile
-	if not profile or not profile.enabled or not profile.summonScavenger or not profile.summonMerchantWhenBagsFull then return false end
-	if _G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(profile) then return false end
-	if profile.summonOnlyInCombat and not (UnitAffectingCombat and UnitAffectingCombat("player")) then return false end
+	if _G.AutoDelete_GetGoblinMerchantSummonBlockReason(profile) then return false end
 	local threshold = tonumber(profile.bagSpaceWarnThreshold) or 3
 	local free = 0
 	for bag = 0, 4 do
 		local slots = GetContainerNumFreeSlots and GetContainerNumFreeSlots(bag) or 0
 		if slots then free = free + slots end
 	end
-	return free <= threshold
+	return _G.AutoDelete_IsAtOrBelowGoblinMerchantThreshold(free, threshold)
 end
 
 function _G.AutoDelete_IsPlayerGrouped()
@@ -6946,6 +7051,33 @@ end
 
 function _G.AutoDelete_IsCompanionSummonBlockedByGroup(profile)
 	return profile and profile.summonDisableInGroup and _G.AutoDelete_IsPlayerGrouped()
+end
+
+function _G.AutoDelete_IsAtOrBelowGoblinMerchantThreshold(freeSlots, threshold)
+	local free = tonumber(freeSlots)
+	local limit = tonumber(threshold)
+	return free ~= nil and limit ~= nil and free <= limit
+end
+
+function _G.AutoDelete_GetGoblinMerchantQuietSince(timerStartedAt, lastBagUpdateAt, now)
+	local startedAt = tonumber(timerStartedAt)
+	local bagUpdateAt = tonumber(lastBagUpdateAt) or 0
+	local currentTime = tonumber(now) or bagUpdateAt
+	if not startedAt then return currentTime end
+	if bagUpdateAt > startedAt then return bagUpdateAt end
+	return startedAt
+end
+
+-- Central summon gate for every AutoDelete-owned Goblin Merchant path.
+-- Only in Combat is deliberately absent: that option belongs to Greedy
+-- Scavenger only. The optional party/raid guard still applies to both pets.
+function _G.AutoDelete_GetGoblinMerchantSummonBlockReason(profile)
+	profile = profile or cachedProfile
+	if not profile or not profile.enabled or not profile.summonScavenger or not profile.summonMerchantWhenBagsFull then
+		return "disabled"
+	end
+	if _G.AutoDelete_IsCompanionSummonBlockedByGroup(profile) then return "group-blocked" end
+	return nil
 end
 
 -- Central summon gate for every AutoDelete-owned Scavenger summon path.
@@ -7008,7 +7140,7 @@ function _G.AutoDelete_FinishScavengerFailure(reason)
 	end
 end
 
-function _G.AutoDelete_CallScavengerForConfirm(attempt)
+function _G.AutoDelete_CallScavengerForConfirm(attempt, displacedCompanionKey)
 	attempt = attempt or 1
 	local ok, owner = _G.AutoDelete_AcquireCompanionSummon("scavenger", 8)
 	if not ok then
@@ -7019,6 +7151,17 @@ function _G.AutoDelete_CallScavengerForConfirm(attempt)
 	local blockReason = _G.AutoDelete_GetScavengerSummonBlockReason(cachedProfile)
 	if blockReason then
 		_G.AutoDelete_FinishScavengerFailure(blockReason)
+		return
+	end
+	if MerchantFrame and MerchantFrame:IsShown() then
+		_G.AutoDelete_FinishScavengerFailure("merchant-open")
+		return
+	end
+	local otherCompanionUp, currentCompanionKey = IsOtherCompanionSummoned("greedy scavenger")
+	if attempt > 1 and otherCompanionUp and _G.AutoDelete_ShouldAbortCompanionHandoff(
+		displacedCompanionKey,
+		currentCompanionKey) then
+		_G.AutoDelete_FinishScavengerFailure("companion-changed")
 		return
 	end
 
@@ -7033,12 +7176,24 @@ function _G.AutoDelete_CallScavengerForConfirm(attempt)
 		return
 	end
 
-	if IsOtherCompanionSummoned("greedy scavenger") then
+	if otherCompanionUp then
+		displacedCompanionKey = displacedCompanionKey or currentCompanionKey
 		if DismissCompanion then DismissCompanion("CRITTER") end
 		AfterDelay(0.5, function()
 			local delayedBlockReason = _G.AutoDelete_GetScavengerSummonBlockReason(cachedProfile)
 			if delayedBlockReason then
 				_G.AutoDelete_FinishScavengerFailure(delayedBlockReason)
+				return
+			end
+			if MerchantFrame and MerchantFrame:IsShown() then
+				_G.AutoDelete_FinishScavengerFailure("merchant-open")
+				return
+			end
+			local delayedOtherUp, delayedCompanionKey = IsOtherCompanionSummoned("greedy scavenger")
+			if delayedOtherUp and _G.AutoDelete_ShouldAbortCompanionHandoff(
+				displacedCompanionKey,
+				delayedCompanionKey) then
+				_G.AutoDelete_FinishScavengerFailure("companion-changed")
 				return
 			end
 			local idx2, isUp2, cId2 = FindCompanionById(SCAVENGER_CREATURE_ID, "greedy scavenger")
@@ -7056,7 +7211,7 @@ function _G.AutoDelete_CallScavengerForConfirm(attempt)
 			lastSummonCallAt.scavenger = GetTime()
 			_G.AutoDelete_CompanionSummonOwnerUntil = GetTime() + 8
 			_G.AutoDelete_ScavengerLastSummonAttempt = attempt
-			_G.AutoDelete_ConfirmScavengerSummon(lastSummonCallAt.scavenger, attempt)
+			_G.AutoDelete_ConfirmScavengerSummon(lastSummonCallAt.scavenger, attempt, displacedCompanionKey)
 		end)
 		return
 	end
@@ -7066,10 +7221,10 @@ function _G.AutoDelete_CallScavengerForConfirm(attempt)
 	lastSummonCallAt.scavenger = GetTime()
 	_G.AutoDelete_CompanionSummonOwnerUntil = GetTime() + 8
 	_G.AutoDelete_ScavengerLastSummonAttempt = attempt
-	_G.AutoDelete_ConfirmScavengerSummon(lastSummonCallAt.scavenger, attempt)
+	_G.AutoDelete_ConfirmScavengerSummon(lastSummonCallAt.scavenger, attempt, displacedCompanionKey)
 end
 
-function _G.AutoDelete_ConfirmScavengerSummon(callAt, attempt)
+function _G.AutoDelete_ConfirmScavengerSummon(callAt, attempt, displacedCompanionKey)
 	attempt = attempt or 1
 	if attempt == 1 and _G.AutoDelete_ScavengerConfirmPending then return end
 	_G.AutoDelete_ScavengerConfirmPending = true
@@ -7089,7 +7244,7 @@ function _G.AutoDelete_ConfirmScavengerSummon(callAt, attempt)
 
 		if attempt < _G.AutoDelete_ScavengerConfirmMaxAttempts and idx then
 			_G.AutoDelete_ScavengerLastSummonResult = "retry-" .. tostring(attempt)
-			_G.AutoDelete_CallScavengerForConfirm(attempt + 1)
+			_G.AutoDelete_CallScavengerForConfirm(attempt + 1, displacedCompanionKey)
 			return
 		end
 
@@ -7162,6 +7317,10 @@ function _G.AutoDelete_FinishGoblinMerchantFailure(reason)
 end
 
 function _G.AutoDelete_CallGoblinMerchantForConfirm(attempt)
+	if MerchantFrame and MerchantFrame:IsShown() then
+		_G.AutoDelete_ConfirmGoblinMerchantIsOut(GetTime())
+		return
+	end
 	local ok, owner = _G.AutoDelete_AcquireCompanionSummon("merchant", 8)
 	if not ok then
 		_G.AutoDelete_GoblinLastSummonResult = "waiting-for-" .. tostring(owner)
@@ -7181,6 +7340,10 @@ function _G.AutoDelete_CallGoblinMerchantForConfirm(attempt)
 	if IsOtherCompanionSummoned("goblin merchant") then
 		if DismissCompanion then DismissCompanion("CRITTER") end
 		AfterDelay(0.5, function()
+			if MerchantFrame and MerchantFrame:IsShown() then
+				_G.AutoDelete_ConfirmGoblinMerchantIsOut(GetTime())
+				return
+			end
 			local idx2, isUp2, cId2 = FindCompanionById(MERCHANT_CREATURE_ID, "goblin merchant")
 			if cId2 then MERCHANT_CREATURE_ID = cId2 end
 			if isUp2 then
@@ -7217,6 +7380,10 @@ function _G.AutoDelete_ConfirmGoblinMerchantSummon(callAt, attempt)
 	if attempt == 1 and _G.AutoDelete_GoblinConfirmPending then return end
 	_G.AutoDelete_GoblinConfirmPending = true
 	AfterDelay(_G.AutoDelete_GoblinConfirmDelay, function()
+		if MerchantFrame and MerchantFrame:IsShown() then
+			_G.AutoDelete_ConfirmGoblinMerchantIsOut(callAt)
+			return
+		end
 		local idx, isUp, cId = FindCompanionById(MERCHANT_CREATURE_ID, "goblin merchant")
 		if cId then MERCHANT_CREATURE_ID = cId end
 		if isUp then
@@ -7235,18 +7402,10 @@ function _G.AutoDelete_ConfirmGoblinMerchantSummon(callAt, attempt)
 end
 
 local function SummonGoblinMerchant(force)
-	if not cachedProfile or not cachedProfile.enabled or not cachedProfile.summonScavenger or not cachedProfile.summonMerchantWhenBagsFull then
-		_G.AutoDelete_GoblinLastSummonResult = "disabled"
-		return false
-	end
-	if _G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(cachedProfile) then
-		_G.AutoDelete_GoblinLastSummonResult = "group-blocked"
-		_G.AutoDelete_GoblinLastDeferReason = "group-blocked"
-		return false
-	end
-	if cachedProfile.summonOnlyInCombat and not (UnitAffectingCombat and UnitAffectingCombat("player")) then
-		_G.AutoDelete_GoblinLastSummonResult = "combat-blocked"
-		_G.AutoDelete_GoblinLastDeferReason = "combat-blocked"
+	local blockReason = _G.AutoDelete_GetGoblinMerchantSummonBlockReason(cachedProfile)
+	if blockReason then
+		_G.AutoDelete_GoblinLastSummonResult = blockReason
+		_G.AutoDelete_GoblinLastDeferReason = blockReason
 		return false
 	end
 	if (not force) and _G.AutoDelete_GoblinAutoBackoffActive and _G.AutoDelete_GoblinAutoBackoffActive() then
@@ -7290,7 +7449,7 @@ local function DelayedSummon(delaySeconds)
 		end
 		if MerchantFrame and MerchantFrame:IsShown() then
 			_G.AutoDelete_ScavengerLastSummonResult = "waiting-for-merchant-close"
-			DelayedSummon(2.0)
+			DelayedSummon(1.0)
 			return
 		end
 		if _G.AutoDelete_ShouldMerchantHavePriority and _G.AutoDelete_ShouldMerchantHavePriority(cachedProfile) then
@@ -7301,7 +7460,7 @@ local function DelayedSummon(delaySeconds)
 		if _G.AutoDelete_IsCompanionSummonBusyFor and _G.AutoDelete_IsCompanionSummonBusyFor("scavenger") then
 			_G.AutoDelete_ScavengerLastSummonResult = "waiting-for-" .. tostring(_G.AutoDelete_CompanionSummonOwner)
 			_G.AutoDelete_PendingScavengerAfterCompanion = true
-			DelayedSummon(2.0)
+			DelayedSummon(1.0)
 			return
 		end
 		SummonGreedyScavenger()
@@ -7704,6 +7863,77 @@ local SELL_BATCH_SIZE = 20
 local sellSessionCount = 0
 local sellSessionCopper = 0
 local sellDryTicks = 0
+_G.AutoDelete_SellCloseSettleSeconds = 1.5
+_G.AutoDelete_PeeSellRequestTimeoutSeconds = 5.0
+_G.AutoDelete_SellQuietSince = _G.AutoDelete_SellQuietSince or 0
+_G.AutoDelete_SellCloseRetryPending = _G.AutoDelete_SellCloseRetryPending or false
+
+function _G.AutoDelete_PruneExpiredProjectEbonholdSellRequests(audit, now)
+	if not audit then return 0 end
+	local activeRequests = {}
+	local expiredCount = 0
+	local currentTime = tonumber(now) or 0
+	local timeout = _G.AutoDelete_PeeSellRequestTimeoutSeconds or 5.0
+	for _, request in ipairs(audit.peeRequests or {}) do
+		local requestedAt = tonumber(request and request.at)
+		if requestedAt and (currentTime - requestedAt) >= timeout then
+			expiredCount = expiredCount + 1
+		else
+			table.insert(activeRequests, request)
+		end
+	end
+	if expiredCount > 0 then
+		audit.peeRequests = activeRequests
+		local nextRequest = activeRequests[1]
+		audit.peeRequestSnapshot = nextRequest and nextRequest.snapshot or nil
+		audit.peeRequestCandidates = nextRequest and nextRequest.candidates or {}
+		audit.peeRequestAutoDeleteAtStart = nextRequest and nextRequest.autoDeleteAtStart or {}
+		audit.peeRequestExternalAtStart = nextRequest and nextRequest.externalAtStart or {}
+		audit.peeRequestAt = nextRequest and nextRequest.at or nil
+	end
+	return expiredCount
+end
+
+function _G.AutoDelete_HasPendingMerchantSaleWork(sawLockedItem, audit, now)
+	if sawLockedItem == true then return true end
+	if not audit then return false end
+	if audit.peePending == true then return true end
+	_G.AutoDelete_PruneExpiredProjectEbonholdSellRequests(audit, now)
+	return #(audit.peeRequests or {}) > 0
+end
+
+function _G.AutoDelete_UpdateSellQuietSince(now, quietSince, soldThisPass, hasPendingSaleWork)
+	if soldThisPass == true or hasPendingSaleWork == true then return 0 end
+	if (tonumber(quietSince) or 0) > 0 then return quietSince end
+	return tonumber(now) or 0
+end
+
+function _G.AutoDelete_IsSellSessionReadyToClose(now, quietSince, dryTicks, soldCount, hasPendingSaleWork)
+	local quietAt = tonumber(quietSince) or 0
+	return hasPendingSaleWork ~= true
+		and (tonumber(dryTicks) or 0) >= 2
+		and (tonumber(soldCount) or 0) > 0
+		and quietAt > 0
+		and ((tonumber(now) or 0) - quietAt)
+			>= (_G.AutoDelete_SellCloseSettleSeconds or 1.5)
+end
+
+function _G.AutoDelete_ShouldAutoCloseMerchantAfterSell(profile, inCombat, merchantShown)
+	if not profile or profile.autoCloseMerchantAfterSell == false or merchantShown ~= true then
+		return false
+	end
+	local combatOnly = profile.autoCloseMerchantOnlyInCombat ~= false
+	return (not combatOnly) or inCombat == true
+end
+
+function _G.AutoDelete_RequestSellCloseRetry(delaySeconds)
+	if _G.AutoDelete_SellCloseRetryPending then return end
+	_G.AutoDelete_SellCloseRetryPending = true
+	AfterDelay(math.max(0.05, tonumber(delaySeconds) or 0.05), function()
+		_G.AutoDelete_SellCloseRetryPending = false
+		if MerchantFrame and MerchantFrame:IsShown() then RequestScan() end
+	end)
+end
 
 local function SellItems(silent)
 	if not MerchantFrame or not MerchantFrame:IsShown() then
@@ -7733,11 +7963,13 @@ local function SellItems(silent)
 	local singleAffixPlan = _G.AutoDelete_BuildSingleAffixPlan(profile, keepIDs, keepNames)
 
 	local batchCount = 0
+	local sawLockedItem = false
 
 	for bag = 0, 4 do
 		for slot = 1, GetContainerNumSlots(bag) do
 			if batchCount >= SELL_BATCH_SIZE then break end
 			local _, itemCount, locked, _, _, _, itemLink = GetContainerItemInfo(bag, slot)
+			if itemLink and locked then sawLockedItem = true end
 			if itemLink and not locked then
 				-- 6th return from GetItemInfo = itemType (top-level category, e.g.
 				-- "Armor", "Weapon", "Quest", "Consumable", "Miscellaneous").
@@ -8049,19 +8281,43 @@ local function SellItems(silent)
 		if batchCount >= SELL_BATCH_SIZE then break end
 	end
 
+	local now = GetTime()
+	local hasPendingSaleWork = _G.AutoDelete_HasPendingMerchantSaleWork(
+		sawLockedItem, _G.AutoDelete_MerchantAudit, now)
+	_G.AutoDelete_SellQuietSince = _G.AutoDelete_UpdateSellQuietSince(
+		now, _G.AutoDelete_SellQuietSince, batchCount > 0, hasPendingSaleWork)
 	if batchCount > 0 then
 		_G.AutoDelete_SellSessionHadSalesSinceOpen = true
 		sellDryTicks = 0
 	else
-		sellDryTicks = sellDryTicks + 1
-		if sellDryTicks >= 2 and sellSessionCount > 0 then
+		if hasPendingSaleWork then
+			sellDryTicks = 0
+		else
+			sellDryTicks = sellDryTicks + 1
+		end
+		if _G.AutoDelete_IsSellSessionReadyToClose(
+			now, _G.AutoDelete_SellQuietSince, sellDryTicks, sellSessionCount, hasPendingSaleWork) then
 			print("|cffff8000[AutoDelete]|r Sold " .. sellSessionCount .. " item(s) for " .. FormatMoney(sellSessionCopper))
 			sellSessionCount = 0
 			sellSessionCopper = 0
 			sellDryTicks = 0
-			if profile.autoCloseMerchantAfterSell ~= false and MerchantFrame and MerchantFrame:IsShown() then
+			_G.AutoDelete_SellQuietSince = 0
+			if _G.AutoDelete_ShouldAutoCloseMerchantAfterSell(
+				profile,
+				(UnitAffectingCombat and UnitAffectingCombat("player")) and true or false,
+				(MerchantFrame and MerchantFrame:IsShown()) and true or false) then
 				MerchantFrame:Hide()
 			end
+		elseif sellSessionCount > 0 then
+			-- A dry pass can happen while the server is still applying the last
+			-- sale. Recheck promptly while the settle window or another merchant
+			-- sale request is still pending.
+			local quietSince = (_G.AutoDelete_SellQuietSince or 0) > 0
+				and _G.AutoDelete_SellQuietSince or now
+			local remaining = (_G.AutoDelete_SellCloseSettleSeconds or 1.5)
+				- (now - quietSince)
+			if hasPendingSaleWork then remaining = 0.1 end
+			_G.AutoDelete_RequestSellCloseRetry(remaining)
 		end
 	end
 end
@@ -11070,10 +11326,8 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 			local affixDisplayName = _G.AutoDelete_GetAffixDisplayName
 				and _G.AutoDelete_GetAffixDisplayName(itemLink, bag, slot, itemName)
 				or itemName
-			local owned = AutoDelete_IsAffixOwnedByItemName(affixDisplayName)
-			local affixKey = _G.AutoDelete_GetAffixKeyForItemName
-				and _G.AutoDelete_GetAffixKeyForItemName(affixDisplayName)
-				or nil
+			local owned, affixKey, resolution = _G.AutoDelete_GetAffixOwnershipForSlot(
+				affixDisplayName, bag, slot, itemLink)
 			if not affixKey and _G.AutoDelete_GetWeaponProcAffixKeyForSlot then
 				affixKey = _G.AutoDelete_GetWeaponProcAffixKeyForSlot(bag, slot, itemLink)
 			end
@@ -11083,9 +11337,14 @@ function _G.AutoDelete_BuildWhyReport(itemId, itemLink, itemName, bag, slot)
 				table.insert(lines, "  Tooltip name: " .. tostring(affixDisplayName))
 			end
 			table.insert(lines, "  Affix key: " .. tostring(affixKey or "not matched"))
-			table.insert(lines, "  PE ownership: " .. (owned == nil and "unknown" or (owned and "owned" or "missing")))
+			table.insert(lines, "  Server ownership: " .. (owned == nil and "unknown" or (owned and "owned" or "missing")))
+			table.insert(lines, "  Resolution: " .. tostring(resolution or "unknown"))
 			if not dotLevel then
-				table.insert(lines, "  Dot: hidden because Show/Keep Missing Affix is on and the affix is owned.")
+				if resolution == "unresolved-weapon" then
+					table.insert(lines, "  Dot: hidden because the server does not identify this fixed weapon's affix.")
+				else
+					table.insert(lines, "  Dot: hidden because Show/Keep Missing Affix is on and the affix is owned.")
+				end
 			elseif owned == false then
 				table.insert(lines, "  Dot: " .. _G.AutoDelete_GetMissingAffixColorLabel(cachedProfile) .. " because the affix is missing or unlearned.")
 			else
@@ -11724,6 +11983,7 @@ scanner:RegisterEvent("PLAYER_LOGIN")
 scanner:RegisterEvent("CHAT_MSG_ADDON")
 scanner:RegisterEvent("BAG_UPDATE")
 scanner:RegisterEvent("BAG_UPDATE_DELAYED")
+scanner:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 scanner:RegisterEvent("MERCHANT_SHOW")
 scanner:RegisterEvent("MERCHANT_CLOSED")
 scanner:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
@@ -12673,6 +12933,19 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4)
 		if AutoDelete_RefreshOwnedAffixes then AutoDelete_RefreshOwnedAffixes() end
 		return
 	end
+	if event == "GET_ITEM_INFO_RECEIVED" then
+		-- A newly acquired item can raise BAG_UPDATE before GetItemInfo has
+		-- finished loading its quality, item level, and type. One-key target
+		-- checks correctly reject that incomplete data, but without this event
+		-- they would not retry until another bag change. Debounce the normal
+		-- refresh so DE/Mill/Prospect/Open re-arm as soon as the data is ready.
+		if not merchantOpen then
+			local now = GetTime()
+			scanner.nextButtonRefreshAt = now + 0.15
+			scanner.nextPanelRefreshAt  = now + 0.15
+		end
+		return
+	end
 	if event == "MERCHANT_SHOW" then
 		-- Set the auto-open block flag FIRST, before anything else can fire
 		-- a BAG_UPDATE. The flag stays true until the post-close grace expires.
@@ -12694,6 +12967,7 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4)
 		-- post-sell bags, underselling the average).
 		SampleInventoryWorth()
 		_G.AutoDelete_SellSessionHadSalesSinceOpen = false
+		_G.AutoDelete_SellQuietSince = 0
 		-- Master toggle gate: when AutoDelete is disabled the addon must
 		-- not perform ANY action, including auto-repair or auto-sell. Bag
 		-- sampling and tracking still run because they're passive.
@@ -12738,7 +13012,7 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4)
 		if cachedProfile and cachedProfile.enabled and cachedProfile.summonScavenger and cachedProfile.summonAfterSell and hadSellSession then
 			if _G.AutoDelete_ScavengerCombatAllowed(cachedProfile) then
 				_G.AutoDelete_ScavengerLastTriggerReason = "after-sell-merchant-closed"
-				DelayedSummon(2.0)
+				DelayedSummon(1.0)
 			elseif _G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(cachedProfile) then
 				_G.AutoDelete_ScavengerLastTriggerReason = "after-sell-merchant-closed-group-blocked"
 			else
@@ -12752,7 +13026,7 @@ scanner:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4)
 		if cachedProfile and cachedProfile.enabled and cachedProfile.summonScavenger and cachedProfile.summonAfterClose then
 			if _G.AutoDelete_ScavengerCombatAllowed(cachedProfile) then
 				_G.AutoDelete_ScavengerLastTriggerReason = "after-vendor-close"
-				DelayedSummon(1.5)
+				DelayedSummon(1.0)
 			elseif _G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(cachedProfile) then
 				_G.AutoDelete_ScavengerLastTriggerReason = "after-vendor-close-group-blocked"
 			else
@@ -13088,8 +13362,8 @@ end
 -- Bag-full auto-summon threshold fallback. The Goblin Merchant fires when
 -- free slots drop to or below this value. Default 3 so the merchant arrives
 -- before bags are completely full, leaving room for additional drops while
--- vendoring. The actual threshold is now user-configurable via the Tools
--- tab (profile.goblinMerchantBagThreshold); this constant only acts as a
+-- vendoring. The actual threshold is user-configurable on the Pets tab
+-- (profile.bagSpaceWarnThreshold); this constant only acts as a
 -- safety fallback when the profile field is missing or non-numeric.
 local BAGS_NEAR_FULL_THRESHOLD = 3
 
@@ -13110,7 +13384,7 @@ end
 -- summoned. Prevents transient fills (loot a stack that auto-merges with an
 -- existing stack a moment later) from triggering a stray summon.
 --
--- Tuned three times:
+-- Tuning history:
 --   v3.17: 3.0 -> 1.5 (faster merchant pop when bags genuinely stuck full)
 --   v3.20: 1.5 -> 2.0 (give the delete scanner time to clear loot bursts
 --          before the merchant fires)
@@ -13121,7 +13395,10 @@ end
 --          PLUS the bag-full check now defers while the delete pipeline is
 --          active. This absolute cap only applies once AutoDelete has scanned
 --          and found no deletable candidates.)
-local BAGS_FULL_DELAY = 3.5
+--   2026-07-17: 3.5 -> 1.0. Queue and recent-activity gates now provide the
+--          real delete-pipeline protection, so another 3.5 seconds after the
+--          bags are already settled only hides the configured slot threshold.
+local BAGS_FULL_DELAY = 1.0
 
 -- ============================================================================
 -- User-dismiss vs leash classification (timing-based)
@@ -13253,7 +13530,11 @@ function _G.AutoDelete_HandleTrackedCompanionGone(p, combatOk, now, allowSwapSup
 		elseif (now - lastSummonAt) < USER_DISMISS_WINDOW then
 			userDismissUntil = now + USER_DISMISS_GRACE
 			activeTracked = nil
-		elseif p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= GetGoblinBagThreshold(p) and combatOk then
+		elseif p.summonMerchantWhenBagsFull
+			and _G.AutoDelete_IsAtOrBelowGoblinMerchantThreshold(
+				ComputeTotalFreeSlots(),
+				GetGoblinBagThreshold(p))
+			and combatOk then
 			if _G.AutoDelete_GoblinAutoBackoffActive and _G.AutoDelete_GoblinAutoBackoffActive() then
 				_G.AutoDelete_GoblinLastDeferReason = "summon-backoff"
 				activeTracked = nil
@@ -13266,13 +13547,24 @@ function _G.AutoDelete_HandleTrackedCompanionGone(p, combatOk, now, allowSwapSup
 			_G.AutoDelete_BagsFullQueueAtStart = nil
 		else
 			activeTracked = nil
-			if p.summonMerchantWhenBagsFull and ComputeTotalFreeSlots() <= GetGoblinBagThreshold(p) then
+			if p.summonMerchantWhenBagsFull
+				and _G.AutoDelete_IsAtOrBelowGoblinMerchantThreshold(
+					ComputeTotalFreeSlots(),
+					GetGoblinBagThreshold(p)) then
 				bagsFullArmed = true
 				bagsFullSince = nil
 				_G.AutoDelete_BagsFullQueueAtStart = nil
 			end
 		end
 	end
+end
+
+function _G.AutoDelete_ShouldRecoverStuckScavenger(activePet, scavengerIsUp, merchantShown, combatAllowed, playerMounted)
+	return activePet == "scavenger"
+		and scavengerIsUp == true
+		and not merchantShown
+		and combatAllowed == true
+		and not playerMounted
 end
 
 companionWatcher:SetScript("OnUpdate", function(_, elapsed)
@@ -13293,17 +13585,26 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 		return
 	end
 
-	-- Summon gate. When summonOnlyInCombat is enabled, automatic summon paths
-	-- only fire while the player is in combat. When the group guard is enabled,
-	-- they do not fire in parties or raids.
-	local combatOk = (not (_G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(p)))
-		and ((not p.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player")))
+	-- Pet-specific summon gates. Only in Combat belongs to Greedy Scavenger;
+	-- Goblin Merchant honors the shared party/raid guard but not that Scavenger
+	-- option.
+	local scavengerBlockReason = _G.AutoDelete_GetScavengerSummonBlockReason(p)
+	local combatOk = scavengerBlockReason == nil
+	local merchantBlockReason = _G.AutoDelete_GetGoblinMerchantSummonBlockReason(p)
+	local merchantOk = merchantBlockReason == nil
 
 	-- (0) Loot-based stuck detection (only for scavenger; merchant doesn't loot).
 	-- We don't run this every tick - only when there's something to evaluate.
 	-- The check is cheap: walk the ring buffer to count recent loots, compare
 	-- to the scav's last chat timestamp.
-	if activeTracked == "scavenger" and combatOk and not IsPlayerMountedOrFlying() then
+	local _, trackedScavengerUp = FindCompanionById(SCAVENGER_CREATURE_ID, "greedy scavenger")
+	local merchantShown = MerchantFrame and MerchantFrame:IsShown()
+	if _G.AutoDelete_ShouldRecoverStuckScavenger(
+		activeTracked,
+		trackedScavengerUp,
+		merchantShown,
+		combatOk,
+		IsPlayerMountedOrFlying()) then
 		local nowLoot = GetTime()
 
 		-- Prune in place to avoid per-tick table churn while farming.
@@ -13325,9 +13626,25 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 		if #recentPlayerLootTimes >= LOOT_STUCK_PLAYER_MIN then
 			local oldestLoot = recentPlayerLootTimes[1]
 			if lastScavLootChatAt < oldestLoot then
-				-- Re-summon. The summon helper handles state updates.
+				-- This dismissal is intentional recovery, so clear tracking before
+				-- COMPANION_UPDATE can misclassify it as a lost pet and queue a
+				-- duplicate summon.
+				activeTracked = nil
 				if DismissCompanion then DismissCompanion("CRITTER") end
-				AfterDelay(0.4, function() SummonGreedyScavenger(true) end)
+				AfterDelay(0.4, function()
+					-- Respect a Merchant opened, or another companion selected, during
+					-- the recovery delay. Replacing either would close the vendor or
+					-- override the player's choice.
+					if MerchantFrame and MerchantFrame:IsShown() then
+						_G.AutoDelete_ScavengerLastSummonResult = "stuck-recovery-merchant-open"
+						return
+					end
+					if IsOtherCompanionSummoned("greedy scavenger") then
+						_G.AutoDelete_ScavengerLastSummonResult = "stuck-recovery-companion-changed"
+						return
+					end
+					SummonGreedyScavenger(true)
+				end)
 				-- Clear the ring so we don't immediately re-fire.
 				recentPlayerLootTimes = {}
 			end
@@ -13376,7 +13693,8 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 	if activeTracked and not inUserDismissGrace then
 		-- Polling path guards user intent: if the user swapped to another pet,
 		-- stop tracking and do not force a re-summon.
-		_G.AutoDelete_HandleTrackedCompanionGone(p, combatOk, pollNow, true)
+		local trackedSummonAllowed = (activeTracked == "merchant") and merchantOk or combatOk
+		_G.AutoDelete_HandleTrackedCompanionGone(p, trackedSummonAllowed, pollNow, true)
 	end
 
 	-- (3) Bag-full auto-summon. See BAGS_FULL_DELAY above for debounce.
@@ -13396,17 +13714,14 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 		local free = ComputeTotalFreeSlots()
 		local qLen = #_G.AutoDelete_DeleteQueue.items
 		local threshold = GetGoblinBagThreshold(p)
+		local thresholdReached = _G.AutoDelete_IsAtOrBelowGoblinMerchantThreshold(free, threshold)
 		local now = GetTime()
 
-		if not combatOk then
+		if not merchantOk then
 			bagsFullSince = nil
 			_G.AutoDelete_BagsFullQueueAtStart = nil
-			if _G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(p) then
-				_G.AutoDelete_GoblinLastDeferReason = "group-blocked"
-			else
-				_G.AutoDelete_GoblinLastDeferReason = "combat-blocked"
-			end
-		elseif free > threshold then
+			_G.AutoDelete_GoblinLastDeferReason = merchantBlockReason or "disabled"
+		elseif not thresholdReached then
 			-- Bags above threshold: full reset. Drain caught up OR loot
 			-- stopped on its own.
 			bagsFullSince = nil
@@ -13419,7 +13734,7 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 				DelayedSummon(1.0)
 			end
 		elseif (not bagsFullArmed)
-			and combatOk
+			and merchantOk
 			and not (_G.AutoDelete_GoblinConfirmPending or false)
 			and not (_G.AutoDelete_GoblinAutoBackoffActive and _G.AutoDelete_GoblinAutoBackoffActive()) then
 			-- If a prior Merchant summon attempt failed or was dropped while
@@ -13429,7 +13744,7 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 			bagsFullSince = nil
 			_G.AutoDelete_BagsFullQueueAtStart = nil
 			_G.AutoDelete_GoblinLastDeferReason = "rearmed-still-full"
-		elseif bagsFullArmed and combatOk then
+		elseif bagsFullArmed and merchantOk then
 			-- Bags below threshold. Record WHEN they first dropped (used
 			-- to compare against LastDeleteWalkAt to detect "has pipeline
 			-- scanned since bags filled?").
@@ -13483,8 +13798,9 @@ companionWatcher:SetScript("OnUpdate", function(_, elapsed)
 				-- Start timer immediately; Goblin is the right answer.
 				local fireReason = noDeleteRulesActive and "no-delete-rules" or "no-deletable-candidates"
 				local waitReason = noDeleteRulesActive and "no-delete-rules-waiting" or "found-nothing-waiting"
-				if not bagsFullSince then
-					bagsFullSince = now
+				local quietSince = _G.AutoDelete_GetGoblinMerchantQuietSince(bagsFullSince, scanner.lastBagUpdateAt, now)
+				if quietSince ~= bagsFullSince then
+					bagsFullSince = quietSince
 					_G.AutoDelete_BagsFullQueueAtStart = qLen
 				elseif (now - bagsFullSince) >= BAGS_FULL_DELAY then
 					if _G.AutoDelete_GoblinAutoBackoffActive and _G.AutoDelete_GoblinAutoBackoffActive() then
@@ -13605,9 +13921,10 @@ companionEventFrame:SetScript("OnEvent", function(_, event)
 
 	if not activeTracked then return end
 
-	-- Summon gate: combat toggle plus optional party/raid block.
-	local combatOk = (not (_G.AutoDelete_IsCompanionSummonBlockedByGroup and _G.AutoDelete_IsCompanionSummonBlockedByGroup(p)))
-		and ((not p.summonOnlyInCombat) or (UnitAffectingCombat and UnitAffectingCombat("player")))
+	-- Use the gate for the pet being tracked. Only Scavenger is affected by
+	-- Only in Combat; Merchant remains eligible outside combat.
+	local combatOk = _G.AutoDelete_GetScavengerSummonBlockReason(p) == nil
+	local merchantOk = _G.AutoDelete_GetGoblinMerchantSummonBlockReason(p) == nil
 
 	-- Suppress while mounted - WoW handles companion despawn natively.
 	if IsPlayerMountedOrFlying() then return end
@@ -13617,7 +13934,8 @@ companionEventFrame:SetScript("OnEvent", function(_, event)
 
 	-- Event path favors fast response and shares the same classification and
 	-- re-summon logic as polling, without swap-suppression checks.
-	_G.AutoDelete_HandleTrackedCompanionGone(p, combatOk, now, false)
+	local trackedSummonAllowed = (activeTracked == "merchant") and merchantOk or combatOk
+	_G.AutoDelete_HandleTrackedCompanionGone(p, trackedSummonAllowed, now, false)
 end)
 
 -- ============================================================================

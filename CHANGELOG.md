@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 No changes yet.
 
+## [3.30.2] - 2026-07-17
+
+### Hot Fix
+
+- Process Bags updates again. New bag items appear when they are ready. You no longer need to open Process Bags first.
+- Merchant uses your bag setting. A setting of 2 now summons it at 2 free slots after bags stop changing for one second.
+- Merchant and Scavenger switch correctly. They no longer get stuck when changing pets.
+- Merchant waits until selling is done before closing. Only in Combat keeps it open when you are not fighting.
+- Known weapon affixes no longer show a missing dot. Unknown fixed affixes stay protected without a dot.
+- Tier I through VI affix boxes now fit inside the card.
+
 ## [3.30.1] - 2026-07-10
 
 ### Hot Fix
