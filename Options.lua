@@ -930,6 +930,7 @@ local DEFAULT_PROFILE = {
 	knownRecipeSellBoE      = true,
 	knownRecipeSellBoP      = true,
 	autoCloseMerchantAfterSell = true,
+	autoCloseMerchantOnlyInCombat = true,
 	protectAffixFromSell = false, -- legacy migration source
 	affixIlvlMin         = 0,     -- legacy; no longer used
 	protectAffixTier1    = false,
@@ -4546,7 +4547,7 @@ local function BuildUI(self)
 				sections = {
 					{ icon = "Interface\\Icons\\Ability_Hunter_BeastCall", title = "Summon Scavenger", body = "Manages your Greedy Scavenger pet and brings it back when it gets stuck or after you mount. The sub-toggles pick when to resummon: After sell, After vendor close, and Only in Combat." },
 					{ icon = "Interface\\Icons\\INV_Misc_Coin_16", title = "Summon Merchant", body = "Summons your Goblin Merchant once your bags stay nearly full for the configured delay. Target the merchant and press your Interact key to open the shop." },
-					{ icon = "Interface\\Icons\\INV_Misc_Coin_01", title = "Auto-Close after sell", body = "On the Summon Merchant card, this closes the vendor after AutoDelete finishes selling. Turn it off if you want the vendor to stay open." },
+					{ icon = "Interface\\Icons\\INV_Misc_Coin_01", title = "Auto-Close after Sell", body = "Closes the Merchant after AutoDelete finishes selling. Only in Combat keeps it open when you are not fighting." },
 					{ icon = "Interface\\Icons\\INV_Misc_GroupLooking", title = "No Group Summons", body = "Blocks AutoDelete from auto-summoning Greedy Scavenger or Goblin Merchant while you are in a party or raid." },
 					{ icon = "Interface\\Icons\\Ability_Vanish", title = "Hide Greedy Spam", body = "Hides the Greedy Scavenger chat messages and speech bubbles while AutoDelete is enabled. It only quiets the noise, it does not change cleanup rules." },
 				}
@@ -4751,11 +4752,20 @@ local function BuildUI(self)
 	tglSummonMerchant:SetSize(cardW - CARD_INNER_PAD_X * 2, 20)
 	self._tglSummonMerchant = tglSummonMerchant
 
-	local tglCloseVendor = MakeSubToggle(gCard2, "Auto-Close after sell", C_DK_RED,
-		"Closes the vendor after AutoDelete finishes selling. Turn this off if you want the vendor to stay open.")
+	local tglCloseVendor = MakeSubToggle(gCard2, "Auto-Close after Sell", C_DK_RED,
+		"Closes the Merchant after AutoDelete finishes selling.")
 	tglCloseVendor:SetPoint("TOPLEFT", SUBTGL_INDENT, -(CARD_INNER_PAD_Y + 24))
 	tglCloseVendor:SetWidth(cardW - SUBTGL_INDENT - CARD_INNER_PAD_X)
 	self._tglCloseVendor = tglCloseVendor
+
+	do
+		local closeCombatIndent = SUBTGL_INDENT + 18
+		local tglCloseVendorOnlyInCombat = MakeSubToggle(gCard2, "Only in Combat", C_DK_RED,
+			"Only close the Merchant after selling while you are in combat.")
+		tglCloseVendorOnlyInCombat:SetPoint("TOPLEFT", closeCombatIndent, -(CARD_INNER_PAD_Y + 40))
+		tglCloseVendorOnlyInCombat:SetWidth(cardW - closeCombatIndent - CARD_INNER_PAD_X)
+		self._tglCloseVendorOnlyInCombat = tglCloseVendorOnlyInCombat
+	end
 
 	-- CARD 3 (Pets): shared summon rules + Hide Greedy Spam. Four rows:
 	-- group guard, spam suppression, merchant threshold label, and count.
@@ -5165,6 +5175,7 @@ local function BuildUI(self)
 	--   Row 2: No Auto-Sell label
 	--   Row 3: short explanation
 	--   Row 4: Tier I-VI checkboxes in one row
+	do
 	local card2Title = MakeText(aCard1, 11, C_ACCENT, "OUTLINE")
 	card2Title:SetPoint("TOPLEFT", CARD_INNER_PAD_X, -6)
 	card2Title:SetText("Affix Protection")
@@ -5181,24 +5192,29 @@ local function BuildUI(self)
 	affixProtHint:SetNonSpaceWrap(false)
 	affixProtHint:SetText("Checked tiers are protected before Delete, Sell, or One-Key Disenchant.")
 
+	local affixTierLayout = _G.AutoDelete_OptionsLayout.AffixTierRowLayout(cardW)
 	local function MakeAffixTierToggle(label, field, xOff)
 		local row = CreateFrame("Button", nil, aCard1)
-		row:SetSize(30, 20)
+		row:SetSize(affixTierLayout.rowW, affixTierLayout.rowH)
 		row:SetPoint("TOPLEFT", CARD_INNER_PAD_X + xOff, -68)
 
 		local box = CreateFrame("Frame", nil, row)
-		box:SetSize(14, 14)
+		box:SetSize(affixTierLayout.boxSize, affixTierLayout.boxSize)
 		box:SetPoint("LEFT", 0, 0)
 		ApplyBackdrop(box, C_ROW_ODD, C_BORDER)
 
 		local mark = box:CreateTexture(nil, "OVERLAY")
 		mark:SetTexture("Interface\\AddOns\\AutoDelete\\textures\\checkmark.tga")
 		mark:SetPoint("CENTER", box, "CENTER", 0, 0)
-		mark:SetSize(14, 14)
+		mark:SetSize(affixTierLayout.boxSize, affixTierLayout.boxSize)
 		mark:Hide()
 
-		local text = MakeText(row, 9, C_TEXT, "OUTLINE")
-		text:SetPoint("LEFT", box, "RIGHT", 3, 0)
+		local text = MakeText(row, 8, C_TEXT, "OUTLINE")
+		text:SetPoint("LEFT", box, "RIGHT", affixTierLayout.textGap, 0)
+		text:SetWidth(affixTierLayout.maxLabelWidth)
+		text:SetJustifyH("LEFT")
+		text:SetWordWrap(true)
+		text:SetNonSpaceWrap(false)
 		text:SetText(label)
 
 		local function UpdateVisual()
@@ -5233,14 +5249,20 @@ local function BuildUI(self)
 		return row
 	end
 
-	self._tglAffixTiers = {
-		MakeAffixTierToggle("I",   "protectAffixTier1", 0),
-		MakeAffixTierToggle("II",  "protectAffixTier2", 31),
-		MakeAffixTierToggle("III", "protectAffixTier3", 62),
-		MakeAffixTierToggle("IV",  "protectAffixTier4", 93),
-		MakeAffixTierToggle("V",   "protectAffixTier5", 124),
-		MakeAffixTierToggle("VI",  "protectAffixTier6", 155),
+	self._tglAffixTiers = {}
+	local tierFields = {
+		{ "I", "protectAffixTier1" },
+		{ "II", "protectAffixTier2" },
+		{ "III", "protectAffixTier3" },
+		{ "IV", "protectAffixTier4" },
+		{ "V", "protectAffixTier5" },
+		{ "VI", "protectAffixTier6" },
 	}
+	for tier, field in ipairs(tierFields) do
+		self._tglAffixTiers[tier] = MakeAffixTierToggle(field[1], field[2],
+			affixTierLayout.xOffsets[tier])
+	end
+	end
 
 	-- Affix Tab Card 2: Affix Display (moved from Filters tab in v3.20
 	-- alongside Affix Protection so all affix tooling lives together).
@@ -7512,6 +7534,15 @@ local function BuildUI(self)
 		end
 	end)
 
+	self._tglCloseVendorOnlyInCombat:SetScript("OnClick", function(btn)
+		btn._checked = not btn._checked
+		btn:SetChecked(btn._checked)
+		GetActiveProfile(db).autoCloseMerchantOnlyInCombat = btn._checked
+		if _G.AutoDelete_RefreshCachedProfile then
+			_G.AutoDelete_RefreshCachedProfile()
+		end
+	end)
+
 	-- Goblin tab: Summon Scavenger sub-toggles
 	tglScavAfterSell:SetScript("OnClick", function(btn)
 		btn._checked = not btn._checked
@@ -8231,6 +8262,7 @@ local function BuildUI(self)
 		tglScavOnlyInCombat:SetChecked(p.summonOnlyInCombat)
 		tglSummonMerchant:SetChecked(p.summonMerchantWhenBagsFull)
 		tglCloseVendor:SetChecked(p.autoCloseMerchantAfterSell ~= false)
+		self._tglCloseVendorOnlyInCombat:SetChecked(p.autoCloseMerchantOnlyInCombat ~= false)
 		tglHideSpam:SetChecked(p.hideGreedySpam)
 		-- AutoInv tab toggles
 		tglAutoInvite:SetChecked(p.autoInviteEnabled)

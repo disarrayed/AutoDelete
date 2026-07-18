@@ -73,14 +73,14 @@ Four independent categories.
 - Tier I-VI checkboxes protect matching affix tiers before Delete, Sell, or One-Key Disenchant rules
 - "Refresh List" scans your Delete / Sell lists for items the filter would now save
 - "Update Affix List" asks the server for your learned affixes and opens AutoDelete's PEEv1-style affix mirror with Armor, Weapon, and Learned filters, search, family selection, tier icons, descriptions, and learned/locked states. It does not depend on PEE being loaded.
-- **Show/Keep Missing Affix**: only show the affix dot on items whose affixes you haven't learned yet and protect those missing affixes from Delete, Sell, and One-Key Disenchant cleanup.
+- **Show/Keep Missing Affix**: show the attention dot on items whose affix can be identified as unlearned, and protect missing or unresolved affixes from Delete, Sell, and One-Key Disenchant cleanup. Fixed proc weapons whose affix identity is not published by the server stay protected without a potentially false dot.
 - **Missing Affix Color**: choose the dot color for affixes your account has not learned. Defaults to `#ff3b41`.
 - **KeepOne Missing Affix**: protect one gear item for each missing affix from Delete, Sell, and One-Key Disenchant rules. Duplicate missing-affix gear can still clear through normal cleanup rules. It is a toggle, not a list, and learned affixes are ignored.
 - Affix dots are limited to eligible armor/weapon gear slots; cosmetic items such as tabards do not inherit dots from matching names.
 
 **Companion management**
 - Auto-summon Greedy Scavenger and Goblin Merchant
-- **Auto-Close after sell** is on the Pets tab in the Summon Merchant card: checked closes the vendor after AutoDelete finishes selling, unchecked leaves the vendor open.
+- **Auto-Close after Sell** is on the Pets tab in the Summon Merchant card. Turn it off to keep the Merchant open. **Only in Combat** is on by default. The Merchant closes only while you are in combat. Turn it off to close after every sale.
 - **Only in Combat** gates every automatic Greedy Scavenger summon, including After sell and After vendor close
 - **No Group Summons** blocks automatic Greedy Scavenger and Goblin Merchant summons while you are in a party or raid
 
